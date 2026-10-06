@@ -1,0 +1,85 @@
+# ==========================================
+# Python & Bytecode
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# ==========================================
+# Virtual Environments & Package Managers
+# ==========================================
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.uv/
+
+# ==========================================
+# Distribution / Packaging
+# ==========================================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ==========================================
+# FastF1, Telemetry Data & Cache
+# ==========================================
+data/cache/
+data/processed/
+hammertime_100/data/
+*.ff1pkl
+fastf1_http_cache*
+*.sqlite
+*.parquet
+
+# ==========================================
+# Model Weights & Checkpoints
+# ==========================================
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.joblib
+*.h5
+*.hdf5
+
+# ==========================================
+# Jupyter Notebooks & Streamlit
+# ==========================================
+.ipynb_checkpoints/
+.streamlit/secrets.toml
+
+# ==========================================
+# Testing & Coverage
+# ==========================================
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# ==========================================
+# Logs & Environment Files
+# ==========================================
+*.log
+logs/
+.env
+.env.*
+*.env
+
+# ==========================================
+# Operating System & IDEs
+# ==========================================
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

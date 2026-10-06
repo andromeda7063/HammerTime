@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════════
+# HAMMERTIME: CORE CONFIGURATION (50% IMPLEMENTATION)
+# Lightweight configuration for core functions & basic analytics
+# ═══════════════════════════════════════════════════════════════
+
+session:
+  year: 2023
+  gp: "Monza"
+  session_type: "R"
+  cache_dir: "data/cache"
+  processed_dir: "data/processed"
+
+track:
+  mini_sectors: 20
+
+preprocess:
+  sample_hz: 4.0
+  flag_safety_car: true
+
+graph:
+  num_nodes: 20
+  edge_threshold_sec: 2.0
+  rbf_sigma: 1.0
+
+target:
+  clean_air_gap_sec: 3.0
+
+data:
+  window_size: 10
+  horizon: 5
+  train_ratio: 0.8
+  val_ratio: 0.2
+
+model:
+  in_dim: 9
+  hidden_dim: 32
+  heads: 2
+  dropout: 0.1
+
+train:
+  batch_size: 32
+  lr: 0.002
+  max_epochs: 25

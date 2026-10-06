@@ -1,0 +1,100 @@
+# ═══════════════════════════════════════════════════════════════
+# HAMMERTIME: PRODUCTION CONFIGURATION (100% IMPLEMENTATION)
+# Client: Formula 1 · Broadcast Insights Division
+# Zero magic numbers: All parameters are declared here.
+# ═══════════════════════════════════════════════════════════════
+
+session:
+  year: 2023
+  gp: "Monza"
+  session_type: "R"
+  test_year: 2023
+  test_gp: "Silverstone"
+  cache_dir: "data/cache"
+  processed_dir: "data/processed"
+
+track:
+  mini_sectors: 20
+  lap_length_m: 5793.0   # Default circuit length in meters (e.g. Monza)
+
+preprocess:
+  sample_hz: 4.0         # 4 Hz uniform grid (0.25 s per step)
+  max_interpolate_sec: 1.0
+  flag_safety_car: true
+  flag_pit_laps: true
+
+graph:
+  num_nodes: 20          # 20 F1 cars
+  edge_threshold_sec: 2.0 # Immutable Law 1: Leader -> follower edge cutoff
+  rbf_sigma: 1.0         # Immutable Law 1: Gaussian RBF kernel width
+  node_features:
+    - "velocity"
+    - "throttle"
+    - "tyre_compound"    # One-hot encoded (SOFT, MEDIUM, HARD, INTERMEDIATE, WET)
+    - "tyre_age"
+    - "mini_sector_idx"
+  compound_categories:
+    - "SOFT"
+    - "MEDIUM"
+    - "HARD"
+    - "INTERMEDIATE"
+    - "WET"
+
+target:
+  clean_air_gap_sec: 3.0 # Immutable Law 2: Gap > 3 s defines clean air
+  min_clean_samples: 3
+  clip_delta_sec: [-2.0, 10.0]
+
+data:
+  window_size: 10        # W = 10 snapshots
+  horizon: 5             # K = 5 snapshots ahead
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  split_method: "race"   # "race" or "temporal" (NEVER random)
+  random_seed: 42
+
+model:
+  name: "HammerTime_STGNN"
+  in_dim: 9              # velocity (1) + throttle (1) + compound one-hot (5) + tyre_age (1) + mini_sector (1)
+  hidden_dim: 64
+  gat_heads: 4
+  edge_dim: 1
+  conv1d_kernel: 3
+  dropout: 0.1
+
+train:
+  batch_size: 32
+  lr: 0.001
+  weight_decay: 0.0001   # L2 regularization via Adam
+  max_epochs: 100
+  early_stopping_patience: 10
+  checkpoint_path: "best.pt"
+  num_workers: 0
+
+baselines:
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+  lstm:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+    lr: 0.001
+    epochs: 40
+
+physics_tests:
+  clean_air_max_mae: 0.05       # Clean air predicted penalty must be near 0 s
+  drs_train_min_lap_loss: 0.40  # Cumulative DRS train loss per lap: 0.4 s - 0.8 s
+  drs_train_max_lap_loss: 0.80
+
+presentation:
+  palette:
+    carbon_dark: "#15151E"
+    f1_red: "#E10600"
+    pure_white: "#FFFFFF"
+    accent_silver: "#A0A0A5"
+    drs_green: "#00D2BE"
+  font_family: "Titillium Web, sans-serif"
