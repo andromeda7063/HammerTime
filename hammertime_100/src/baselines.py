@@ -31,7 +31,7 @@ def extract_isolated_car_features(dataset_samples: list):
     Removes all graph edges, neighbor nodes, and attention weights.
     Returns:
       - X_seq: [N_total, W, in_dim] for LSTM
-      - X_flat: [N_total, in_dim] for XGBoost (uses last snapshot in window)
+      - X_flat: [N_total, W * in_dim] for XGBoost (flattened isolated-car history)
       - y: [N_total] target delta t_sector
     """
     X_seq_list = []
@@ -50,7 +50,7 @@ def extract_isolated_car_features(dataset_samples: list):
             # Extract single-car trajectory across window
             car_traj = np.stack([snap.x[c_idx].cpu().numpy() for snap in snaps], axis=0)  # [W, in_dim]
             X_seq_list.append(car_traj)
-            X_flat_list.append(car_traj[-1])  # latest snapshot features
+            X_flat_list.append(car_traj.reshape(-1))
             y_list.append(float(target[c_idx].item()))
 
     if not X_seq_list:
