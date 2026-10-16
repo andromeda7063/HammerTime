@@ -59,7 +59,23 @@ def load_report(path: str, modified: float) -> dict:
 def artifact(path: Path, loader):
     if not path.is_file():
         return None
-    return loader(str(path), path.stat().st_mtime)
+    try:
+        loaded = loader(str(path), path.stat().st_mtime)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        st.warning(f"Could not load `{path}`: {error}")
+        return None
+    if path.name == "aligned_telemetry.parquet":
+        required = {"Driver", "TimeSec", "LapNumber"}
+        missing = required.difference(loaded.columns) if isinstance(loaded, pd.DataFrame) else required
+        if missing:
+            st.warning(f"Telemetry artifact `{path}` is missing required fields: {', '.join(sorted(missing))}.")
+            return None
+    if path.name == "evaluation_report.json" and (
+        not isinstance(loaded, dict) or not isinstance(loaded.get("metrics", {}), dict)
+    ):
+        st.warning(f"Evaluation report `{path}` has an invalid structure.")
+        return None
+    return loaded
 
 
 def build_track_figure(frame: pd.DataFrame, selected_car: str, route: pd.DataFrame | None = None) -> go.Figure:
@@ -131,7 +147,8 @@ def render_report_metrics(report: dict | None) -> None:
     tests = report.get("physics_tests", [])
     for index, title in enumerate(("Clean-air check", "DRS-train check")):
         result = tests[index] if index < len(tests) else None
-        cols[index + 2].metric(title, ("PASS" if result.get("passed") else "FAIL") if result else "N/A")
+        status = "N/A" if not result or result.get("passed") is None else ("PASS" if result["passed"] else "FAIL")
+        cols[index + 2].metric(title, status)
 
 
 def render_visual(path: Path, label: str) -> None:
