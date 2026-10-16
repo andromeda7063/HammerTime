@@ -5,45 +5,57 @@ and directed disturbance edges scaled by RBF weights.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
 
-# Add visuals dir to path
-sys.path.append(os.path.dirname(__file__))
-from theme import (
-    apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
-    TEXT_MUTED, DRS_CYAN, TEAM_COLORS
-)
+try:
+    from .theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN, TEAM_COLORS
+    )
+except ImportError:  # Supports direct execution from the visuals directory.
+    from theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN, TEAM_COLORS
+    )
 
 
 def generate_track_map(
     car_positions: dict,
     edges: list,
-    circuit_name: str = "Autodromo Nazionale Monza",
+    circuit_name: str = "Circuit",
     lap_num: int = 31,
-    output_path: str = "visuals/v1_track_map.png"
+    output_path: str = "visuals/v1_track_map.png",
+    track_xy: np.ndarray = None,
 ):
     """
     Renders V1 broadcast track traffic map.
     car_positions: dict {driver_code: (x, y)} in circuit coords
     edges: list of tuples (leader_code, follower_code, rbf_weight, gap_sec)
     """
+    if not car_positions:
+        raise ValueError("car_positions must contain at least one driver")
+    for driver, position in car_positions.items():
+        if len(position) != 2 or not np.isfinite(np.asarray(position, dtype=float)).all():
+            raise ValueError(f"Position for {driver!r} must be a finite (x, y) pair")
     apply_broadcast_theme()
     fig, ax = plt.subplots(figsize=(12, 8), dpi=150)
     fig.patch.set_facecolor(CARBON_DARK)
     ax.set_facecolor(CARD_BG)
 
-    # Synthetic realistic Monza circuit layout outline
-    theta = np.linspace(0, 2 * np.pi, 300)
-    # Monza-like oblong perimeter
-    cx = 1000 * np.cos(theta) + 200 * np.sin(2 * theta)
-    cy = 400 * np.sin(theta) + 100 * np.cos(3 * theta)
-    ax.plot(cx, cy, color="#38384A", lw=8, zorder=1, label="Track Surface")
-    ax.plot(cx, cy, color="#5A5A6E", lw=2, linestyle="--", zorder=2)
+    if track_xy is not None:
+        track_xy = np.asarray(track_xy, dtype=float)
+        if track_xy.ndim != 2 or track_xy.shape[1] != 2:
+            raise ValueError("track_xy must have shape [points, 2]")
+        track_xy = track_xy[np.isfinite(track_xy).all(axis=1)]
+        if len(track_xy) > 1:
+            ax.plot(track_xy[:, 0], track_xy[:, 1], color="#38384A", lw=8, zorder=1, label="Track Surface")
+            ax.plot(track_xy[:, 0], track_xy[:, 1], color="#5A5A6E", lw=2, linestyle="--", zorder=2)
+    else:
+        ax.text(0.5, 0.50, "Circuit coordinates unavailable", transform=ax.transAxes,
+                color=TEXT_MUTED, ha="center", va="center")
 
     # Draw directed disturbance edges (leader -> follower)
     for leader, follower, weight, gap in edges:
@@ -79,7 +91,7 @@ def generate_track_map(
         # Driver label
         ax.text(
             x, y, drv,
-            color=CARBON_DARK if color in ["#FFFFFF", "#6CD3BF", "#00D2BE", "#B6BABD"] else PURE_WHITE,
+            color=CARBON_DARK if drv in {"HAM", "RUS", "MAG", "HUL"} else PURE_WHITE,
             fontsize=8, fontweight="bold", ha="center", va="center", zorder=6
         )
 

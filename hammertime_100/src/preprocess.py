@@ -17,6 +17,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("hammertime.preprocess")
 
 
+def _time_seconds(values: pd.Series) -> pd.Series:
+    """Convert FastF1 time values to seconds without changing their origin."""
+    if pd.api.types.is_timedelta64_dtype(values):
+        return values.dt.total_seconds()
+    return pd.to_numeric(values, errors="coerce")
+
+
 def load_config(config_path: str = "configs/default.yaml") -> dict:
     """Load configuration dictionary."""
     with open(config_path, "r", encoding="utf-8") as f:
@@ -30,7 +37,10 @@ def align_driver_telemetry(
     sample_hz: float = 4.0,
     max_interpolate_sec: float = 1.0,
     mini_sectors: int = 20,
-    lap_length_m: float = 5793.0
+    lap_length_m: float = 5793.0,
+    time_grid: np.ndarray | None = None,
+    flag_safety_car: bool = True,
+    flag_pit_laps: bool = True,
 ) -> pd.DataFrame:
     """
     Resamples a single driver's telemetry to a uniform time grid.
@@ -39,59 +49,96 @@ def align_driver_telemetry(
     if tel_df.empty:
         logger.warning(f"Driver {driver} has no telemetry data.")
         return pd.DataFrame()
+    if sample_hz <= 0 or max_interpolate_sec < 0:
+        raise ValueError("sample_hz must be positive and max_interpolate_sec must not be negative.")
+    if mini_sectors <= 0 or lap_length_m <= 0:
+        raise ValueError("mini_sectors and lap_length_m must be positive.")
 
-    # Ensure Time column is in seconds
-    if pd.api.types.is_timedelta64_dtype(tel_df["Time"]):
-        tel_df["TimeSec"] = tel_df["Time"].dt.total_seconds()
-    elif "TimeSec" not in tel_df.columns:
-        tel_df["TimeSec"] = tel_df["Time"].astype(float)
+    tel_df = tel_df.copy()
+    # Ensure Time column is in seconds.
+    if "TimeSec" in tel_df.columns:
+        tel_df["TimeSec"] = _time_seconds(tel_df["TimeSec"])
+    elif "Time" in tel_df.columns:
+        tel_df["TimeSec"] = _time_seconds(tel_df["Time"])
+    else:
+        raise ValueError("Telemetry must contain a Time or TimeSec column.")
 
-    tel_sorted = tel_df.sort_values("TimeSec").drop_duplicates(subset=["TimeSec"])
+    tel_sorted = tel_df.dropna(subset=["TimeSec"]).sort_values("TimeSec").drop_duplicates(subset=["TimeSec"])
+    if tel_sorted.empty:
+        logger.warning(f"Driver {driver} has no valid timestamps.")
+        return pd.DataFrame()
     t_start = tel_sorted["TimeSec"].min()
     t_end = tel_sorted["TimeSec"].max()
 
     dt = 1.0 / sample_hz
-    uniform_times = np.arange(t_start, t_end, dt)
+    if time_grid is None:
+        uniform_times = np.arange(t_start, t_end + dt * 1e-6, dt)
+    else:
+        uniform_times = np.asarray(time_grid, dtype=float)
 
     # Base grid
     resampled = pd.DataFrame({"TimeSec": uniform_times})
     resampled["Driver"] = driver
 
-    # Interpolate numerical columns
+    # Interpolate numerical columns only across short, observed gaps. Rows outside
+    # a driver's telemetry coverage remain invalid on the shared race time grid.
+    row_valid = (uniform_times >= t_start) & (uniform_times <= t_end)
     interp_cols = ["Speed", "Throttle", "Brake", "Distance", "X", "Y", "Z"]
     for col in interp_cols:
         if col in tel_sorted.columns:
-            valid = tel_sorted[["TimeSec", col]].dropna()
+            valid = tel_sorted[["TimeSec", col]].copy()
+            valid[col] = pd.to_numeric(valid[col], errors="coerce")
+            valid = valid.dropna()
+            values = np.full(len(uniform_times), np.nan, dtype=float)
             if len(valid) > 1:
-                resampled[col] = np.interp(
-                    uniform_times, valid["TimeSec"].values, valid[col].values
+                source_times = valid["TimeSec"].to_numpy(dtype=float)
+                source_values = valid[col].to_numpy(dtype=float)
+                values[:] = np.interp(uniform_times, source_times, source_values)
+                right = np.searchsorted(source_times, uniform_times, side="left")
+                exact = (right < len(source_times)) & np.isclose(
+                    source_times[np.minimum(right, len(source_times) - 1)], uniform_times, atol=1e-9
                 )
-            else:
-                resampled[col] = 0.0
+                left_idx = np.maximum(right - 1, 0)
+                right_idx = np.minimum(right, len(source_times) - 1)
+                bracket_gap = source_times[right_idx] - source_times[left_idx]
+                supported = (uniform_times >= source_times[0]) & (uniform_times <= source_times[-1])
+                supported &= exact | (bracket_gap <= max_interpolate_sec + 1e-9)
+                values[~supported] = np.nan
+            elif len(valid) == 1:
+                source_time = float(valid["TimeSec"].iloc[0])
+                exact = np.isclose(uniform_times, source_time, atol=1e-9)
+                values[exact] = float(valid[col].iloc[0])
+            resampled[col] = values
+            if col in ("Speed", "Throttle", "Distance"):
+                row_valid &= np.isfinite(values)
         else:
-            resampled[col] = 0.0
+            resampled[col] = np.nan
+            if col in ("Speed", "Throttle", "Distance"):
+                row_valid[:] = False
+    resampled["IsValid"] = row_valid
 
     # Attach Lap information
+    resampled["LapNumber"] = 1
+    resampled["Compound"] = "MEDIUM"
+    resampled["Team"] = None
+    resampled["TyreLife"] = 1.0
+    resampled["IsPitLap"] = False
+    resampled["IsSafetyCar"] = False
     if not laps_df.empty:
         # Match each timestamp to its corresponding lap
         laps_sorted = laps_df.sort_values("LapNumber").copy()
-        if "LapStartTime" in laps_sorted.columns and pd.api.types.is_timedelta64_dtype(laps_sorted["LapStartTime"]):
-            laps_sorted["LapStartSec"] = laps_sorted["LapStartTime"].dt.total_seconds()
+        if "LapStartTime" in laps_sorted.columns:
+            laps_sorted["LapStartSec"] = _time_seconds(laps_sorted["LapStartTime"])
         else:
-            laps_sorted["LapStartSec"] = 0.0
-
-        # Assign lap number, compound, tyre age, pit status, track status
-        resampled["LapNumber"] = 1
-        resampled["Compound"] = "MEDIUM"
-        resampled["TyreLife"] = 1
-        resampled["IsPitLap"] = False
-        resampled["IsSafetyCar"] = False
+            laps_sorted["LapStartSec"] = np.nan
 
         for _, lap in laps_sorted.iterrows():
             lap_num = int(lap.get("LapNumber", 1))
-            lap_start = lap.get("LapStartSec", 0.0)
+            lap_start = lap.get("LapStartSec", np.nan)
             lap_time = lap.get("LapTime")
-            lap_dur = lap_time.total_seconds() if pd.notnull(lap_time) and hasattr(lap_time, "total_seconds") else 90.0
+            lap_dur = lap_time.total_seconds() if pd.notnull(lap_time) and hasattr(lap_time, "total_seconds") else np.nan
+            if pd.isna(lap_start) or pd.isna(lap_dur) or lap_dur <= 0:
+                continue
             lap_end = lap_start + lap_dur
 
             mask = (resampled["TimeSec"] >= lap_start) & (resampled["TimeSec"] < lap_end)
@@ -99,34 +146,45 @@ def align_driver_telemetry(
                 resampled.loc[mask, "LapNumber"] = lap_num
                 compound = str(lap.get("Compound", "MEDIUM")).upper()
                 resampled.loc[mask, "Compound"] = compound if compound in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] else "MEDIUM"
+                team = lap.get("Team")
+                if pd.notna(team):
+                    resampled.loc[mask, "Team"] = str(team)
                 resampled.loc[mask, "TyreLife"] = float(lap.get("TyreLife", 1.0))
                 
                 # Check pit
-                if pd.notnull(lap.get("PitInTime")) or pd.notnull(lap.get("PitOutTime")):
+                if flag_pit_laps and (pd.notnull(lap.get("PitInTime")) or pd.notnull(lap.get("PitOutTime"))):
                     resampled.loc[mask, "IsPitLap"] = True
                 
                 # Check track status for safety car (status 4 = SC, 6 = VSC)
                 status = str(lap.get("TrackStatus", "1"))
-                if "4" in status or "5" in status or "6" in status:
+                if flag_safety_car and ("4" in status or "5" in status or "6" in status):
                     resampled.loc[mask, "IsSafetyCar"] = True
 
     # Calculate mini-sector index [0, M-1] based on distance within lap
-    dist_in_lap = resampled["Distance"] % lap_length_m
+    dist_in_lap = resampled["Distance"].fillna(0.0) % lap_length_m
     sector_len = lap_length_m / mini_sectors
     resampled["MiniSector"] = np.clip(np.floor(dist_in_lap / sector_len).astype(int), 0, mini_sectors - 1)
 
     return resampled
 
 
-def compute_time_gaps(aligned_grid: pd.DataFrame, sample_hz: float = 4.0) -> pd.DataFrame:
+def compute_time_gaps(
+    aligned_grid: pd.DataFrame,
+    sample_hz: float = 4.0,
+    lap_length_m: float = 5793.0,
+) -> pd.DataFrame:
     """
     Computes the time gap Delta t_ij to the immediate car ahead at every timestamp.
     Delta t_ij = Distance_ahead / Speed_follower
     """
     results = []
-    # Group by uniform timestamp
-    for t, group in aligned_grid.groupby("TimeSec"):
-        active = group[~group["IsPitLap"]].copy()
+    # Group by race and timestamp so concatenated sessions never affect one
+    # another's running order or leader/follower gaps.
+    group_keys = ["RaceId", "TimeSec"] if "RaceId" in aligned_grid.columns else ["TimeSec"]
+    for _, group in aligned_grid.groupby(group_keys, sort=True):
+        group = group.copy()
+        valid_rows = group.get("IsValid", pd.Series(True, index=group.index)).fillna(False).astype(bool)
+        active = group[~group["IsPitLap"].fillna(False).astype(bool) & valid_rows].copy()
         if len(active) <= 1:
             group["DriverAhead"] = None
             group["DeltaT"] = np.nan
@@ -134,7 +192,13 @@ def compute_time_gaps(aligned_grid: pd.DataFrame, sample_hz: float = 4.0) -> pd.
             continue
 
         # Sort cars by track progression (LapNumber then Distance)
-        active = active.sort_values(by=["LapNumber", "Distance"], ascending=False)
+        # Distance may be cumulative for some sources and lap-relative for others.
+        # Reconstruct race distance to handle both conventions and lap crossings.
+        active["RaceDistance"] = (
+            (active["LapNumber"].astype(float) - 1.0) * lap_length_m
+            + active["Distance"].astype(float).mod(lap_length_m)
+        )
+        active = active.sort_values(by="RaceDistance", ascending=False)
         active_drivers = active["Driver"].tolist()
         
         # Leader of group has no car ahead
@@ -148,11 +212,11 @@ def compute_time_gaps(aligned_grid: pd.DataFrame, sample_hz: float = 4.0) -> pd.
             fol_row = active[active["Driver"] == follower].iloc[0]
             lead_row = active[active["Driver"] == leader].iloc[0]
             
-            dist_diff = lead_row["Distance"] - fol_row["Distance"]
+            dist_diff = lead_row["RaceDistance"] - fol_row["RaceDistance"]
             fol_speed_ms = max(fol_row["Speed"] / 3.6, 10.0)  # avoid div by zero; km/h to m/s
             
             # If distance difference is positive and plausible
-            if 0 < dist_diff < 1000.0:
+            if dist_diff > 0:
                 dt_gap = dist_diff / fol_speed_ms
             else:
                 dt_gap = 99.0
@@ -173,27 +237,59 @@ def process_race(session, config: dict) -> pd.DataFrame:
     """
     sample_hz = config["preprocess"]["sample_hz"]
     max_interp = config["preprocess"]["max_interpolate_sec"]
+    flag_safety_car = config["preprocess"].get("flag_safety_car", True)
+    flag_pit_laps = config["preprocess"].get("flag_pit_laps", True)
     mini_sectors = config["track"]["mini_sectors"]
     lap_length_m = config["track"]["lap_length_m"]
 
-    all_driver_dfs = []
+    if sample_hz <= 0:
+        raise ValueError("preprocess.sample_hz must be positive.")
     drivers = session.drivers
     logger.info(f"Preprocessing telemetry for {len(drivers)} drivers at {sample_hz} Hz...")
 
+    raw_drivers = []
     for d in drivers:
         try:
             drv_laps = session.laps.pick_driver(d)
             if drv_laps.empty:
                 continue
             drv_tel = drv_laps.get_telemetry()
+            if drv_tel.empty:
+                continue
+            time_column = "TimeSec" if "TimeSec" in drv_tel.columns else "Time"
+            if time_column not in drv_tel.columns:
+                raise ValueError(f"Driver {d} telemetry has no Time or TimeSec column.")
+            drv_tel = drv_tel.copy()
+            drv_tel["TimeSec"] = _time_seconds(drv_tel[time_column])
+            drv_tel = drv_tel.dropna(subset=["TimeSec"])
+            if drv_tel.empty:
+                continue
+            raw_drivers.append((d, drv_tel, drv_laps))
+        except Exception as err:
+            logger.warning(f"Failed to load telemetry for driver {d}: {err}")
+
+    if not raw_drivers:
+        raise ValueError("No driver telemetry could be loaded.")
+
+    dt = 1.0 / sample_hz
+    session_start = min(tel["TimeSec"].min() for _, tel, _ in raw_drivers)
+    session_end = max(tel["TimeSec"].max() for _, tel, _ in raw_drivers)
+    time_grid = np.arange(session_start, session_end + dt * 1e-6, dt)
+    all_driver_dfs = []
+    for d, drv_tel, drv_laps in raw_drivers:
+        try:
             aligned = align_driver_telemetry(
                 d, drv_tel, drv_laps,
                 sample_hz=sample_hz,
                 max_interpolate_sec=max_interp,
                 mini_sectors=mini_sectors,
-                lap_length_m=lap_length_m
+                lap_length_m=lap_length_m,
+                time_grid=time_grid,
+                flag_safety_car=flag_safety_car,
+                flag_pit_laps=flag_pit_laps,
             )
-            all_driver_dfs.append(aligned)
+            if not aligned.empty:
+                all_driver_dfs.append(aligned)
         except Exception as err:
             logger.warning(f"Failed to align driver {d}: {err}")
 
@@ -201,11 +297,21 @@ def process_race(session, config: dict) -> pd.DataFrame:
         raise ValueError("No driver telemetry could be aligned.")
 
     combined = pd.concat(all_driver_dfs, ignore_index=True)
+    session_cfg = config.get("session", {})
+    race_id = session_cfg.get("race_id") or (
+        f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"
+        f"{session_cfg.get('session_type', 'R')}"
+    )
+    combined["RaceId"] = str(race_id)
     logger.info(f"Total aligned rows before gap calculation: {len(combined)}")
 
     # Compute time gaps to driver ahead
     logger.info("Computing dynamic leader-follower gaps (Delta t)...")
-    processed = compute_time_gaps(combined, sample_hz=sample_hz)
+    processed = compute_time_gaps(
+        combined,
+        sample_hz=sample_hz,
+        lap_length_m=lap_length_m,
+    )
 
     # Save to processed directory
     out_dir = Path(config["session"]["processed_dir"])

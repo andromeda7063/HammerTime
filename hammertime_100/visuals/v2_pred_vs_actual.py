@@ -4,30 +4,41 @@ Scatter plot with 45-degree parity line, annotated R² and MAE.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.append(os.path.dirname(__file__))
-from theme import (
-    apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
-    TEXT_MUTED, DRS_CYAN
-)
+try:
+    from .theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN
+    )
+except ImportError:
+    from theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN
+    )
 
 
 def generate_pred_vs_actual_plot(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    mae: float,
-    r2: float,
+    mae: float | None,
+    r2: float | None,
     circuit_name: str = "Monza",
     output_path: str = "visuals/v2_pred_vs_actual.png"
 ):
     """
     Renders V2 Predicted vs Actual scatter plot with parity line and metrics.
     """
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    if y_true.size != y_pred.size:
+        raise ValueError("y_true and y_pred must have the same length")
+    finite = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true, y_pred = y_true[finite], y_pred[finite]
+    if y_true.size == 0:
+        raise ValueError("At least one finite prediction/target pair is required")
     apply_broadcast_theme()
     fig, ax = plt.subplots(figsize=(9, 8), dpi=150)
     fig.patch.set_facecolor(CARBON_DARK)
@@ -62,12 +73,9 @@ def generate_pred_vs_actual_plot(
     )
 
     # Metrics Badge Box
-    badge_text = (
-        f"MODEL ACCURACY\n"
-        f"─────────────────\n"
-        f"MAE:  {mae:.3f} s  [Target < 0.15 s]\n"
-        f"R²:   {r2:.3f}    [Target 0.68 - 0.82]"
-    )
+    badge_text = "MODEL ACCURACY\n─────────────────\n"
+    badge_text += f"MAE:  {mae:.3f} s  [Target < 0.15 s]\n" if mae is not None else "MAE:  N/A\n"
+    badge_text += f"R²:   {r2:.3f}    [Target 0.68 - 0.82]" if r2 is not None else "R²:   N/A"
     props = dict(boxstyle="round,pad=0.8", facecolor="#101018", edgecolor=F1_RED, lw=1.5, alpha=0.95)
     ax.text(
         0.62, 0.15, badge_text,

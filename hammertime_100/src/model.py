@@ -5,8 +5,6 @@ Stages: Linear projection -> GATConv x2 (edge_dim=1, heads=4) -> Conv1d (time) -
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import logging
 import torch
 import torch.nn as nn
@@ -41,6 +39,10 @@ class HammerTimeSTGNN(nn.Module):
         dropout: float = 0.1
     ):
         super().__init__()
+        if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
+            raise ValueError("hidden_dim must be positive and divisible by gat_heads.")
+        if conv1d_kernel <= 0:
+            raise ValueError("conv1d_kernel must be positive.")
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.gat_heads = gat_heads
@@ -94,6 +96,8 @@ class HammerTimeSTGNN(nn.Module):
 
         if edge_index is None or edge_index.size(1) == 0:
             return loop_index, loop_attr
+        if edge_attr is None:
+            edge_attr = torch.ones((edge_index.size(1), 1), dtype=torch.float, device=device)
 
         combined_index = torch.cat([edge_index, loop_index], dim=1)
         combined_attr = torch.cat([edge_attr, loop_attr], dim=0)
@@ -107,14 +111,19 @@ class HammerTimeSTGNN(nn.Module):
         """
         outs = []
         for g in snapshots:
-            device = g.x.device
-            N = g.x.size(0)
+            device = self.proj.weight.device
+            x = g.x.to(device=device, dtype=self.proj.weight.dtype)
+            N = x.size(0)
             
             # 1. Project node features
-            h = torch.relu(self.proj(g.x))
+            h = torch.relu(self.proj(x))
 
             # 2. Add self-loops for robust message passing
-            edge_idx, edge_attr = self._ensure_self_loops(N, g.edge_index, g.edge_attr, device)
+            edge_idx, edge_attr = self._ensure_self_loops(
+                N, getattr(g, "edge_index", None), getattr(g, "edge_attr", None), device
+            )
+            edge_idx = edge_idx.to(device)
+            edge_attr = edge_attr.to(device=device, dtype=h.dtype)
 
             # 3. Two GAT layers
             h = torch.relu(self.gat1(h, edge_idx, edge_attr))
@@ -140,6 +149,8 @@ class HammerTimeSTGNN(nn.Module):
           - A single list of W Data objects -> returns [N]
           - A list of B items (each is a list of W Data objects) -> returns [B, N]
         """
+        if not batch_windows:
+            raise ValueError("Model input must contain at least one graph window.")
         if isinstance(batch_windows[0], list):
             # Batched execution
             preds = [self.forward_window(win) for win in batch_windows]
@@ -150,6 +161,10 @@ class HammerTimeSTGNN(nn.Module):
 
 def create_model(config: dict) -> HammerTimeSTGNN:
     """Build model instance from configuration dict."""
+    seed = int(config.get("data", {}).get("random_seed", 42))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     m_cfg = config["model"]
     return HammerTimeSTGNN(
         in_dim=m_cfg.get("in_dim", 9),

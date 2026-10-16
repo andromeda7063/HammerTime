@@ -6,9 +6,9 @@ Saves checkpoint to best.pt.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
+import csv
 import logging
+import os
 from pathlib import Path
 import numpy as np
 import torch
@@ -32,12 +32,12 @@ def masked_l1_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tens
     Computes L1 loss strictly over active, unmasked nodes:
     L = (1 / N_active) * sum |y_hat - y|
     """
-    diff = torch.abs(preds - targets)
-    masked_diff = diff * masks.float()
-    total_active = masks.float().sum()
-    if total_active > 0:
-        return masked_diff.sum() / total_active
-    return torch.tensor(0.0, device=preds.device, requires_grad=True)
+    if preds.shape != targets.shape or masks.shape != targets.shape:
+        raise ValueError("Predictions, targets, and masks must have the same shape.")
+    valid = masks.bool()
+    if not valid.any():
+        raise ValueError("Cannot train a batch with no valid target nodes.")
+    return torch.abs(preds[valid] - targets[valid]).mean()
 
 
 @torch.no_grad()
@@ -54,9 +54,11 @@ def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> floa
         masks = masks.to(device)
         preds = model(batch_snaps)
 
-        diff = torch.abs(preds - targets) * masks.float()
-        total_abs_err += diff.sum().item()
-        total_samples += masks.float().sum().item()
+        valid = masks.bool()
+        if valid.any():
+            diff = torch.abs(preds[valid] - targets[valid])
+            total_abs_err += diff.sum().item()
+            total_samples += int(valid.sum().item())
 
     return total_abs_err / max(total_samples, 1)
 
@@ -71,8 +73,15 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     max_epochs = int(t_cfg.get("max_epochs", 100))
     patience = int(t_cfg.get("early_stopping_patience", 10))
     ckpt_path = Path(t_cfg.get("checkpoint_path", "best.pt"))
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+    if len(train_loader) == 0:
+        raise ValueError("Training loader is empty.")
+    if len(val_loader) == 0:
+        raise ValueError("Validation loader is empty; early stopping needs held-out validation data.")
+    scaler = getattr(train_loader.dataset, "feature_scaler", None)
 
     best_val_mae = float("inf")
     patience_counter = 0
@@ -95,7 +104,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             loss = masked_l1_loss(preds, targets, masks)
 
             # Immutable Law 9 / Failure Case: NaN Guard
-            if torch.isnan(loss) or torch.isinf(loss):
+            if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"NaN or Inf loss encountered at epoch {epoch}! Check feature scaling in M5."
                 )
@@ -108,6 +117,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
 
         avg_train_loss = epoch_loss / max(num_batches, 1)
         val_mae = evaluate_val_mae(model, val_loader, device)
+        if not np.isfinite(val_mae):
+            raise FloatingPointError(f"Non-finite validation MAE at epoch {epoch}.")
 
         history.append({
             "epoch": epoch,
@@ -121,12 +132,22 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         if val_mae < best_val_mae:
             best_val_mae = val_mae
             patience_counter = 0
-            torch.save({
+            checkpoint = {
+                "format_version": 1,
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
                 "val_mae": val_mae,
-                "config": config
-            }, ckpt_path)
+                "config": config,
+                "feature_scaler": ({"mean_": scaler.mean_.tolist(),
+                                    "scale_": scaler.scale_.tolist(),
+                                    "var_": scaler.var_.tolist(),
+                                    "n_features_in_": int(scaler.n_features_in_)}
+                                   if scaler is not None and hasattr(scaler, "mean_") else None),
+            }
+            temp_path = ckpt_path.with_name(ckpt_path.name + ".tmp")
+            torch.save(checkpoint, temp_path)
+            os.replace(temp_path, ckpt_path)
             logger.info(f"[*] Best model updated. Saved checkpoint to {ckpt_path} (Val MAE: {val_mae:.4f} s)")
         else:
             patience_counter += 1
@@ -134,6 +155,16 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                 logger.info(f"Early stopping triggered after {epoch} epochs (Best Val MAE: {best_val_mae:.4f} s).")
                 break
 
+    history_path = Path(t_cfg.get("history_path", ckpt_path.parent / "training_history.csv"))
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    if history:
+        with history_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_mae"])
+            writer.writeheader()
+            writer.writerows(history)
+    if not np.isfinite(best_val_mae):
+        raise RuntimeError("Training did not produce a finite validation score; no usable checkpoint was saved.")
+    logger.info("Saved training history to %s", history_path)
     return best_val_mae, history
 
 

@@ -1,325 +1,304 @@
-"""
-HammerTime: F1 Broadcast Insights Division Interactive Dashboard
-Tabs: Race Replay, Model Diagnostics, Insight Studio
-Style: F1 Broadcast Carbon Dark #15151E, F1 Red #E10600
-Standard: ASD-STE100 Plain English
-"""
+"""Artifact-backed HammerTime race replay and model diagnostics dashboard."""
 
-import os
-import sys
+import json
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
+import streamlit as st
+import yaml
 
-# Set Streamlit Page Configuration
+
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+CONFIG_PATH = PROJECT_DIR / "configs" / "default.yaml"
+with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+    CONFIG = yaml.safe_load(config_file)
+PROCESSED_DIR = Path(CONFIG["session"].get("processed_dir", "data/processed"))
+if not PROCESSED_DIR.is_absolute():
+    PROCESSED_DIR = PROJECT_DIR / PROCESSED_DIR
+TELEMETRY_PATH = PROCESSED_DIR / "aligned_telemetry.parquet"
+REPORT_PATH = PROCESSED_DIR / "evaluation_report.json"
+CARDS_DIR = PROJECT_DIR / "broadcast" / "rendered"
+VISUALS_DIR = PROJECT_DIR / "visuals"
+CARBON = "#15151E"
+CARD = "#1F1F2B"
+RED = "#E10600"
+WHITE = "#FFFFFF"
+
 st.set_page_config(
     page_title="HammerTime · F1 Broadcast Insights",
     page_icon="🏎️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
+)
+st.markdown(
+    f"""<style>
+    .stApp {{ background: {CARBON}; color: {WHITE}; }}
+    h1, h2, h3 {{ color: {WHITE} !important; }}
+    div[data-testid="stMetric"] {{ background: {CARD}; border: 1px solid #2D2D3D;
+      border-radius: 8px; padding: 12px 18px; }}
+    </style>""",
+    unsafe_allow_html=True,
 )
 
-# Custom Broadcast CSS Theme
-st.markdown("""
-<style>
-    /* Main Background */
-    .stApp {
-        background-color: #15151E;
-        color: #FFFFFF;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    /* Headers */
-    h1, h2, h3 {
-        color: #FFFFFF !important;
-        font-weight: 800 !important;
-        letter-spacing: -0.5px;
-    }
-    .f1-red-header {
-        color: #E10600 !important;
-        font-weight: 900;
-        text-transform: uppercase;
-        font-size: 1.1rem;
-        letter-spacing: 1px;
-    }
-    /* Cards and Containers */
-    div[data-testid="stMetric"] {
-        background-color: #1F1F2B;
-        border: 1px solid #2D2D3D;
-        border-radius: 8px;
-        padding: 12px 18px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-    }
-    div[data-testid="stMetricValue"] {
-        color: #FFFFFF !important;
-        font-weight: 800;
-    }
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #15151E;
-        border-bottom: 2px solid #2D2D3D;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #1F1F2B;
-        border-radius: 6px 6px 0 0;
-        color: #949498;
-        padding: 10px 24px;
-        font-weight: 700;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #E10600 !important;
-        color: #FFFFFF !important;
-    }
-</style>
-""", unsafe_allow_html=True)
 
-# Driver Data
-DRIVERS = ["VER", "PER", "HAM", "RUS", "LEC", "SAI", "NOR", "PIA", "ALO", "STR",
-           "GAS", "OCO", "ALB", "SAR", "TSU", "RIC", "BOT", "ZHO", "MAG", "HUL"]
-
-TEAM_COLORS = {
-    "VER": "#3671C6", "PER": "#3671C6", "HAM": "#6CD3BF", "RUS": "#6CD3BF",
-    "LEC": "#F91536", "SAI": "#F91536", "NOR": "#F58020", "PIA": "#F58020",
-    "ALO": "#358C75", "STR": "#358C75", "GAS": "#2293D1", "OCO": "#2293D1",
-    "ALB": "#37BEDD", "SAR": "#37BEDD", "TSU": "#5E8FAA", "RIC": "#5E8FAA",
-    "BOT": "#C92D4B", "ZHO": "#C92D4B", "MAG": "#B6BABD", "HUL": "#B6BABD",
-}
+@st.cache_data(show_spinner="Loading aligned race telemetry…")
+def load_telemetry(path: str, modified: float) -> pd.DataFrame:
+    del modified  # Included in the cache key so a newly written artifact is reloaded.
+    return pd.read_parquet(path)
 
 
-def build_track_figure(lap_step: int, selected_car: str):
-    """Builds interactive Plotly track traffic map with dynamic directed disturbance edges."""
-    theta = np.linspace(0, 2 * np.pi, 200)
-    # Monza oblong layout
-    cx = 1000 * np.cos(theta) + 200 * np.sin(2 * theta)
-    cy = 400 * np.sin(theta) + 100 * np.cos(3 * theta)
+@st.cache_data(show_spinner="Loading evaluation report…")
+def load_report(path: str, modified: float) -> dict:
+    del modified
+    with open(path, "r", encoding="utf-8") as report_file:
+        return json.load(report_file)
 
+
+def artifact(path: Path, loader):
+    if not path.is_file():
+        return None
+    try:
+        loaded = loader(str(path), path.stat().st_mtime)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        st.warning(f"Could not load `{path}`: {error}")
+        return None
+    if path.name == "aligned_telemetry.parquet":
+        required = {"Driver", "TimeSec", "LapNumber"}
+        missing = required.difference(loaded.columns) if isinstance(loaded, pd.DataFrame) else required
+        if missing:
+            st.warning(f"Telemetry artifact `{path}` is missing required fields: {', '.join(sorted(missing))}.")
+            return None
+    if path.name == "evaluation_report.json" and (
+        not isinstance(loaded, dict) or not isinstance(loaded.get("metrics", {}), dict)
+    ):
+        st.warning(f"Evaluation report `{path}` has an invalid structure.")
+        return None
+    return loaded
+
+
+def build_track_figure(frame: pd.DataFrame, selected_car: str, route: pd.DataFrame | None = None) -> go.Figure:
+    """Draw positions and leader-to-follower edges from one aligned time slice."""
     fig = go.Figure()
-    # Track perimeter
-    fig.add_trace(go.Scatter(
-        x=cx, y=cy, mode="lines",
-        line=dict(color="#38384A", width=12),
-        hoverinfo="none", showlegend=False
-    ))
-    fig.add_trace(go.Scatter(
-        x=cx, y=cy, mode="lines",
-        line=dict(color="#5A5A6E", width=2, dash="dash"),
-        hoverinfo="none", showlegend=False
-    ))
+    if frame.empty:
+        return fig
+    frame = frame.copy()
+    frame = frame.dropna(subset=["Driver"])
+    has_xy = {"X", "Y"}.issubset(frame.columns) and frame[["X", "Y"]].notna().to_numpy().all()
+    if has_xy:
+        frame = frame[(frame["X"] != 0) | (frame["Y"] != 0)]
+    else:
+        st.info("This telemetry artifact has no usable X/Y coordinates; the live track map is unavailable.")
+        return fig
 
-    # Car positions distributed along track with lap shift
-    car_thetas = (np.linspace(0, 2 * np.pi, len(DRIVERS), endpoint=False) + lap_step * 0.08) % (2 * np.pi)
-    x_cars = 1000 * np.cos(car_thetas) + 200 * np.sin(2 * car_thetas)
-    y_cars = 400 * np.sin(car_thetas) + 100 * np.cos(3 * car_thetas)
-
-    # Add dynamic edges (disturbance flow from leader to follower)
-    for i in range(len(DRIVERS) - 1):
-        leader_idx = i
-        follower_idx = i + 1
-        # Proximity disturbance
-        gap = 0.5 + ((i * 7 + lap_step) % 25) * 0.08
-        if gap <= 2.0:
-            weight = np.exp(-gap**2 / 2.0)
-            edge_color = "#E10600" if gap < 0.8 else "#FF9900"
+    if route is not None and {"X", "Y"}.issubset(route.columns):
+        route = route.dropna(subset=["X", "Y"])
+        if len(route) > 1:
             fig.add_trace(go.Scatter(
-                x=[x_cars[leader_idx], x_cars[follower_idx]],
-                y=[y_cars[leader_idx], y_cars[follower_idx]],
-                mode="lines",
-                line=dict(color=edge_color, width=max(1.5, weight * 6.0)),
-                hoverinfo="text",
-                hovertext=f"Disturbance: {DRIVERS[leader_idx]} ➔ {DRIVERS[follower_idx]} | Gap: {gap:.2f}s | Weight: {weight:.2f}",
-                showlegend=False
+                x=route["X"], y=route["Y"], mode="lines",
+                line={"color": "#555568", "width": 3}, hoverinfo="skip", showlegend=False,
             ))
 
-    # Add Car Nodes
-    for i, drv in enumerate(DRIVERS):
-        is_sel = (drv == selected_car)
-        node_size = 26 if is_sel else 18
-        border_col = "#FFFFFF" if is_sel else "#2D2D3D"
-        border_width = 3 if is_sel else 1.5
+    for _, row in frame.iterrows():
+        leader = row.get("DriverAhead")
+        gap = pd.to_numeric(row.get("DeltaT"), errors="coerce")
+        if pd.notna(leader) and leader in set(frame["Driver"]) and pd.notna(gap) and 0 < gap <= 2.0:
+            ahead = frame[frame["Driver"] == leader].iloc[0]
+            color = RED if gap < 0.8 else "#FF9900"
+            fig.add_trace(go.Scatter(
+                x=[ahead["X"], row["X"]], y=[ahead["Y"], row["Y"]], mode="lines",
+                line={"color": color, "width": max(1.5, float(np.exp(-(gap ** 2) / 2) * 6))},
+                hovertemplate=f"{leader} → {row['Driver']} · gap {gap:.2f} s<extra></extra>",
+                showlegend=False,
+            ))
 
-        fig.add_trace(go.Scatter(
-            x=[x_cars[i]], y=[y_cars[i]],
-            mode="markers+text",
-            marker=dict(
-                size=node_size,
-                color=TEAM_COLORS.get(drv, "#FFFFFF"),
-                line=dict(color=border_col, width=border_width)
-            ),
-            text=[drv],
-            textposition="middle center",
-            textfont=dict(size=9, color="#000000" if drv in ["HAM", "RUS", "VER", "PER", "PIA"] else "#FFFFFF", family="Arial Black"),
-            hoverinfo="text",
-            hovertext=f"Car: {drv} | P{i+1}",
-            showlegend=False
-        ))
-
+    colors = [RED if driver == selected_car else "#55C0B8" for driver in frame["Driver"]]
+    fig.add_trace(go.Scatter(
+        x=frame["X"], y=frame["Y"], mode="markers+text",
+        marker={"size": 14, "color": colors, "line": {"color": WHITE, "width": 1}},
+        text=frame["Driver"], textposition="top center",
+        customdata=np.column_stack([
+            frame.get("Speed", pd.Series(index=frame.index, dtype=float)),
+            frame.get("DeltaT", pd.Series(index=frame.index, dtype=float)),
+        ]),
+        hovertemplate="%{text}<br>Speed %{customdata[0]:.0f} km/h<br>Gap %{customdata[1]:.2f} s<extra></extra>",
+        showlegend=False,
+    ))
     fig.update_layout(
-        plot_bgcolor="#1F1F2B",
-        paper_bgcolor="#15151E",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
-        margin=dict(l=0, r=0, t=10, b=10),
-        height=520
+        plot_bgcolor=CARD, paper_bgcolor=CARBON, font_color=WHITE, height=520,
+        margin={"l": 5, "r": 5, "t": 5, "b": 5},
+        xaxis={"visible": False, "scaleanchor": "y", "scaleratio": 1},
+        yaxis={"visible": False},
     )
     return fig
 
 
-# --- SIDEBAR HEADER ---
-with st.sidebar:
-    st.markdown('<p class="f1-red-header">Formula 1 · Broadcast Insights</p>', unsafe_allow_html=True)
-    st.title("HAMMERTIME ST-GNN")
-    st.caption("Live Spatio-Temporal Graph Neural Network for Traffic Delay Analytics")
-
-    st.markdown("---")
-    session_year = st.selectbox("Season", [2023, 2024], index=0)
-    session_gp = st.selectbox("Grand Prix", ["Monza (Italian GP)", "Silverstone (British GP)", "Spa-Francorchamps"], index=0)
-    st.markdown("---")
-    st.info("**Model Status:** ST-GNN Checkpoint `best.pt` Active\n\n**Resolution:** 20 Mini-Sectors · 4 Hz Sample Grid")
-
-
-# --- TABS ---
-tab_replay, tab_diagnostics, tab_studio = st.tabs([
-    "🏎️ Live Race Replay",
-    "📊 Model Diagnostics & Validation",
-    "📺 Broadcast Insight Studio"
-])
+def render_report_metrics(report: dict | None) -> None:
+    if not report or not report.get("metrics"):
+        st.info("Evaluation report is not available yet. Run the pipeline to publish metrics and physics results.")
+        return
+    metrics = report["metrics"]
+    cols = st.columns(4)
+    mae = metrics.get("mae_sec")
+    r2 = metrics.get("r2_score")
+    cols[0].metric("Test MAE", f"{mae:.3f} s" if mae is not None else "N/A")
+    cols[1].metric("Test R²", f"{r2:.3f}" if r2 is not None else "N/A")
+    tests = report.get("physics_tests", [])
+    for index, title in enumerate(("Clean-air check", "DRS-train check")):
+        result = tests[index] if index < len(tests) else None
+        status = "N/A" if not result or result.get("passed") is None else ("PASS" if result["passed"] else "FAIL")
+        cols[index + 2].metric(title, status)
 
 
-# ═══════════════════════════════════════════════════════════════
-# TAB 1: RACE REPLAY
-# ═══════════════════════════════════════════════════════════════
-with tab_replay:
-    col_ctrl1, col_ctrl2 = st.columns([3, 1])
-    with col_ctrl1:
-        lap_slider = st.slider("Race Progression / Snapshot Replay (Lap 1 - 53)", min_value=1, max_value=53, value=31)
-    with col_ctrl2:
-        selected_car = st.selectbox("Focus Driver Drilldown", DRIVERS, index=2)
-
-    col_track, col_leaderboard = st.columns([1.8, 1.2])
-
-    with col_track:
-        st.markdown(f"### Autodromo Nazionale Monza · Lap {lap_slider}")
-        st.caption("Dynamic Spatio-Temporal Graph · Directed Edges scaled by Gaussian RBF Kernel ($e_{ij}$)")
-        st.plotly_chart(build_track_figure(lap_slider, selected_car), use_container_width=True)
-
-    with col_leaderboard:
-        st.markdown("### Live Traffic Loss Leaderboard")
-        st.caption("Ranked by Predicted Traffic Delay ($\Delta t_{\text{sector}}$)")
-
-        # Generate realistic traffic loss table
-        np.random.seed(lap_slider * 13)
-        losses = np.clip(np.random.exponential(0.18, len(DRIVERS)), 0.0, 0.75)
-        # Give selected car or cars in DRS train a prominent loss
-        losses[4:8] = np.random.uniform(0.42, 0.68, 4)
-
-        df_leaderboard = pd.DataFrame({
-            "Pos": [f"P{i+1}" for i in range(len(DRIVERS))],
-            "Driver": DRIVERS,
-            "Gap to Lead": [f"+{i * 1.8:.1f} s" if i > 0 else "LEADER" for i in range(len(DRIVERS))],
-            "Delay / Sector": [f"+{l:.3f} s" for l in losses],
-            "Wake Status": ["Severe Dirty Air" if l > 0.4 else ("Disturbed" if l > 0.15 else "Clean Air") for l in losses]
-        })
-        st.dataframe(
-            df_leaderboard,
-            hide_index=True,
-            use_container_width=True,
-            height=480
-        )
-
-    # Drilldown for Focus Driver
-    st.markdown("---")
-    st.markdown(f"### Driver Drilldown: {selected_car} · Traffic Disturbance Analysis")
-    col_d1, col_d2, col_d3 = st.columns(3)
-    with col_d1:
-        st.metric("Total Lap Time Lost to Traffic", "+14.85 s", delta="+0.42 s this lap", delta_color="inverse")
-    with col_d2:
-        st.metric("Primary Traffic Blocker", "SAI (P5)", delta="Average Gap 0.65 s")
-    with col_d3:
-        st.metric("Clean Air Running %", "24.8 %", delta="-12% vs race average", delta_color="inverse")
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 2: MODEL DIAGNOSTICS & EVALUATION
-# ═══════════════════════════════════════════════════════════════
-with tab_diagnostics:
-    st.markdown("### Model Diagnostics & Physics Sanity Suite")
-    st.caption("Evaluation against Single-Car Baselines and Immutable Formula 1 Physical Laws")
-
-    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-    with col_m1:
-        st.metric("Test MAE", "0.118 s", delta="Spec Target < 0.150 s", delta_color="normal")
-    with col_m2:
-        st.metric("Test R² Score", "0.784", delta="Spec Band 0.68 - 0.82", delta_color="normal")
-    with col_m3:
-        st.metric("Clean Air Test (Gap > 3s)", "PASS", delta="Observed MAE 0.014 s")
-    with col_m4:
-        st.metric("DRS Train Test (Gap < 0.8s)", "PASS", delta="Observed +0.61 s / lap")
-
-    st.markdown("---")
-    tab_v2, tab_v5, tab_v6, tab_v8, tab_v9 = st.tabs([
-        "V2 · Predicted vs Actual",
-        "V5 · Baseline Duel",
-        "V6 · Physics Validation Cards",
-        "V8 · Residual Diagnostics",
-        "V9 · Clean-Air Calibration"
-    ])
-
-    with tab_v2:
-        v2_path = Path("visuals/v2_pred_vs_actual.png")
-        if v2_path.exists():
-            st.image(str(v2_path), use_column_width=True)
-        else:
-            st.info("V2 visual can be generated via `python visuals/v2_pred_vs_actual.py`.")
-
-    with tab_v5:
-        v5_path = Path("visuals/v5_baseline_duel.png")
-        if v5_path.exists():
-            st.image(str(v5_path), use_column_width=True)
-        else:
-            st.info("V5 visual can be generated via `python visuals/v5_baseline_duel.py`.")
-
-    with tab_v6:
-        v6_path = Path("visuals/v6_physics_cards.png")
-        if v6_path.exists():
-            st.image(str(v6_path), use_column_width=True)
-        else:
-            st.info("V6 visual can be generated via `python visuals/v6_physics_cards.py`.")
-
-    with tab_v8:
-        v8_path = Path("visuals/v8_residuals.png")
-        if v8_path.exists():
-            st.image(str(v8_path), use_column_width=True)
-        else:
-            st.info("V8 visual can be generated via `python visuals/v8_residuals.py`.")
-
-    with tab_v9:
-        v9_path = Path("visuals/v9_clean_air_cal.png")
-        if v9_path.exists():
-            st.image(str(v9_path), use_column_width=True)
-        else:
-            st.info("V9 visual can be generated via `python visuals/v9_clean_air_cal.py`.")
-
-
-# ═══════════════════════════════════════════════════════════════
-# TAB 3: INSIGHT STUDIO
-# ═══════════════════════════════════════════════════════════════
-with tab_studio:
-    st.markdown("### Broadcast Insight Studio · On-Air Television Graphic Cards")
-    st.caption("3-Second Readable On-Air Overlays for Formula 1 World Feed")
-
-    # Render gallery of broadcast card PNGs
-    card_dir = Path("broadcast/rendered")
-    if card_dir.exists():
-        card_pngs = sorted(list(card_dir.glob("*.png")))
-        if card_pngs:
-            cols = st.columns(2)
-            for idx, p in enumerate(card_pngs):
-                with cols[idx % 2]:
-                    st.image(str(p), use_column_width=True)
-        else:
-            st.info("Run `python broadcast/cards.py` to generate broadcast PNG cards.")
+def render_visual(path: Path, label: str) -> None:
+    if path.is_file():
+        st.image(str(path), caption=label, use_container_width=True)
     else:
-        st.info("Run `python broadcast/cards.py` to generate broadcast PNG cards.")
+        st.info(f"{label} has not been generated for this run.")
+
+
+with st.sidebar:
+    st.markdown("### Formula 1 · Broadcast Insights")
+    st.title("HAMMERTIME ST-GNN")
+    st.caption("Race telemetry and model evaluation")
+    st.divider()
+    artifact_override = st.text_input("Artifact directory", value=str(PROCESSED_DIR), help="Directory containing aligned_telemetry.parquet and evaluation_report.json")
+    artifact_dir = Path(artifact_override).expanduser()
+    if not artifact_dir.is_absolute():
+        artifact_dir = PROJECT_DIR / artifact_dir
+    telemetry_path = artifact_dir / "aligned_telemetry.parquet"
+    report_path = artifact_dir / "evaluation_report.json"
+    telemetry = artifact(telemetry_path, load_telemetry)
+    report = artifact(report_path, load_report)
+    if telemetry is not None and "RaceId" in telemetry.columns:
+        races = sorted(telemetry["RaceId"].dropna().astype(str).unique())
+        selected_race = st.selectbox("Race", races) if races else None
+        if selected_race is not None:
+            telemetry = telemetry[telemetry["RaceId"].astype(str) == selected_race]
+    else:
+        selected_race = None
+    if report and report.get("RaceId") is not None and selected_race is not None and str(report["RaceId"]) != selected_race:
+        report = None
+    if telemetry is not None and not telemetry.empty and "LapNumber" in telemetry:
+        lap_values = sorted(pd.to_numeric(telemetry["LapNumber"], errors="coerce").dropna().astype(int).unique())
+        selected_lap = st.select_slider("Race lap", options=lap_values, value=lap_values[min(len(lap_values) - 1, 30)])
+        drivers = sorted(telemetry["Driver"].dropna().astype(str).unique())
+    else:
+        selected_lap, drivers = None, []
+    selected_car = st.selectbox("Focus driver", drivers, index=0) if drivers else None
+    st.caption(f"Telemetry: {'loaded' if telemetry is not None else 'not available'} · Evaluation: {'loaded' if report is not None else 'not available'}")
+
+st.title("HammerTime · Race traffic insights")
+tab_replay, tab_diagnostics, tab_studio = st.tabs(["Race replay", "Model diagnostics", "Broadcast cards"])
+
+with tab_replay:
+    if telemetry is None or telemetry.empty:
+        st.info(f"Aligned telemetry is not available. Expected artifact: `{telemetry_path}`")
+    else:
+        selected_lap_rows = telemetry[
+            (telemetry["Driver"].astype(str) == selected_car)
+            & (pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap)
+        ]
+        time_value = pd.to_numeric(selected_lap_rows["TimeSec"], errors="coerce").max()
+        if pd.isna(time_value):
+            st.info("The selected driver has no telemetry for this lap.")
+            snapshot = telemetry.iloc[0:0]
+            lap_frame = telemetry.iloc[0:0]
+        else:
+            # Anchor the selected lap on the focus driver's final sample, then
+            # show every car at that same race timestamp, including lapped cars.
+            race_times = pd.to_numeric(telemetry["TimeSec"], errors="coerce")
+            snapshot = telemetry[np.isclose(race_times.to_numpy(dtype=float), float(time_value), atol=1e-6)]
+            lap_frame = telemetry[pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap]
+        route = lap_frame[lap_frame["Driver"].astype(str) == selected_car].sort_values("Distance") if "Distance" in lap_frame else None
+        left, right = st.columns([1.5, 1])
+        with left:
+            st.subheader(f"Track traffic · Lap {selected_lap}")
+            st.plotly_chart(build_track_figure(snapshot, selected_car, route), use_container_width=True)
+        with right:
+            st.subheader("Traffic snapshot")
+            if "DeltaT" in snapshot:
+                board = snapshot.copy()
+                board["Gap to car ahead (s)"] = pd.to_numeric(board["DeltaT"], errors="coerce")
+                board["Wake"] = np.select(
+                    [board["Gap to car ahead (s)"].between(0, 0.8, inclusive="left"), board["Gap to car ahead (s)"].between(0.8, 2.0, inclusive="both")],
+                    ["Severe wake", "Wake"], default="Clear / unknown",
+                )
+                keep = [c for c in ["RaceId", "Driver", "DriverAhead", "Gap to car ahead (s)", "Speed", "MiniSector", "Wake"] if c in board]
+                st.dataframe(board[keep].sort_values("Gap to car ahead (s)"), hide_index=True, use_container_width=True)
+            focus = snapshot[snapshot["Driver"].astype(str) == selected_car]
+            if not focus.empty:
+                row = focus.iloc[0]
+                st.metric("Gap to car ahead", f"{row.get('DeltaT', float('nan')):.2f} s")
+                st.caption(f"Ahead: {row.get('DriverAhead', 'unknown')} · Mini-sector: {row.get('MiniSector', 'unknown')}")
+    st.divider()
+    st.subheader("Driver blocker analysis")
+    if telemetry is not None and not telemetry.empty and selected_car is not None:
+        focus_history = telemetry[telemetry["Driver"].astype(str) == selected_car].copy()
+        if "LapNumber" in focus_history and "DeltaT" in focus_history:
+            focus_history["LapNumber"] = pd.to_numeric(focus_history["LapNumber"], errors="coerce")
+            focus_history["DeltaT"] = pd.to_numeric(focus_history["DeltaT"], errors="coerce")
+            gap_history = focus_history.groupby("LapNumber", as_index=False)["DeltaT"].mean().dropna()
+            if not gap_history.empty:
+                history_fig = go.Figure()
+                history_fig.add_hrect(y0=0, y1=0.8, fillcolor=RED, opacity=0.14, line_width=0, annotation_text="Severe wake")
+                history_fig.add_hrect(y0=0.8, y1=2.0, fillcolor="#FF9900", opacity=0.10, line_width=0, annotation_text="Wake range")
+                history_fig.add_hline(y=3.0, line_dash="dash", line_color="#10B981", annotation_text="Clean-air threshold")
+                history_fig.add_trace(go.Scatter(x=gap_history["LapNumber"], y=gap_history["DeltaT"], mode="lines+markers", name=f"{selected_car} mean gap"))
+                history_fig.update_layout(title=f"{selected_car} · mean gap to car ahead by lap", xaxis_title="Lap", yaxis_title="Gap (s)", plot_bgcolor=CARD, paper_bgcolor=CARBON, font_color=WHITE)
+                st.plotly_chart(history_fig, use_container_width=True)
+            close = focus_history[focus_history["DeltaT"].between(0, 2.0, inclusive="right")].dropna(subset=["DriverAhead"])
+            if not close.empty:
+                blockers = close.groupby("DriverAhead", as_index=False).agg(
+                    observations=("DeltaT", "size"), mean_gap_sec=("DeltaT", "mean")
+                ).sort_values(["observations", "mean_gap_sec"], ascending=[False, True])
+                blockers = blockers.rename(columns={"DriverAhead": "Car ahead", "mean_gap_sec": "Mean observed gap (s)"})
+                st.caption("Cars ahead ranked by observed close-gap exposure; proximity alone does not establish cause.")
+                st.dataframe(blockers, hide_index=True, use_container_width=True)
+            else:
+                st.info("No close-gap observations are available for this driver.")
+        else:
+            st.info("Telemetry is missing lap or gap fields for this drilldown.")
+
+with tab_diagnostics:
+    st.subheader("Evaluation and physics checks")
+    render_report_metrics(report)
+    if report and report.get("metadata", {}).get("split", {}).get("test", {}).get("race_ids"):
+        held_out_races = ", ".join(report["metadata"]["split"]["test"]["race_ids"])
+        st.caption(f"Reported summary metrics cover the held-out split: {held_out_races}.")
+    if report:
+        baselines = report.get("baselines", {})
+        if baselines:
+            rows = []
+            for name, scores in baselines.items():
+                rows.append({"Model": name, "MAE (s)": scores.get("mae_sec"), "R²": scores.get("r2_score")})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    prediction_rows = report.get("predictions", []) if report else []
+    if selected_race is not None:
+        prediction_rows = [row for row in prediction_rows if str(row.get("RaceId")) == selected_race]
+    if prediction_rows:
+        predictions = pd.DataFrame(prediction_rows)
+        if {"y_true", "y_pred"}.issubset(predictions.columns):
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=predictions["y_true"], y=predictions["y_pred"], mode="markers", name="Test predictions", marker={"color": "#00D2BE", "opacity": 0.55}))
+            extent = [float(np.nanmin(predictions[["y_true", "y_pred"]].values)), float(np.nanmax(predictions[["y_true", "y_pred"]].values))]
+            fig.add_trace(go.Scatter(x=extent, y=extent, mode="lines", name="Parity", line={"color": "#949498", "dash": "dash"}))
+            fig.update_layout(title="Predicted vs actual delay", xaxis_title="Actual delay (s)", yaxis_title="Predicted delay (s)", plot_bgcolor=CARD, paper_bgcolor=CARBON, font_color=WHITE)
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Prediction-level diagnostics are unavailable until the evaluation report contains test predictions.")
+    for visual_name in ("v5_baseline_duel.png", "v6_physics_cards.png", "v8_residuals.png", "v9_clean_air_cal.png"):
+        render_visual(VISUALS_DIR / visual_name, visual_name.replace("_", " ").removesuffix(".png"))
+
+with tab_studio:
+    st.subheader("On-air insight cards")
+    card_files = sorted(CARDS_DIR.glob("*.png")) if CARDS_DIR.is_dir() else []
+    if card_files:
+        for start in range(0, len(card_files), 2):
+            columns = st.columns(2)
+            for column, card_path in zip(columns, card_files[start:start + 2]):
+                with column:
+                    st.image(str(card_path), caption=card_path.stem.replace("_", " "), use_container_width=True)
+    else:
+        st.info(f"Broadcast cards have not been generated yet. Expected directory: `{CARDS_DIR}`")

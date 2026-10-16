@@ -36,7 +36,11 @@ COMPOUND_MAP = {
 }
 
 
-def build_node_feature_vector(row: pd.Series, num_compounds: int = 5) -> np.ndarray:
+def build_node_feature_vector(
+    row: pd.Series,
+    num_compounds: int = 5,
+    compound_categories: list[str] | None = None,
+) -> np.ndarray:
     """
     Constructs raw feature vector for a single driver:
     [velocity, throttle, compound_one_hot (5), tyre_age, mini_sector] -> dim 9
@@ -48,7 +52,12 @@ def build_node_feature_vector(row: pd.Series, num_compounds: int = 5) -> np.ndar
 
     # One-hot compound
     compound_str = str(row.get("Compound", "MEDIUM")).upper()
-    cmp_idx = COMPOUND_MAP.get(compound_str, 1)  # default MEDIUM
+    categories = [str(value).upper() for value in compound_categories] if compound_categories else list(COMPOUND_MAP)
+    if len(categories) != num_compounds:
+        raise ValueError("num_compounds must match the configured compound_categories length.")
+    cmp_idx = categories.index(compound_str) if compound_str in categories else (
+        categories.index("MEDIUM") if "MEDIUM" in categories else 0
+    )
     cmp_onehot = np.zeros(num_compounds, dtype=np.float32)
     cmp_onehot[cmp_idx] = 1.0
 
@@ -62,12 +71,17 @@ def build_snapshot_edges(driver_ahead_dict: dict, gap_dict: dict, driver_to_idx:
     Constructs directed edges (leader j -> follower i) if 0 < Delta t_ij <= max_gap.
     Computes Gaussian RBF edge weight: exp(-dt^2 / (2 * sigma^2)).
     """
+    if max_gap <= 0 or sigma <= 0:
+        raise ValueError("graph.edge_threshold_sec and graph.rbf_sigma must be positive.")
     src, dst, weights = [], [], []
 
     for follower_drv, leader_drv in driver_ahead_dict.items():
-        if leader_drv is None or follower_drv not in driver_to_idx or leader_drv not in driver_to_idx:
+        if leader_drv is None or pd.isna(leader_drv) or follower_drv not in driver_to_idx or leader_drv not in driver_to_idx:
             continue
-        dt = gap_dict.get(follower_drv, 99.0)
+        try:
+            dt = float(gap_dict.get(follower_drv, 99.0))
+        except (TypeError, ValueError):
+            continue
         if 0.0 < dt <= max_gap:
             j = driver_to_idx[leader_drv]      # Leader index (source)
             i = driver_to_idx[follower_drv]    # Follower index (destination)
@@ -100,6 +114,20 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
     max_gap = config["graph"]["edge_threshold_sec"]
     sigma = config["graph"]["rbf_sigma"]
     num_nodes = config["graph"]["num_nodes"]
+    compound_categories = config["graph"].get("compound_categories", list(COMPOUND_MAP))
+    if num_nodes <= 0:
+        raise ValueError("graph.num_nodes must be positive.")
+    node_dim = 4 + len(compound_categories)
+    expected_dim = config.get("model", {}).get("in_dim")
+    if expected_dim is not None and expected_dim != node_dim:
+        raise ValueError(
+            f"Configured model.in_dim ({expected_dim}) does not match graph feature width ({node_dim})."
+        )
+    session_cfg = config.get("session", {})
+    default_race_id = str(session_cfg.get("race_id") or (
+        f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"
+        f"{session_cfg.get('session_type', 'R')}"
+    ))
 
     # Fix consistent driver ordering (20 drivers)
     unique_drivers = sorted(aligned_df["Driver"].unique())
@@ -117,8 +145,9 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
 
     for t_sec in timestamps:
         group = grouped.get_group(t_sec)
-        x_mat = np.zeros((num_nodes, 9), dtype=np.float32)
+        x_mat = np.zeros((num_nodes, node_dim), dtype=np.float32)
         mask = np.zeros(num_nodes, dtype=bool)
+        driver_names = [None] * num_nodes
 
         ahead_map = {}
         gap_map = {}
@@ -127,28 +156,50 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             drv = row["Driver"]
             if drv in driver_to_idx:
                 idx = driver_to_idx[drv]
+                driver_names[idx] = str(drv)
                 # Check if active (not retired / not in pit)
-                is_active = not bool(row.get("IsPitLap", False))
+                is_valid = bool(row.get("IsValid", True)) if pd.notna(row.get("IsValid", True)) else False
+                is_pit = bool(row.get("IsPitLap", False)) if pd.notna(row.get("IsPitLap", False)) else False
+                is_active = is_valid and not is_pit
                 mask[idx] = is_active
                 if is_active:
-                    x_mat[idx] = build_node_feature_vector(row)
+                    x_mat[idx] = build_node_feature_vector(
+                        row,
+                        num_compounds=len(compound_categories),
+                        compound_categories=compound_categories,
+                    )
                 else:
                     # Degraded node: zero features, keep node in graph
                     x_mat[idx] = 0.0
 
-                ahead_map[drv] = row.get("DriverAhead")
-                gap_map[drv] = float(row.get("DeltaT", 99.0))
+                if is_active:
+                    ahead_map[drv] = row.get("DriverAhead")
+                    gap_value = row.get("DeltaT", 99.0)
+                    try:
+                        gap_map[drv] = float(gap_value)
+                    except (TypeError, ValueError):
+                        gap_map[drv] = np.nan
 
         edge_index, edge_attr = build_snapshot_edges(
             ahead_map, gap_map, driver_to_idx, max_gap=max_gap, sigma=sigma
         )
 
+        race_id = group["RaceId"].iloc[0] if "RaceId" in group.columns else default_race_id
+        if "RaceId" in group.columns and group["RaceId"].nunique(dropna=True) > 1:
+            raise ValueError(f"Timestamp {t_sec} contains rows from multiple races. Build snapshots per race.")
+        is_safety_car = (
+            group["IsSafetyCar"].fillna(False).astype(bool).any()
+            if "IsSafetyCar" in group.columns else False
+        )
         data = Data(
             x=torch.tensor(x_mat, dtype=torch.float),
             edge_index=edge_index,
             edge_attr=edge_attr,
             mask=torch.tensor(mask, dtype=torch.bool),
-            time_sec=float(t_sec)
+            time_sec=float(t_sec),
+            race_id=str(race_id),
+            driver_names=tuple(driver_names),
+            is_safety_car=bool(is_safety_car),
         )
         snapshots.append(data)
 
