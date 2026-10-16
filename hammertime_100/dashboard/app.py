@@ -196,9 +196,21 @@ with tab_replay:
     if telemetry is None or telemetry.empty:
         st.info(f"Aligned telemetry is not available. Expected artifact: `{telemetry_path}`")
     else:
-        lap_frame = telemetry[pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap]
-        time_value = pd.to_numeric(lap_frame["TimeSec"], errors="coerce").max()
-        snapshot = lap_frame[pd.to_numeric(lap_frame["TimeSec"], errors="coerce") == time_value]
+        selected_lap_rows = telemetry[
+            (telemetry["Driver"].astype(str) == selected_car)
+            & (pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap)
+        ]
+        time_value = pd.to_numeric(selected_lap_rows["TimeSec"], errors="coerce").max()
+        if pd.isna(time_value):
+            st.info("The selected driver has no telemetry for this lap.")
+            snapshot = telemetry.iloc[0:0]
+            lap_frame = telemetry.iloc[0:0]
+        else:
+            # Anchor the selected lap on the focus driver's final sample, then
+            # show every car at that same race timestamp, including lapped cars.
+            race_times = pd.to_numeric(telemetry["TimeSec"], errors="coerce")
+            snapshot = telemetry[np.isclose(race_times.to_numpy(dtype=float), float(time_value), atol=1e-6)]
+            lap_frame = telemetry[pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap]
         route = lap_frame[lap_frame["Driver"].astype(str) == selected_car].sort_values("Distance") if "Distance" in lap_frame else None
         left, right = st.columns([1.5, 1])
         with left:

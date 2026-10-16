@@ -23,8 +23,8 @@ except ImportError:
 def generate_pred_vs_actual_plot(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    mae: float,
-    r2: float,
+    mae: float | None,
+    r2: float | None,
     circuit_name: str = "Monza",
     output_path: str = "visuals/v2_pred_vs_actual.png"
 ):
@@ -73,12 +73,9 @@ def generate_pred_vs_actual_plot(
     )
 
     # Metrics Badge Box
-    badge_text = (
-        f"MODEL ACCURACY\n"
-        f"─────────────────\n"
-        f"MAE:  {mae:.3f} s  [Target < 0.15 s]\n"
-        f"R²:   {r2:.3f}    [Target 0.68 - 0.82]"
-    )
+    badge_text = "MODEL ACCURACY\n─────────────────\n"
+    badge_text += f"MAE:  {mae:.3f} s  [Target < 0.15 s]\n" if mae is not None else "MAE:  N/A\n"
+    badge_text += f"R²:   {r2:.3f}    [Target 0.68 - 0.82]" if r2 is not None else "R²:   N/A"
     props = dict(boxstyle="round,pad=0.8", facecolor="#101018", edgecolor=F1_RED, lw=1.5, alpha=0.95)
     ax.text(
         0.62, 0.15, badge_text,
