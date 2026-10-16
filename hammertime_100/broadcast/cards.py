@@ -219,7 +219,7 @@ def build_broadcast_cards(telemetry, predictions=None, count: int = 10, mini_sec
         raise ValueError(f"telemetry must include columns: {', '.join(sorted(required))}")
     observed = telemetry.copy()
     observed["DeltaT"] = observed["DeltaT"].astype(float)
-    observed = observed[observed["DeltaT"].between(0, 2, inclusive="right")].dropna(subset=["DriverAhead"])
+    observed = observed[observed["DeltaT"].gt(0) & observed["DeltaT"].le(2)].dropna(subset=["DriverAhead"])
     duplicate_columns = ["Driver", "LapNumber", "MiniSector"]
     if "RaceId" in observed.columns:
         duplicate_columns.insert(0, "RaceId")
