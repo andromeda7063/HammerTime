@@ -5,8 +5,6 @@ strictly on the identical split from M5 to benchmark HammerTime ST-GNN.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import logging
 from pathlib import Path
 import numpy as np
@@ -55,7 +53,9 @@ def extract_isolated_car_features(dataset_samples: list):
             X_flat_list.append(car_traj[-1])  # latest snapshot features
             y_list.append(float(target[c_idx].item()))
 
-    X_seq = np.array(X_seq_list, dtype=np.float32)
+    if not X_seq_list:
+        raise ValueError("No valid car targets are available for baseline training or evaluation.")
+    X_seq = np.asarray(X_seq_list, dtype=np.float32)
     X_flat = np.array(X_flat_list, dtype=np.float32)
     y = np.array(y_list, dtype=np.float32)
 
@@ -92,8 +92,15 @@ def train_xgboost_baseline(X_train: np.ndarray, y_train: np.ndarray, X_test: np.
     """
     Trains single-car XGBoost regressor and calculates MAE and R².
     """
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise ValueError("XGBoost requires non-empty train and test samples.")
     try:
         import xgboost as xgb
+    except ImportError:
+        logger.warning("XGBoost is unavailable; no XGBoost score was measured.")
+        return {"available": False, "reason": "xgboost package is not installed", "mae_sec": None,
+                "r2_score": None, "predictions": None}
+    try:
         xgb_cfg = config.get("baselines", {}).get("xgboost", {})
         n_est = xgb_cfg.get("n_estimators", 100)
         max_d = xgb_cfg.get("max_depth", 6)
@@ -104,7 +111,8 @@ def train_xgboost_baseline(X_train: np.ndarray, y_train: np.ndarray, X_test: np.
             n_estimators=n_est,
             max_depth=max_d,
             learning_rate=lr,
-            random_state=42,
+            subsample=xgb_cfg.get("subsample", 0.8),
+            random_state=config.get("data", {}).get("random_seed", 42),
             n_jobs=-1
         )
         model.fit(X_train, y_train)
@@ -114,13 +122,10 @@ def train_xgboost_baseline(X_train: np.ndarray, y_train: np.ndarray, X_test: np.
         r2 = float(r2_score(y_test, preds))
 
         logger.info(f"XGBoost Baseline Results | MAE: {mae:.4f} s | R²: {r2:.4f}")
-        return {"mae_sec": mae, "r2_score": r2, "predictions": preds}
-    except Exception as e:
-        logger.warning(f"XGBoost training failed or package unavailable: {e}")
-        # Synthetic fallback based on empirical expected benchmark (R² ≈ 0.50)
-        mae = float(mean_absolute_error(y_test, y_test * 0.5 + np.random.normal(0, 0.15, len(y_test))))
-        r2 = 0.50
-        return {"mae_sec": mae, "r2_score": r2, "predictions": np.zeros_like(y_test)}
+        return {"available": True, "mae_sec": mae, "r2_score": r2, "predictions": preds}
+    except Exception:
+        logger.exception("XGBoost training failed; refusing to substitute fabricated benchmark scores.")
+        raise
 
 
 def train_lstm_baseline(X_train_seq: np.ndarray, y_train: np.ndarray, X_test_seq: np.ndarray, y_test: np.ndarray, config: dict) -> dict:
@@ -134,12 +139,22 @@ def train_lstm_baseline(X_train_seq: np.ndarray, y_train: np.ndarray, X_test_seq
     lr = lstm_cfg.get("lr", 0.001)
 
     in_dim = X_train_seq.shape[2]
-    model = IsolatedCarLSTM(in_dim=in_dim, hidden_dim=hidden_dim).to(device)
+    if len(y_train) == 0 or len(y_test) == 0:
+        raise ValueError("LSTM requires non-empty train and test samples.")
+    seed = int(config.get("data", {}).get("random_seed", 42))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    model = IsolatedCarLSTM(in_dim=in_dim, hidden_dim=hidden_dim,
+                            num_layers=lstm_cfg.get("num_layers", 2),
+                            dropout=lstm_cfg.get("dropout", 0.1)).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.L1Loss()
 
     train_ds = TensorDataset(torch.tensor(X_train_seq), torch.tensor(y_train))
-    loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+    generator = torch.Generator().manual_seed(seed)
+    loader = DataLoader(train_ds, batch_size=int(lstm_cfg.get("batch_size", 64)),
+                        shuffle=True, generator=generator)
 
     logger.info(f"Training isolated LSTM baseline ({epochs} epochs)...")
     model.train()
@@ -161,7 +176,7 @@ def train_lstm_baseline(X_train_seq: np.ndarray, y_train: np.ndarray, X_test_seq
     r2 = float(r2_score(y_test, preds))
 
     logger.info(f"LSTM Baseline Results | MAE: {mae:.4f} s | R²: {r2:.4f}")
-    return {"mae_sec": mae, "r2_score": r2, "predictions": preds}
+    return {"available": True, "mae_sec": mae, "r2_score": r2, "predictions": preds}
 
 
 def run_baselines(train_samples: list, test_samples: list, config: dict) -> dict:
@@ -177,10 +192,13 @@ def run_baselines(train_samples: list, test_samples: list, config: dict) -> dict
 
     return {
         "xgboost": {
+            "available": xgb_results.get("available", True),
+            "reason": xgb_results.get("reason"),
             "mae_sec": xgb_results["mae_sec"],
             "r2_score": xgb_results["r2_score"]
         },
         "lstm": {
+            "available": lstm_results.get("available", True),
             "mae_sec": lstm_results["mae_sec"],
             "r2_score": lstm_results["r2_score"]
         }

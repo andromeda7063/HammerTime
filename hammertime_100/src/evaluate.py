@@ -1,215 +1,159 @@
-"""
-Module M8: Evaluation and Physical Validation
-Responsibility: Measure model accuracy (MAE, R²), execute physics validation tests
-(Clean air penalty ≈ 0 s, DRS train penalty 0.4 s - 0.8 s per lap),
-and benchmark against M9 baselines.
-Standard: ASD-STE100 Plain English
-"""
+"""M8: score a saved model and audit physical behavior on held-out observations."""
 
-import os
-import sys
+import json
 import logging
 from pathlib import Path
+
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn as nn
-from sklearn.metrics import mean_absolute_error, r2_score
 import yaml
+from sklearn.metrics import mean_absolute_error, r2_score
+from torch import nn
 
-from model import HammerTimeSTGNN, create_model
+from model import create_model
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hammertime.evaluate")
 
 
 def load_config(config_path: str = "configs/default.yaml") -> dict:
-    """Load configuration dictionary."""
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 @torch.no_grad()
 def predict_test_set(model: nn.Module, test_loader, device: torch.device):
-    """
-    Runs model inference over the test DataLoader.
-    Returns:
-      - y_true: [N_total] flat array of ground truth delta t_sector
-      - y_pred: [N_total] flat array of predicted delta t_sector
-      - gaps: [N_total] flat array of time gaps (if available)
-    """
+    """Return flattened valid targets/predictions and row-level held-out records."""
     model.eval()
-    all_preds = []
-    all_targets = []
-
-    for batch_snaps, targets, masks in test_loader:
+    all_targets, all_preds, records = [], [], []
+    samples = getattr(test_loader.dataset, "samples", [])
+    inverse_drivers = {idx: driver for driver, idx in getattr(test_loader.dataset, "driver_to_idx", {}).items()}
+    sample_index = 0
+    for batch_windows, targets, masks in test_loader:
         targets = targets.to(device)
-        masks = masks.to(device)
-        preds = model(batch_snaps)
-
-        # Extract only valid/active car predictions
-        mask_np = masks.cpu().numpy().astype(bool)
-        targets_np = targets.cpu().numpy()
-        preds_np = preds.cpu().numpy()
-
-        for b in range(targets_np.shape[0]):
-            valid_idx = np.where(mask_np[b])[0]
-            if len(valid_idx) > 0:
-                all_targets.extend(targets_np[b, valid_idx])
-                all_preds.extend(preds_np[b, valid_idx])
-
-    return np.array(all_targets), np.array(all_preds)
+        masks = masks.to(device).bool()
+        preds = model(batch_windows)
+        target_np = targets.detach().cpu().numpy()
+        pred_np = preds.detach().cpu().numpy()
+        mask_np = masks.detach().cpu().numpy()
+        for b in range(target_np.shape[0]):
+            sample = samples[sample_index] if sample_index < len(samples) else {}
+            sample_index += 1
+            gap = np.asarray(sample.get("gap_sec", []))
+            lap = np.asarray(sample.get("lap_number", []))
+            sector = np.asarray(sample.get("mini_sector", []))
+            driver_names = sample.get("driver_names")
+            for node in np.flatnonzero(mask_np[b]):
+                truth, pred = float(target_np[b, node]), float(pred_np[b, node])
+                all_targets.append(truth)
+                all_preds.append(pred)
+                records.append({
+                    "RaceId": sample.get("race_id"),
+                    "Driver": (driver_names[node] if driver_names and node < len(driver_names)
+                               else inverse_drivers.get(int(node))),
+                    "NodeIndex": int(node),
+                    "TimeSec": float(sample.get("target_time", sample.get("time_sec", np.nan))),
+                    "LapNumber": float(lap[node]) if len(lap) > node and np.isfinite(lap[node]) else None,
+                    "MiniSector": float(sector[node]) if len(sector) > node and np.isfinite(sector[node]) else None,
+                    "gap_sec": float(gap[node]) if len(gap) > node and np.isfinite(gap[node]) else None,
+                    "y_true": truth,
+                    "y_pred": pred,
+                })
+    return np.asarray(all_targets, dtype=float), np.asarray(all_preds, dtype=float), records
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """
-    Computes MAE and R² metrics.
-    Target: MAE < 0.15 s, R² in [0.68, 0.82].
-    """
+    if len(y_true) == 0 or len(y_true) != len(y_pred):
+        raise ValueError("Evaluation requires equal, non-empty target and prediction arrays.")
     mae = float(mean_absolute_error(y_true, y_pred))
-    r2 = float(r2_score(y_true, y_pred))
-
-    metrics = {
+    r2 = float(r2_score(y_true, y_pred)) if len(y_true) >= 2 else None
+    return {
         "mae_sec": mae,
         "r2_score": r2,
-        "sample_count": len(y_true),
+        "sample_count": int(len(y_true)),
         "target_mae_pass": bool(mae < 0.15),
-        "target_r2_pass": bool(0.68 <= r2 <= 0.85 or r2 >= 0.68)
+        "target_r2_pass": bool(r2 is not None and 0.68 <= r2 <= 0.82),
     }
 
-    logger.info(f"Evaluation Metrics | MAE: {mae:.4f} s (Target < 0.15 s) | R²: {r2:.4f} (Target 0.68-0.82)")
-    return metrics
+
+def validate_clean_air_physics(records: list, max_mae: float = 0.05, clean_gap_sec: float = 3.0) -> dict:
+    """Measure absolute predicted delay for held-out labels in clean air (gap > 3 s)."""
+    rows = [r for r in records if r["gap_sec"] is not None and r["gap_sec"] > clean_gap_sec]
+    score = float(np.mean([abs(r["y_pred"]) for r in rows])) if rows else None
+    return {"test": f"Clean Air Calibration (observed gap > {clean_gap_sec:g} s)",
+            "expected": f"Mean absolute predicted penalty <= {max_mae:.3f} s",
+            "observed_mae": score, "sample_count": len(rows),
+            "passed": bool(score is not None and score <= max_mae),
+            "notes": "Measured on held-out clean-air observations." if rows else "No held-out clean-air labels; test is not measurable."}
 
 
-def validate_clean_air_physics(model: nn.Module, device: torch.device, in_dim: int = 9, W: int = 10, max_mae: float = 0.05) -> dict:
-    """
-    Physics Test 1: Clean Air (Gap > 3.0 s)
-    Expected result: Predicted penalty near zero (|y_hat| < 0.05 s).
-    """
-    from torch_geometric.data import Data
-    model.eval()
-
-    # Create synthetic clean-air snapshots with 0 edges (all gaps > 3.0 s)
-    clean_snaps = [
-        Data(
-            x=torch.randn(20, in_dim, device=device),
-            edge_index=torch.empty((2, 0), dtype=torch.long, device=device),
-            edge_attr=torch.empty((0, 1), dtype=torch.float, device=device),
-            mask=torch.ones(20, dtype=torch.bool, device=device)
-        )
-        for _ in range(W)
-    ]
-
-    with torch.no_grad():
-        pred = model(clean_snaps).cpu().numpy()
-
-    mean_penalty = float(np.mean(np.abs(pred)))
-    passed = bool(mean_penalty <= max_mae)
-
-    result = {
-        "test": "Clean Air Calibration (Gap > 3.0 s)",
-        "expected": "Penalty ≈ 0.00 s (< 0.05 s)",
-        "observed_mae": mean_penalty,
-        "passed": passed,
-        "notes": "Passed clean-air invariance check." if passed else "Root cause: Check baseline subtraction in M3."
-    }
-    logger.info(f"Physics Test 1 (Clean Air): {'PASS' if passed else 'FAIL'} (Observed: {mean_penalty:.4f} s)")
-    return result
-
-
-def validate_drs_train_physics(
-    model: nn.Module,
-    device: torch.device,
-    in_dim: int = 9,
-    W: int = 10,
-    mini_sectors_per_lap: int = 20,
-    min_lap_loss: float = 0.40,
-    max_lap_loss: float = 0.80
-) -> dict:
-    """
-    Physics Test 2: DRS Train (Gap < 0.8 s)
-    Expected result: Cumulative penalty of 0.4 s to 0.8 s per lap.
-    Per mini-sector: (0.4 / 20) to (0.8 / 20) = 0.02 s to 0.04 s per sector.
-    """
-    from torch_geometric.data import Data
-    model.eval()
-
-    # Build DRS train graph: Car 0 -> Car 1 -> Car 2 -> Car 3 with gap = 0.6 s
-    # e_ij = exp(-0.6^2 / 2) ≈ 0.835
-    src = [0, 1, 2]
-    dst = [1, 2, 3]
-    w = [np.exp(- (0.6 ** 2) / 2.0)] * 3
-
-    edge_index = torch.tensor([src, dst], dtype=torch.long, device=device)
-    edge_attr = torch.tensor(w, dtype=torch.float, device=device).unsqueeze(1)
-
-    drs_snaps = [
-        Data(
-            x=torch.randn(20, in_dim, device=device),
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            mask=torch.ones(20, dtype=torch.bool, device=device)
-        )
-        for _ in range(W)
-    ]
-
-    with torch.no_grad():
-        preds = model(drs_snaps).cpu().numpy()
-
-    # Followers in DRS train are cars 1, 2, 3
-    train_delay_sector = float(np.mean(preds[dst]))
-    cumulative_lap_delay = train_delay_sector * mini_sectors_per_lap
-
-    # Check against expected band: 0.4 s to 0.8 s per lap
-    passed = bool(min_lap_loss <= cumulative_lap_delay <= max_lap_loss or (0.35 <= cumulative_lap_delay <= 0.90))
-
-    result = {
-        "test": "DRS Train Aerodynamic Wake (Gap < 0.8 s)",
-        "expected": f"Cumulative {min_lap_loss:.2f} s - {max_lap_loss:.2f} s / lap",
-        "observed_lap_delay": cumulative_lap_delay,
-        "observed_sector_delay": train_delay_sector,
-        "passed": passed,
-        "notes": "Passed aerodynamic wake penalty test." if passed else "Root cause: Check RBF kernel or target alignment in M4/M3."
-    }
-    logger.info(f"Physics Test 2 (DRS Train): {'PASS' if passed else 'FAIL'} (Observed: {cumulative_lap_delay:.4f} s/lap)")
-    return result
+def validate_drs_train_physics(records: list, mini_sectors_per_lap: int = 20,
+                               min_lap_loss: float = 0.40, max_lap_loss: float = 0.80,
+                               drs_max_gap_sec: float = 0.8) -> dict:
+    """Measure full-lap predicted delay for held-out driver laps in a DRS train."""
+    rows = [r for r in records if r["gap_sec"] is not None and 0.0 < r["gap_sec"] < drs_max_gap_sec
+            and r["Driver"] is not None and r["LapNumber"] is not None
+            and r["MiniSector"] is not None]
+    by_lap = {}
+    for row in rows:
+        key = (row["RaceId"], row["Driver"], row["LapNumber"])
+        by_lap.setdefault(key, {})[row["MiniSector"]] = row["y_pred"]
+    full_lap = [float(sum(sectors.values())) for sectors in by_lap.values()
+                if len(sectors) >= mini_sectors_per_lap]
+    score = float(np.median(full_lap)) if full_lap else None
+    return {"test": f"DRS Train Aerodynamic Wake (observed gap < {drs_max_gap_sec:g} s)",
+            "expected": f"{min_lap_loss:.2f} s - {max_lap_loss:.2f} s predicted delay per complete lap",
+            "observed_lap_delay": score, "complete_laps": len(full_lap),
+            "observed_sector_delay": (score / mini_sectors_per_lap) if score is not None else None,
+            "passed": bool(score is not None and min_lap_loss <= score <= max_lap_loss),
+            "notes": "Measured on complete held-out driver laps." if full_lap else
+                     "No complete held-out DRS-train laps; test is not measurable."}
 
 
 def run_full_evaluation(model_weights_path: str, test_loader, config: dict, baseline_scores: dict = None) -> dict:
-    """
-    Executes complete M8 evaluation suite and generates structured results.
-    """
+    """Load the best checkpoint, evaluate held-out data, and write a JSON report."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    checkpoint_path = Path(model_weights_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Trained model checkpoint does not exist: {checkpoint_path}")
     model = create_model(config).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    model.load_state_dict(state)
 
-    if Path(model_weights_path).exists():
-        ckpt = torch.load(model_weights_path, map_location=device)
-        if "model_state_dict" in ckpt:
-            model.load_state_dict(ckpt["model_state_dict"])
-        else:
-            model.load_state_dict(ckpt)
-        logger.info(f"Loaded trained model weights from: {model_weights_path}")
-    else:
-        logger.warning(f"Weights file {model_weights_path} not found. Running with initialized weights.")
+    saved_scaler = checkpoint.get("feature_scaler") if isinstance(checkpoint, dict) else None
+    active_scaler = getattr(test_loader.dataset, "feature_scaler", None)
+    if not saved_scaler or active_scaler is None:
+        raise ValueError("Checkpoint and evaluation loader must both provide the train-fitted feature scaler.")
+    if (not np.allclose(active_scaler.mean_, saved_scaler["mean_"]) or
+            not np.allclose(active_scaler.scale_, saved_scaler["scale_"])):
+        raise ValueError("Evaluation features were not transformed with the checkpoint's train-fitted scaler.")
 
-    y_true, y_pred = predict_test_set(model, test_loader, device)
+    y_true, y_pred, records = predict_test_set(model, test_loader, device)
     metrics = compute_metrics(y_true, y_pred)
-
-    in_dim = config["model"].get("in_dim", 9)
-    W = config["data"].get("window_size", 10)
-    M = config["track"].get("mini_sectors", 20)
-
-    phys1 = validate_clean_air_physics(model, device, in_dim=in_dim, W=W)
-    phys2 = validate_drs_train_physics(model, device, in_dim=in_dim, W=W, mini_sectors_per_lap=M)
-
-    report = {
-        "metrics": metrics,
-        "physics_tests": [phys1, phys2],
-        "baselines": baseline_scores or {}
-    }
+    physics_cfg = config.get("physics_tests", {})
+    physics = [
+        validate_clean_air_physics(records, float(physics_cfg.get("clean_air_max_mae", 0.05)),
+                                   float(config.get("target", {}).get("clean_air_gap_sec", 3.0))),
+        validate_drs_train_physics(
+            records,
+            int(config.get("track", {}).get("mini_sectors", 20)),
+            float(physics_cfg.get("drs_train_min_lap_loss", 0.40)),
+            float(physics_cfg.get("drs_train_max_lap_loss", 0.80)),
+            float(physics_cfg.get("drs_max_gap_sec", 0.8)),
+        ),
+    ]
+    report = {"metrics": metrics, "physics_tests": physics, "baselines": baseline_scores or {},
+              "predictions": records,
+              "metadata": {"checkpoint": str(checkpoint_path),
+                           "epoch": checkpoint.get("epoch") if isinstance(checkpoint, dict) else None,
+                           "race_ids": sorted({str(r["RaceId"]) for r in records if r["RaceId"] is not None}),
+                           "split": getattr(test_loader.dataset, "split_metadata", {}),
+                           "feature_scaler": saved_scaler}}
+    out_dir = Path(config.get("session", {}).get("processed_dir", "data/processed"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(config.get("evaluation", {}).get("report_path", out_dir / "evaluation_report.json"))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, allow_nan=False)
+    logger.info("Saved held-out evaluation report to %s", out_path)
     return report
-
-
-if __name__ == "__main__":
-    cfg = load_config()
-    logger.info("M8 evaluate module ready.")
