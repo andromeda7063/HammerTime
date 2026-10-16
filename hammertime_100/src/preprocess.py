@@ -120,6 +120,7 @@ def align_driver_telemetry(
     # Attach Lap information
     resampled["LapNumber"] = 1
     resampled["Compound"] = "MEDIUM"
+    resampled["Team"] = None
     resampled["TyreLife"] = 1.0
     resampled["IsPitLap"] = False
     resampled["IsSafetyCar"] = False
@@ -145,6 +146,9 @@ def align_driver_telemetry(
                 resampled.loc[mask, "LapNumber"] = lap_num
                 compound = str(lap.get("Compound", "MEDIUM")).upper()
                 resampled.loc[mask, "Compound"] = compound if compound in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] else "MEDIUM"
+                team = lap.get("Team")
+                if pd.notna(team):
+                    resampled.loc[mask, "Team"] = str(team)
                 resampled.loc[mask, "TyreLife"] = float(lap.get("TyreLife", 1.0))
                 
                 # Check pit
@@ -174,8 +178,10 @@ def compute_time_gaps(
     Delta t_ij = Distance_ahead / Speed_follower
     """
     results = []
-    # Group by uniform timestamp
-    for _, group in aligned_grid.groupby("TimeSec", sort=True):
+    # Group by race and timestamp so concatenated sessions never affect one
+    # another's running order or leader/follower gaps.
+    group_keys = ["RaceId", "TimeSec"] if "RaceId" in aligned_grid.columns else ["TimeSec"]
+    for _, group in aligned_grid.groupby(group_keys, sort=True):
         group = group.copy()
         valid_rows = group.get("IsValid", pd.Series(True, index=group.index)).fillna(False).astype(bool)
         active = group[~group["IsPitLap"].fillna(False).astype(bool) & valid_rows].copy()

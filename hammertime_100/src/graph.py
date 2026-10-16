@@ -147,6 +147,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
         group = grouped.get_group(t_sec)
         x_mat = np.zeros((num_nodes, node_dim), dtype=np.float32)
         mask = np.zeros(num_nodes, dtype=bool)
+        driver_names = [None] * num_nodes
 
         ahead_map = {}
         gap_map = {}
@@ -155,6 +156,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             drv = row["Driver"]
             if drv in driver_to_idx:
                 idx = driver_to_idx[drv]
+                driver_names[idx] = str(drv)
                 # Check if active (not retired / not in pit)
                 is_valid = bool(row.get("IsValid", True)) if pd.notna(row.get("IsValid", True)) else False
                 is_pit = bool(row.get("IsPitLap", False)) if pd.notna(row.get("IsPitLap", False)) else False
@@ -185,6 +187,10 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
         race_id = group["RaceId"].iloc[0] if "RaceId" in group.columns else default_race_id
         if "RaceId" in group.columns and group["RaceId"].nunique(dropna=True) > 1:
             raise ValueError(f"Timestamp {t_sec} contains rows from multiple races. Build snapshots per race.")
+        is_safety_car = (
+            group["IsSafetyCar"].fillna(False).astype(bool).any()
+            if "IsSafetyCar" in group.columns else False
+        )
         data = Data(
             x=torch.tensor(x_mat, dtype=torch.float),
             edge_index=edge_index,
@@ -192,6 +198,8 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             mask=torch.tensor(mask, dtype=torch.bool),
             time_sec=float(t_sec),
             race_id=str(race_id),
+            driver_names=tuple(driver_names),
+            is_safety_car=bool(is_safety_car),
         )
         snapshots.append(data)
 

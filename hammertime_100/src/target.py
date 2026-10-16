@@ -82,6 +82,9 @@ def calculate_mini_sector_durations(
                 "AvgGap": avg_gap,
                 "TimeSec": t_min  # reference timestamp
             }
+            if "Team" in grp.columns:
+                teams = grp["Team"].dropna().astype(str)
+                record["Team"] = teams.iloc[0] if not teams.empty else None
             if "RaceId" in clean_candidates.columns:
                 record["RaceId"] = race_id
             records.append(record)
@@ -102,13 +105,28 @@ def compute_clean_air_baselines(sector_durations: pd.DataFrame, clean_air_gap: f
         raise ValueError("target.min_clean_samples must be at least 1.")
 
     # Use a baseline only when the configured number of clean laps supports it.
-    primary_groups = clean_laps.groupby(["Driver", "Compound", "MiniSector"])["Duration"]
+    # Keep references within each session/circuit; sector times do not transfer
+    # between tracks even for the same driver and tyre compound.
+    primary_keys = ["Driver", "Compound", "MiniSector"]
+    team_keys = ["Team", "Compound", "MiniSector"]
+    grid_keys = ["Compound", "MiniSector"]
+    if "RaceId" in clean_laps.columns:
+        primary_keys.insert(0, "RaceId")
+        team_keys.insert(0, "RaceId")
+        grid_keys.insert(0, "RaceId")
+    primary_groups = clean_laps.groupby(primary_keys)["Duration"]
     primary_baseline = primary_groups.median()[primary_groups.size() >= min_samples].to_dict()
-    grid_groups = clean_laps.groupby(["Compound", "MiniSector"])["Duration"]
+    team_baseline = {}
+    if "Team" in clean_laps.columns:
+        team_laps = clean_laps.dropna(subset=["Team"])
+        team_groups = team_laps.groupby(team_keys)["Duration"]
+        team_baseline = team_groups.median()[team_groups.size() >= min_samples].to_dict()
+    grid_groups = clean_laps.groupby(grid_keys)["Duration"]
     grid_baseline = grid_groups.median()[grid_groups.size() >= min_samples].to_dict()
 
     return {
         "primary": primary_baseline,
+        "team": team_baseline,
         "grid": grid_baseline,
     }
 
@@ -121,6 +139,14 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     clean_gap = config["target"]["clean_air_gap_sec"]
     min_samples = config["target"]["min_clean_samples"]
     clip_range = config["target"]["clip_delta_sec"]
+
+    aligned_df = aligned_df.copy()
+    if "RaceId" not in aligned_df.columns:
+        session_cfg = config.get("session", {})
+        aligned_df["RaceId"] = str(session_cfg.get("race_id") or (
+            f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"
+            f"{session_cfg.get('session_type', 'R')}"
+        ))
 
     logger.info("Computing sector durations from aligned telemetry...")
     sector_df = calculate_mini_sector_durations(
@@ -135,16 +161,20 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     labels = []
     for _, row in sector_df.iterrows():
+        race_id = row["RaceId"]
         drv = row["Driver"]
+        team = row.get("Team")
         cmp = row["Compound"]
         sec = row["MiniSector"]
         actual_dur = row["Duration"]
 
-        # Resolve the driver/compound baseline, then use the compound-grid
-        # baseline. Do not invent a nominal baseline when clean samples are absent.
-        base_dur = baselines["primary"].get((drv, cmp, sec))
+        # Resolve driver, teammate, then grid baselines. Do not invent a nominal
+        # value when clean samples are absent.
+        base_dur = baselines["primary"].get((race_id, drv, cmp, sec))
+        if base_dur is None and team is not None and pd.notna(team):
+            base_dur = baselines["team"].get((race_id, str(team), cmp, sec))
         if base_dur is None:
-            base_dur = baselines["grid"].get((cmp, sec))
+            base_dur = baselines["grid"].get((race_id, cmp, sec))
         if base_dur is None:
             continue
 
@@ -162,16 +192,12 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
             "Duration": actual_dur,
             "Baseline": base_dur,
             "DeltaT_Sector": delta_t_sector,
-            "AvgGap": row["AvgGap"]
+            "AvgGap": row["AvgGap"],
+            "Team": team,
+            "RaceId": race_id,
         })
 
     label_table = pd.DataFrame(labels)
-    if "RaceId" not in label_table.columns and config.get("session"):
-        session_cfg = config["session"]
-        label_table["RaceId"] = str(session_cfg.get("race_id") or (
-            f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"
-            f"{session_cfg.get('session_type', 'R')}"
-        ))
     if label_table.empty:
         raise ValueError("No target labels have a valid clean-air baseline. Need more clean laps per compound and mini-sector.")
     logger.info(f"Generated {len(label_table)} target labels. Mean DeltaT_Sector = {label_table['DeltaT_Sector'].mean():.4f} s.")
