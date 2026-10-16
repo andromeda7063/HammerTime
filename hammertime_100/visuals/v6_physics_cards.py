@@ -62,8 +62,9 @@ def render_physics_validation_cards(
     ca_value = f"{float(obs_ca):.3f} s" if obs_ca is not None else "NOT AVAILABLE"
     ax1.text(0.08, 0.32, ca_value, color=PURE_WHITE, fontsize=24, fontweight="heavy")
 
-    ax1.text(0.08, 0.22, "Expected Criterion:", color=TEXT_MUTED, fontsize=10)
-    ax1.text(0.08, 0.14, "Mean Absolute Error < 0.050 s", color=PURE_WHITE, fontsize=12, fontweight="bold")
+    ax1.text(0.08, 0.22, "Configured criterion:", color=TEXT_MUTED, fontsize=10)
+    clean_expected = clean_air_res.get("expected", "Not available")
+    ax1.text(0.08, 0.14, str(clean_expected), color=PURE_WHITE, fontsize=10, fontweight="bold", wrap=True)
 
     # --- Card 2: DRS Train Physics ---
     ax2.set_facecolor(CARD_BG)
@@ -97,8 +98,9 @@ def render_physics_validation_cards(
     drs_value = f"{float(obs_drs):+.2f} s / lap" if obs_drs is not None else "NOT AVAILABLE"
     ax2.text(0.08, 0.32, drs_value, color=PURE_WHITE, fontsize=24, fontweight="heavy")
 
-    ax2.text(0.08, 0.22, "Expected Criterion:", color=TEXT_MUTED, fontsize=10)
-    ax2.text(0.08, 0.14, "Cumulative 0.40 s - 0.80 s / lap", color=PURE_WHITE, fontsize=12, fontweight="bold")
+    ax2.text(0.08, 0.22, "Configured criterion:", color=TEXT_MUTED, fontsize=10)
+    drs_expected = drs_train_res.get("expected", "Not available")
+    ax2.text(0.08, 0.14, str(drs_expected), color=PURE_WHITE, fontsize=10, fontweight="bold", wrap=True)
 
     fig.suptitle("F1 BROADCAST INSIGHTS · AERODYNAMIC GROUND-TRUTH PHYSICS EVALUATION",
                  color=F1_RED, fontsize=12, fontweight="heavy", y=0.97)

@@ -48,20 +48,21 @@ def generate_blocker_drilldown(
     # Focus driver badge
     d_color = TEAM_COLORS.get(focus_driver, PURE_WHITE)
     ax_info.text(0.08, 0.88, "DRIVER DRILLDOWN · TRAFFIC IMPACT", color=F1_RED, fontsize=10, fontweight="heavy")
-    ax_info.text(0.08, 0.80, f"{focus_driver} · LIVE TELEMETRY", color=PURE_WHITE, fontsize=20, fontweight="heavy")
+    ax_info.text(0.08, 0.80, f"{focus_driver} · RACE TELEMETRY", color=PURE_WHITE, fontsize=20, fontweight="heavy")
 
-    ax_info.text(0.08, 0.68, "TOTAL ESTIMATED DELAY LOST TO TRAFFIC:", color=TEXT_MUTED, fontsize=9)
+    ax_info.text(0.08, 0.68, "TRAFFIC-ASSOCIATED DELAY ESTIMATE:", color=TEXT_MUTED, fontsize=9)
     lost_label = f"+{total_seconds_lost:.2f} s" if total_seconds_lost is not None else "NOT AVAILABLE"
     ax_info.text(0.08, 0.58, lost_label, color=F1_RED, fontsize=24, fontweight="heavy")
 
-    ax_info.text(0.08, 0.46, "PRIMARY DISTURBANCE SOURCES (BLOCKERS):", color=TEXT_MUTED, fontsize=9, fontweight="bold")
+    ax_info.text(0.08, 0.46, "CARS AHEAD IN WAKE RANGE:", color=TEXT_MUTED, fontsize=9, fontweight="bold")
 
     y_pos = 0.36
     for b_drv, b_sec, b_gap in (top_blockers or []):
         b_col = TEAM_COLORS.get(b_drv, PURE_WHITE)
         ax_info.text(0.08, y_pos, f"● {b_drv}", color=b_col, fontsize=12, fontweight="heavy")
-        ax_info.text(0.28, y_pos, f"+{b_sec:.2f} s lost", color=PURE_WHITE, fontsize=11, fontweight="bold")
-        ax_info.text(0.65, y_pos, f"Avg Gap: {b_gap:.2f} s", color=TEXT_MUTED, fontsize=10)
+        delay_text = f"{b_sec:+.2f} s associated" if b_sec is not None else "Delay unavailable"
+        ax_info.text(0.28, y_pos, delay_text, color=PURE_WHITE, fontsize=10, fontweight="bold")
+        ax_info.text(0.65, y_pos, f"Mean gap: {b_gap:.2f} s", color=TEXT_MUTED, fontsize=9)
         y_pos -= 0.10
 
     # --- Right Panel: Gap History Timeline ---

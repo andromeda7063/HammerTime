@@ -69,7 +69,7 @@ def build_track_figure(frame: pd.DataFrame, selected_car: str, route: pd.DataFra
         return fig
     frame = frame.copy()
     frame = frame.dropna(subset=["Driver"])
-    has_xy = {"X", "Y"}.issubset(frame.columns) and frame[["X", "Y"]].notna().all(axis=None)
+    has_xy = {"X", "Y"}.issubset(frame.columns) and frame[["X", "Y"]].notna().to_numpy().all()
     if has_xy:
         frame = frame[(frame["X"] != 0) | (frame["Y"] != 0)]
     else:
@@ -205,11 +205,39 @@ with tab_replay:
                 st.caption(f"Ahead: {row.get('DriverAhead', 'unknown')} · Mini-sector: {row.get('MiniSector', 'unknown')}")
     st.divider()
     st.subheader("Driver blocker analysis")
-    render_visual(VISUALS_DIR / "v7_blockers.png", "V7 · Who is slowing you down")
+    if telemetry is not None and not telemetry.empty and selected_car is not None:
+        focus_history = telemetry[telemetry["Driver"].astype(str) == selected_car].copy()
+        if "LapNumber" in focus_history and "DeltaT" in focus_history:
+            focus_history["LapNumber"] = pd.to_numeric(focus_history["LapNumber"], errors="coerce")
+            focus_history["DeltaT"] = pd.to_numeric(focus_history["DeltaT"], errors="coerce")
+            gap_history = focus_history.groupby("LapNumber", as_index=False)["DeltaT"].mean().dropna()
+            if not gap_history.empty:
+                history_fig = go.Figure()
+                history_fig.add_hrect(y0=0, y1=0.8, fillcolor=RED, opacity=0.14, line_width=0, annotation_text="Severe wake")
+                history_fig.add_hrect(y0=0.8, y1=2.0, fillcolor="#FF9900", opacity=0.10, line_width=0, annotation_text="Wake range")
+                history_fig.add_hline(y=3.0, line_dash="dash", line_color="#10B981", annotation_text="Clean-air threshold")
+                history_fig.add_trace(go.Scatter(x=gap_history["LapNumber"], y=gap_history["DeltaT"], mode="lines+markers", name=f"{selected_car} mean gap"))
+                history_fig.update_layout(title=f"{selected_car} · mean gap to car ahead by lap", xaxis_title="Lap", yaxis_title="Gap (s)", plot_bgcolor=CARD, paper_bgcolor=CARBON, font_color=WHITE)
+                st.plotly_chart(history_fig, use_container_width=True)
+            close = focus_history[focus_history["DeltaT"].between(0, 2.0, inclusive="right")].dropna(subset=["DriverAhead"])
+            if not close.empty:
+                blockers = close.groupby("DriverAhead", as_index=False).agg(
+                    observations=("DeltaT", "size"), mean_gap_sec=("DeltaT", "mean")
+                ).sort_values(["observations", "mean_gap_sec"], ascending=[False, True])
+                blockers = blockers.rename(columns={"DriverAhead": "Car ahead", "mean_gap_sec": "Mean observed gap (s)"})
+                st.caption("Cars ahead ranked by observed close-gap exposure; proximity alone does not establish cause.")
+                st.dataframe(blockers, hide_index=True, use_container_width=True)
+            else:
+                st.info("No close-gap observations are available for this driver.")
+        else:
+            st.info("Telemetry is missing lap or gap fields for this drilldown.")
 
 with tab_diagnostics:
     st.subheader("Evaluation and physics checks")
     render_report_metrics(report)
+    if report and report.get("metadata", {}).get("split", {}).get("test", {}).get("race_ids"):
+        held_out_races = ", ".join(report["metadata"]["split"]["test"]["race_ids"])
+        st.caption(f"Reported summary metrics cover the held-out split: {held_out_races}.")
     if report:
         baselines = report.get("baselines", {})
         if baselines:

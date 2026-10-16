@@ -80,7 +80,7 @@ def generate_delay_heatmap(
         # Callout annotation
         ax.text(
             x_min + (x_max - x_min) / 2.0, y_min - 0.7,
-            "CRITICAL DRS TRAIN CONGESTION BAND (+0.55s / sector)",
+            "OBSERVED DRS-TRAIN CONGESTION REGION",
             color=F1_RED, fontsize=9, fontweight="bold", ha="center",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="#101018", edgecolor=F1_RED, lw=1)
         )
