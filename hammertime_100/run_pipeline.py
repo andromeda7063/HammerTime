@@ -151,7 +151,7 @@ def _render_real_outputs(aligned: pd.DataFrame, snapshots: list, labels: pd.Data
             prediction_df["y_true"].to_numpy(), prediction_df["y_pred"].to_numpy(),
             mae=float(metrics["mae_sec"]),
             r2=(float(metrics["r2_score"]) if metrics.get("r2_score") is not None else None),
-            circuit_name=str(race_id or "Configured sessions"), output_path=str(output),
+            circuit_name="Configured sessions (held-out aggregate)", output_path=str(output),
         )
         generated.append(str(output))
 
