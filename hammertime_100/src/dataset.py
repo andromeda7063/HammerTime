@@ -66,7 +66,9 @@ def fit_and_apply_scaler(snapshots: list, train_indices: list):
 
 def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: dict,
                                      W: int = 10, K: int = 5, sample_period_sec: float = 0.25,
-                                     timestamp_tolerance_sec: float | None = None):
+                                     timestamp_tolerance_sec: float | None = None,
+                                     continuity_tolerance_sec: float | None = None,
+                                     min_valid_targets: int = 1):
     """Build chronological W-frame inputs with labels exactly K frames after the input."""
     required = {"Driver", "TimeSec", "DeltaT_Sector"}
     missing = required.difference(labels_df.columns)
@@ -80,6 +82,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
         raise ValueError("Graph snapshots must have unique timestamps.")
     if timestamp_tolerance_sec is None:
         timestamp_tolerance_sec = sample_period_sec * 0.51
+    if continuity_tolerance_sec is None:
+        continuity_tolerance_sec = sample_period_sec * 0.2
 
     # Match each label to its nearest grid point, but never silently attach a label
     # to a distant timestamp (which can leak a later sector's target backwards).
@@ -113,7 +117,7 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
             continue
         # Every adjacent frame must be on the configured grid. This rejects gaps,
         # session boundaries, and pauses rather than making a window across them.
-        if len(local_times) > 1 and np.any(np.abs(np.diff(local_times) - sample_period_sec) > sample_period_sec * 0.2):
+        if len(local_times) > 1 and np.any(np.abs(np.diff(local_times) - sample_period_sec) > continuity_tolerance_sec):
             continue
         target_idx = stop - 1
         target_rows = labels_by_idx.get(target_idx)
@@ -148,7 +152,7 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                 if hasattr(row, "MiniSector") and pd.notna(getattr(row, "MiniSector")):
                     sectors[node] = float(getattr(row, "MiniSector"))
         valid &= _as_bool_mask(ordered[target_idx])
-        if valid.sum() < 1:
+        if valid.sum() < min_valid_targets:
             continue
         samples.append({"snapshots": ordered[start:start + W],
                         "target": torch.tensor(y, dtype=torch.float32),
@@ -166,7 +170,9 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
 
 def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: dict,
                            W: int = 10, K: int = 5, sample_period_sec: float = 0.25,
-                           timestamp_tolerance_sec: float | None = None):
+                           timestamp_tolerance_sec: float | None = None,
+                           continuity_tolerance_sec: float | None = None,
+                           min_valid_targets: int = 1):
     """Build windows independently per race when race IDs are available."""
     race_ids = [getattr(snap, "race_id", None) for snap in snapshots]
     if race_ids and all(race_id is not None for race_id in race_ids) and "RaceId" in labels_df.columns:
@@ -176,11 +182,12 @@ def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_i
             race_labels = labels_df[labels_df["RaceId"] == race_id]
             samples.extend(_build_windowed_samples_one_race(
                 race_snaps, race_labels, driver_to_idx, W, K, sample_period_sec,
-                timestamp_tolerance_sec
+                timestamp_tolerance_sec, continuity_tolerance_sec, min_valid_targets
             ))
         return samples
     return _build_windowed_samples_one_race(snapshots, labels_df, driver_to_idx, W, K,
-                                            sample_period_sec, timestamp_tolerance_sec)
+                                            sample_period_sec, timestamp_tolerance_sec,
+                                            continuity_tolerance_sec, min_valid_targets)
 
 
 def _partition_samples(samples, train_ratio, val_ratio, purge_steps):
@@ -238,7 +245,12 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     if hz <= 0:
         raise ValueError("preprocess.sample_hz must be positive.")
     period = 1.0 / hz
-    samples = build_windowed_samples(snapshots, labels_df, driver_to_idx, W, K, period)
+    samples = build_windowed_samples(
+        snapshots, labels_df, driver_to_idx, W, K, period,
+        float(data_cfg.get("timestamp_tolerance_sec", period * 0.51)),
+        float(data_cfg.get("continuity_tolerance_sec", period * 0.2)),
+        int(data_cfg.get("min_valid_targets_per_sample", 1)),
+    )
     if not samples:
         raise ValueError("No valid graph windows matched target labels on the configured time grid.")
     train_ratio = float(data_cfg["train_ratio"])
