@@ -7,6 +7,7 @@ Standard: ASD-STE100 Plain English
 
 import os
 import sys
+import textwrap
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -147,22 +148,15 @@ SAMPLE_BROADCAST_CARDS = [
 
 
 def render_ascii_card(c: dict) -> str:
-    """Renders broadcast card in exact ASCII box format."""
+    """Renders a wrapped broadcast card in a fixed-width ASCII box."""
     cat = f"[{c['category']}]"
-    title_line = f"  {c['title'].ljust(30)}{cat.rjust(16)}"
+    title_line = f"  {c['title'][:28].ljust(30)}{cat[:16].rjust(16)}"
     line2 = f"  {c['driver_pos']}  {c['driver']}  ·  behind {c['ahead_pos']}  {c['ahead']}  ·  gap {c['gap']:.1f} s"
-    line3 = f"  Projected loss: +{c['projected_loss_lap']:.2f} s / lap"
-    line4 = f"  {c['train_info']}"
-
-    box = (
-        f"┌─────────────────────────────────────────────────┐\n"
-        f"│{title_line.ljust(49)}│\n"
-        f"│{line2.ljust(49)}│\n"
-        f"│{line3.ljust(49)}│\n"
-        f"│{line4.ljust(49)}│\n"
-        f"└─────────────────────────────────────────────────┘"
-    )
-    return box
+    loss = c.get("projected_loss_lap")
+    line3 = f"  Extrapolated loss: {float(loss):+.2f} s / lap" if loss is not None else "  Extrapolated loss: unavailable"
+    lines = [title_line, line2, line3]
+    lines.extend(f"  {line}" for line in textwrap.wrap(str(c["train_info"]), width=45) or [""])
+    return "\n".join(["┌" + "─" * 49 + "┐", *("│" + line[:49].ljust(49) + "│" for line in lines), "└" + "─" * 49 + "┘"])
 
 
 def render_png_card(c: dict, output_dir: str = "broadcast/rendered"):
@@ -200,13 +194,14 @@ def render_png_card(c: dict, output_dir: str = "broadcast/rendered"):
     )
 
     # Projected Loss Delta
-    ax.text(0.06, 0.38, "PROJECTED LOSS:", color="#949498", fontsize=10, va="center")
-    loss_str = f"+{c['projected_loss_lap']:.2f} s / lap" if c['projected_loss_lap'] > 0 else "0.00 s (CLEAN AIR)"
-    loss_col = "#E10600" if c['projected_loss_lap'] > 0.3 else ("#FF9900" if c['projected_loss_lap'] > 0 else "#10B981")
+    ax.text(0.06, 0.38, "EXTRAPOLATED LOSS:", color="#949498", fontsize=10, va="center")
+    projected_loss = c.get("projected_loss_lap")
+    loss_str = f"+{projected_loss:.2f} s / lap" if projected_loss is not None and projected_loss > 0 else ("0.00 s (CLEAN AIR)" if projected_loss == 0 else "UNAVAILABLE")
+    loss_col = "#949498" if projected_loss is None else ("#E10600" if projected_loss > 0.3 else ("#FF9900" if projected_loss > 0 else "#10B981"))
     ax.text(0.35, 0.38, loss_str, color=loss_col, fontsize=15, fontweight="heavy", va="center")
 
     # Detail / Train info
-    ax.text(0.06, 0.20, c["train_info"], color="#949498", fontsize=9, va="center")
+    ax.text(0.06, 0.20, c["train_info"], color="#949498", fontsize=8, va="center")
 
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -217,11 +212,57 @@ def render_png_card(c: dict, output_dir: str = "broadcast/rendered"):
     return str(file_path)
 
 
-def generate_all_broadcast_cards(output_dir: str = "broadcast/rendered"):
-    """Generates all cards both in ASCII text and PNG graphics."""
+def build_broadcast_cards(telemetry, predictions=None, count: int = 10, mini_sectors_per_lap: int = 20):
+    """Builds up to ten cards from the tightest observed leader/follower gaps."""
+    required = {"Driver", "DriverAhead", "DeltaT", "LapNumber", "MiniSector"}
+    if not required.issubset(telemetry.columns):
+        raise ValueError(f"telemetry must include columns: {', '.join(sorted(required))}")
+    observed = telemetry.copy()
+    observed["DeltaT"] = observed["DeltaT"].astype(float)
+    observed = observed[observed["DeltaT"].gt(0) & observed["DeltaT"].le(2)].dropna(subset=["DriverAhead"])
+    duplicate_columns = ["Driver", "LapNumber", "MiniSector"]
+    if "RaceId" in observed.columns:
+        duplicate_columns.insert(0, "RaceId")
+    observed = observed.sort_values("DeltaT").drop_duplicates(duplicate_columns)
+    prediction_lookup = {}
+    if predictions is not None:
+        values_by_key = {}
+        for record in predictions:
+            key = (str(record.get("RaceId")), str(record.get("Driver")), int(record.get("LapNumber", -1)), int(record.get("MiniSector", -1)))
+            if record.get("y_pred") is not None:
+                values_by_key.setdefault(key, []).append(float(record["y_pred"]))
+        prediction_lookup = {key: float(sum(values) / len(values)) * mini_sectors_per_lap for key, values in values_by_key.items()}
+    cards = []
+    for index, (_, row) in enumerate(observed.head(count).iterrows(), start=1):
+        gap = float(row["DeltaT"])
+        lap = int(row["LapNumber"])
+        sector = int(row["MiniSector"])
+        follower = str(row["Driver"])
+        leader = str(row["DriverAhead"])
+        race_id = str(row.get("RaceId", ""))
+        loss = prediction_lookup.get((race_id, follower, lap, sector))
+        cards.append({
+            "id": f"CARD_{index:02d}",
+            "category": "SEVERE WAKE" if gap < 0.8 else "AERODYNAMIC WAKE",
+            "title": "TRAFFIC ALERT" if gap < 0.8 else "WAKE PROXIMITY",
+            "driver_pos": "FOLLOWER", "driver": follower,
+            "ahead_pos": "AHEAD", "ahead": leader, "gap": gap,
+            "projected_loss_lap": loss,
+            "train_info": f"Observed telemetry · {race_id + ' · ' if race_id else ''}Mini-sector {sector} · Lap {lap}; one-sector prediction × {mini_sectors_per_lap} sectors",
+            "badge_color": "#E10600" if gap < 0.8 else "#FF9900",
+        })
+    return cards
+
+
+def generate_all_broadcast_cards(output_dir: str = "broadcast/rendered", cards=None, demo: bool = False):
+    """Generates cards from runtime data; sample cards require explicit demo=True."""
+    if cards is None:
+        if not demo:
+            raise ValueError("Pass runtime cards or set demo=True to render the labeled sample set")
+        cards = SAMPLE_BROADCAST_CARDS
     ascii_cards = []
     png_paths = []
-    for c in SAMPLE_BROADCAST_CARDS:
+    for c in cards:
         ascii_box = render_ascii_card(c)
         ascii_cards.append(ascii_box)
         png_p = render_png_card(c, output_dir)
@@ -230,7 +271,7 @@ def generate_all_broadcast_cards(output_dir: str = "broadcast/rendered"):
 
 
 if __name__ == "__main__":
-    cards_txt, paths = generate_all_broadcast_cards()
+    cards_txt, paths = generate_all_broadcast_cards(demo=True)
     print(f"Generated {len(paths)} Broadcast PNG Cards.")
     print("\n--- SAMPLE ASCII BROADCAST CARD ---")
     print(cards_txt[0])

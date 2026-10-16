@@ -4,32 +4,44 @@ Cars x Mini-sectors delay matrix with DRS-train congestion band highlighted.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
 
-sys.path.append(os.path.dirname(__file__))
-from theme import (
+try:
+    from .theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN, TRAIN_YELLOW
+    )
+except ImportError:
+    from theme import (
     apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
     TEXT_MUTED, DRS_CYAN, TRAIN_YELLOW
-)
+    )
 
 
 def generate_delay_heatmap(
     delay_matrix: np.ndarray,
     drivers: list,
     mini_sectors: int = 20,
-    drs_band: tuple = (4, 9),  # Mini-sectors where DRS train occurs
-    drs_cars: list = [4, 5, 6, 7],
+    drs_band: tuple = None,
+    drs_cars: list = None,
     output_path: str = "visuals/v3_delay_heatmap.png"
 ):
     """
     Renders V3 Delay Heatmap (Cars x Mini-sectors).
     delay_matrix: shape [len(drivers), mini_sectors]
     """
+    delay_matrix = np.asarray(delay_matrix, dtype=float)
+    if delay_matrix.ndim != 2 or delay_matrix.shape != (len(drivers), mini_sectors):
+        raise ValueError("delay_matrix must have shape [len(drivers), mini_sectors]")
+    if not np.isfinite(delay_matrix).any():
+        raise ValueError("delay_matrix must contain at least one finite value")
+    if drs_band and (drs_band[0] < 0 or drs_band[1] >= mini_sectors or drs_band[0] > drs_band[1]):
+        raise ValueError("drs_band must be an inclusive valid mini-sector index range")
+    if drs_cars and any(index < 0 or index >= len(drivers) for index in drs_cars):
+        raise ValueError("drs_cars indices must refer to rows in drivers")
     apply_broadcast_theme()
     fig, ax = plt.subplots(figsize=(13, 8), dpi=150)
     fig.patch.set_facecolor(CARBON_DARK)
@@ -37,7 +49,7 @@ def generate_delay_heatmap(
 
     # Colormap: dark blue/purple -> red -> yellow
     im = ax.imshow(
-        delay_matrix,
+        np.ma.masked_invalid(delay_matrix),
         cmap="inferno",
         aspect="auto",
         vmin=-0.1,
@@ -68,7 +80,7 @@ def generate_delay_heatmap(
         # Callout annotation
         ax.text(
             x_min + (x_max - x_min) / 2.0, y_min - 0.7,
-            "CRITICAL DRS TRAIN CONGESTION BAND (+0.55s / sector)",
+            "OBSERVED DRS-TRAIN CONGESTION REGION",
             color=F1_RED, fontsize=9, fontweight="bold", ha="center",
             bbox=dict(boxstyle="round,pad=0.3", facecolor="#101018", edgecolor=F1_RED, lw=1)
         )
@@ -106,4 +118,4 @@ if __name__ == "__main__":
     mat = np.random.uniform(0.0, 0.15, (20, 20))
     # Inject DRS train into cars 4-7 in sectors 5-9
     mat[4:8, 5:10] += np.random.uniform(0.35, 0.65, (4, 5))
-    generate_delay_heatmap(mat, drivers, output_path="visuals/v3_delay_heatmap.png")
+    generate_delay_heatmap(mat, drivers, drs_band=(4, 9), drs_cars=[4, 5, 6, 7], output_path="visuals/v3_delay_heatmap.png")

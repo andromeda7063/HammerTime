@@ -23,26 +23,57 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def calculate_mini_sector_durations(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_mini_sector_durations(
+    df: pd.DataFrame,
+    max_gap_sec: float | None = None,
+) -> pd.DataFrame:
     """
     Computes the actual time elapsed in each mini-sector per lap and driver.
     """
     # Group by Driver, LapNumber, MiniSector
     # Filter out safety car and pit laps
-    clean_candidates = df[~df["IsPitLap"] & ~df["IsSafetyCar"]].copy()
+    valid = df.get("IsValid", pd.Series(True, index=df.index)).fillna(False).astype(bool)
+    clean_candidates = df[
+        valid
+        & ~df["IsPitLap"].fillna(False).astype(bool)
+        & ~df["IsSafetyCar"].fillna(False).astype(bool)
+    ].copy()
+    if clean_candidates.empty:
+        return pd.DataFrame()
+
+    sample_group = ["Driver"]
+    if "RaceId" in clean_candidates.columns:
+        sample_group.insert(0, "RaceId")
+    clean_candidates = clean_candidates.sort_values(sample_group + ["TimeSec"])
+    sample_steps = clean_candidates.groupby(sample_group)["TimeSec"].diff()
+    sample_steps = sample_steps[sample_steps > 0]
+    sample_period = float(sample_steps.median()) if not sample_steps.empty else 0.0
 
     records = []
-    grouped = clean_candidates.groupby(["Driver", "LapNumber", "MiniSector", "Compound"])
+    group_keys = ["Driver", "LapNumber", "MiniSector", "Compound"]
+    if "RaceId" in clean_candidates.columns:
+        group_keys.insert(0, "RaceId")
+    grouped = clean_candidates.groupby(group_keys)
 
-    for (driver, lap, sector, compound), grp in grouped:
+    for key, grp in grouped:
+        if "RaceId" in clean_candidates.columns:
+            race_id, driver, lap, sector, compound = key
+        else:
+            driver, lap, sector, compound = key
+        grp = grp.sort_values("TimeSec")
+        if max_gap_sec is not None and len(grp) > 1:
+            if grp["TimeSec"].diff().dropna().max() > max_gap_sec:
+                continue
         t_min = grp["TimeSec"].min()
         t_max = grp["TimeSec"].max()
-        duration = t_max - t_min
+        # Samples represent intervals. Include one grid interval so duration does
+        # not systematically lose one 4 Hz step at each sector boundary.
+        duration = t_max - t_min + sample_period
 
         # Realistic mini-sector duration check (e.g. 1.5s to 12s for a 20-sector lap)
         if 0.5 < duration < 20.0:
             avg_gap = grp["DeltaT"].mean()
-            records.append({
+            record = {
                 "Driver": driver,
                 "LapNumber": lap,
                 "MiniSector": sector,
@@ -50,7 +81,13 @@ def calculate_mini_sector_durations(df: pd.DataFrame) -> pd.DataFrame:
                 "Duration": duration,
                 "AvgGap": avg_gap,
                 "TimeSec": t_min  # reference timestamp
-            })
+            }
+            if "Team" in grp.columns:
+                teams = grp["Team"].dropna().astype(str)
+                record["Team"] = teams.iloc[0] if not teams.empty else None
+            if "RaceId" in clean_candidates.columns:
+                record["RaceId"] = race_id
+            records.append(record)
 
     return pd.DataFrame(records)
 
@@ -64,19 +101,33 @@ def compute_clean_air_baselines(sector_durations: pd.DataFrame, clean_air_gap: f
     clean_laps = sector_durations[sector_durations["AvgGap"] > clean_air_gap]
     logger.info(f"Found {len(clean_laps)} clean-air sector segments across grid.")
 
-    # Primary baseline: (Driver, Compound, MiniSector) -> median duration
-    primary_baseline = clean_laps.groupby(["Driver", "Compound", "MiniSector"])["Duration"].median().to_dict()
+    if min_samples < 1:
+        raise ValueError("target.min_clean_samples must be at least 1.")
 
-    # Fallback baseline: (Compound, MiniSector) -> grid median duration
-    grid_baseline = clean_laps.groupby(["Compound", "MiniSector"])["Duration"].median().to_dict()
-
-    # Global sector baseline fallback
-    global_baseline = clean_laps.groupby("MiniSector")["Duration"].median().to_dict()
+    # Use a baseline only when the configured number of clean laps supports it.
+    # Keep references within each session/circuit; sector times do not transfer
+    # between tracks even for the same driver and tyre compound.
+    primary_keys = ["Driver", "Compound", "MiniSector"]
+    team_keys = ["Team", "Compound", "MiniSector"]
+    grid_keys = ["Compound", "MiniSector"]
+    if "RaceId" in clean_laps.columns:
+        primary_keys.insert(0, "RaceId")
+        team_keys.insert(0, "RaceId")
+        grid_keys.insert(0, "RaceId")
+    primary_groups = clean_laps.groupby(primary_keys)["Duration"]
+    primary_baseline = primary_groups.median()[primary_groups.size() >= min_samples].to_dict()
+    team_baseline = {}
+    if "Team" in clean_laps.columns:
+        team_laps = clean_laps.dropna(subset=["Team"])
+        team_groups = team_laps.groupby(team_keys)["Duration"]
+        team_baseline = team_groups.median()[team_groups.size() >= min_samples].to_dict()
+    grid_groups = clean_laps.groupby(grid_keys)["Duration"]
+    grid_baseline = grid_groups.median()[grid_groups.size() >= min_samples].to_dict()
 
     return {
         "primary": primary_baseline,
+        "team": team_baseline,
         "grid": grid_baseline,
-        "global": global_baseline
     }
 
 
@@ -89,8 +140,19 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     min_samples = config["target"]["min_clean_samples"]
     clip_range = config["target"]["clip_delta_sec"]
 
+    aligned_df = aligned_df.copy()
+    if "RaceId" not in aligned_df.columns:
+        session_cfg = config.get("session", {})
+        aligned_df["RaceId"] = str(session_cfg.get("race_id") or (
+            f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"
+            f"{session_cfg.get('session_type', 'R')}"
+        ))
+
     logger.info("Computing sector durations from aligned telemetry...")
-    sector_df = calculate_mini_sector_durations(aligned_df)
+    sector_df = calculate_mini_sector_durations(
+        aligned_df,
+        max_gap_sec=config.get("preprocess", {}).get("max_interpolate_sec"),
+    )
 
     if sector_df.empty:
         raise ValueError("Could not extract mini-sector durations from telemetry.")
@@ -99,17 +161,22 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     labels = []
     for _, row in sector_df.iterrows():
+        race_id = row["RaceId"]
         drv = row["Driver"]
+        team = row.get("Team")
         cmp = row["Compound"]
         sec = row["MiniSector"]
         actual_dur = row["Duration"]
 
-        # Hierarchical baseline resolution
-        base_dur = baselines["primary"].get((drv, cmp, sec))
+        # Resolve driver, teammate, then grid baselines. Do not invent a nominal
+        # value when clean samples are absent.
+        base_dur = baselines["primary"].get((race_id, drv, cmp, sec))
+        if base_dur is None and team is not None and pd.notna(team):
+            base_dur = baselines["team"].get((race_id, str(team), cmp, sec))
         if base_dur is None:
-            base_dur = baselines["grid"].get((cmp, sec))
+            base_dur = baselines["grid"].get((race_id, cmp, sec))
         if base_dur is None:
-            base_dur = baselines["global"].get(sec, 4.5)  # nominal fallback
+            continue
 
         # Delta t_sector = t_actual - t_baseline
         delta_t_sector = actual_dur - base_dur
@@ -125,10 +192,14 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
             "Duration": actual_dur,
             "Baseline": base_dur,
             "DeltaT_Sector": delta_t_sector,
-            "AvgGap": row["AvgGap"]
+            "AvgGap": row["AvgGap"],
+            "Team": team,
+            "RaceId": race_id,
         })
 
     label_table = pd.DataFrame(labels)
+    if label_table.empty:
+        raise ValueError("No target labels have a valid clean-air baseline. Need more clean laps per compound and mini-sector.")
     logger.info(f"Generated {len(label_table)} target labels. Mean DeltaT_Sector = {label_table['DeltaT_Sector'].mean():.4f} s.")
 
     # Save to processed directory

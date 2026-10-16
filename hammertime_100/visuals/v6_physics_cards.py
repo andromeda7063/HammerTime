@@ -32,8 +32,9 @@ def render_physics_validation_cards(
     # --- Card 1: Clean Air Physics ---
     ax1.set_facecolor(CARD_BG)
     ax1.axis("off")
-    ca_pass = clean_air_res.get("passed", True)
-    ca_color = CLEAN_GREEN if ca_pass else F1_RED
+    ca_available = clean_air_res.get("passed") is not None and clean_air_res.get("observed_mae") is not None
+    ca_pass = bool(clean_air_res.get("passed", False))
+    ca_color = CLEAN_GREEN if ca_pass else (F1_RED if ca_available else TEXT_MUTED)
 
     # Outline border
     rect1 = patches.FancyBboxPatch(
@@ -48,7 +49,7 @@ def render_physics_validation_cards(
     ax1.text(0.08, 0.72, "Condition: Time gap to car ahead Δt > 3.0 s", color=TEXT_MUTED, fontsize=10)
 
     # Status Badge
-    badge1 = "PASS · VALIDATED" if ca_pass else "FAIL · RETUNE M3"
+    badge1 = "PASS · VALIDATED" if ca_pass else ("FAIL · RETUNE M3" if ca_available else "NOT AVAILABLE")
     ax1.text(
         0.08, 0.58, badge1,
         color=CARBON_DARK, fontsize=12, fontweight="heavy",
@@ -56,18 +57,21 @@ def render_physics_validation_cards(
     )
 
     # Numbers
-    obs_ca = clean_air_res.get("observed_mae", 0.018)
+    obs_ca = clean_air_res.get("observed_mae")
     ax1.text(0.08, 0.42, "Observed Penalty:", color=TEXT_MUTED, fontsize=10)
-    ax1.text(0.08, 0.32, f"{obs_ca:+.3f} s", color=PURE_WHITE, fontsize=24, fontweight="heavy")
+    ca_value = f"{float(obs_ca):.3f} s" if obs_ca is not None else "NOT AVAILABLE"
+    ax1.text(0.08, 0.32, ca_value, color=PURE_WHITE, fontsize=24, fontweight="heavy")
 
-    ax1.text(0.08, 0.22, "Expected Criterion:", color=TEXT_MUTED, fontsize=10)
-    ax1.text(0.08, 0.14, "Mean Absolute Error < 0.050 s", color=PURE_WHITE, fontsize=12, fontweight="bold")
+    ax1.text(0.08, 0.22, "Configured criterion:", color=TEXT_MUTED, fontsize=10)
+    clean_expected = clean_air_res.get("expected", "Not available")
+    ax1.text(0.08, 0.14, str(clean_expected), color=PURE_WHITE, fontsize=10, fontweight="bold", wrap=True)
 
     # --- Card 2: DRS Train Physics ---
     ax2.set_facecolor(CARD_BG)
     ax2.axis("off")
-    drs_pass = drs_train_res.get("passed", True)
-    drs_color = CLEAN_GREEN if drs_pass else F1_RED
+    drs_available = drs_train_res.get("passed") is not None and drs_train_res.get("observed_lap_delay") is not None
+    drs_pass = bool(drs_train_res.get("passed", False))
+    drs_color = CLEAN_GREEN if drs_pass else (F1_RED if drs_available else TEXT_MUTED)
 
     rect2 = patches.FancyBboxPatch(
         (0.02, 0.02), 0.96, 0.96,
@@ -81,7 +85,7 @@ def render_physics_validation_cards(
     ax2.text(0.08, 0.72, "Condition: Chain gap Δt < 0.8 s (Follower car)", color=TEXT_MUTED, fontsize=10)
 
     # Status Badge
-    badge2 = "PASS · VALIDATED" if drs_pass else "FAIL · RETUNE M4"
+    badge2 = "PASS · VALIDATED" if drs_pass else ("FAIL · RETUNE M4" if drs_available else "NOT AVAILABLE")
     ax2.text(
         0.08, 0.58, badge2,
         color=CARBON_DARK, fontsize=12, fontweight="heavy",
@@ -89,12 +93,14 @@ def render_physics_validation_cards(
     )
 
     # Numbers
-    obs_drs = drs_train_res.get("observed_lap_delay", 0.62)
+    obs_drs = drs_train_res.get("observed_lap_delay")
     ax2.text(0.08, 0.42, "Observed Lap Penalty:", color=TEXT_MUTED, fontsize=10)
-    ax2.text(0.08, 0.32, f"+{obs_drs:.2f} s / lap", color=PURE_WHITE, fontsize=24, fontweight="heavy")
+    drs_value = f"{float(obs_drs):+.2f} s / lap" if obs_drs is not None else "NOT AVAILABLE"
+    ax2.text(0.08, 0.32, drs_value, color=PURE_WHITE, fontsize=24, fontweight="heavy")
 
-    ax2.text(0.08, 0.22, "Expected Criterion:", color=TEXT_MUTED, fontsize=10)
-    ax2.text(0.08, 0.14, "Cumulative 0.40 s - 0.80 s / lap", color=PURE_WHITE, fontsize=12, fontweight="bold")
+    ax2.text(0.08, 0.22, "Configured criterion:", color=TEXT_MUTED, fontsize=10)
+    drs_expected = drs_train_res.get("expected", "Not available")
+    ax2.text(0.08, 0.14, str(drs_expected), color=PURE_WHITE, fontsize=10, fontweight="bold", wrap=True)
 
     fig.suptitle("F1 BROADCAST INSIGHTS · AERODYNAMIC GROUND-TRUTH PHYSICS EVALUATION",
                  color=F1_RED, fontsize=12, fontweight="heavy", y=0.97)

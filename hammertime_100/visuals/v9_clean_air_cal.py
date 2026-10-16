@@ -25,6 +25,12 @@ def generate_clean_air_calibration_plot(
     """
     Renders V9 Clean-Air Zero-Penalty Calibration Plot.
     """
+    clean_air_predictions = np.asarray(clean_air_predictions, dtype=float).reshape(-1)
+    clean_air_predictions = clean_air_predictions[np.isfinite(clean_air_predictions)]
+    if clean_air_predictions.size == 0:
+        raise ValueError("clean_air_predictions must contain at least one finite value")
+    if threshold < 0:
+        raise ValueError("threshold must be non-negative")
     apply_broadcast_theme()
     fig, (ax_dist, ax_box) = plt.subplots(1, 2, figsize=(13, 6), dpi=150, gridspec_kw={"width_ratios": [1.4, 1]})
     fig.patch.set_facecolor(CARBON_DARK)
@@ -58,12 +64,11 @@ def generate_clean_air_calibration_plot(
         f"CLEAN-AIR CALIBRATION METRICS\n"
         f"─────────────────────────────\n"
         f"Mean Clean-Air Error:  {mean_err:.4f} s\n"
-        f"Samples In-Band (±0.05s): {pct_within:.1f} %\n"
+        f"Samples In-Band (±{threshold:.2f}s): {pct_within:.1f} %\n"
         f"Standard Deviation:    {np.std(clean_air_predictions):.4f} s\n\n"
         f"VERDICT:\n"
-        f"Clean air boundary is validated.\n"
-        f"The model reliably predicts zero\n"
-        f"disturbance when unhindered."
+        f"{'WITHIN' if mean_err <= threshold else 'OUTSIDE'} the configured\n"
+        f"mean absolute error tolerance."
     )
     ax_box.text(0.1, 0.45, card_text, fontsize=11, family="monospace", color=PURE_WHITE,
                 bbox=props, va="center")
