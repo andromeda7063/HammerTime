@@ -30,17 +30,30 @@ def generate_residual_sanity_plots(
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6), dpi=150)
     fig.patch.set_facecolor(CARBON_DARK)
 
+    residuals = np.asarray(residuals, dtype=float).reshape(-1)
+    tyre_ages = np.asarray(tyre_ages, dtype=float).reshape(-1)
+    gaps = np.asarray(gaps, dtype=float).reshape(-1)
+    if not (len(residuals) == len(tyre_ages) == len(gaps)):
+        raise ValueError("residuals, tyre_ages, and gaps must have the same length")
+    valid_age = np.isfinite(residuals) & np.isfinite(tyre_ages)
+    valid_gap = np.isfinite(residuals) & np.isfinite(gaps)
+    if not valid_age.any() or not valid_gap.any():
+        raise ValueError("At least one finite residual sample is required")
+
     # --- Plot 1: Residuals vs Tyre Age ---
     ax1.set_facecolor(CARD_BG)
-    ax1.scatter(tyre_ages, residuals, color=DRS_CYAN, alpha=0.5, s=25, edgecolors="none")
+    ax1.scatter(tyre_ages[valid_age], residuals[valid_age], color=DRS_CYAN, alpha=0.5, s=25, edgecolors="none")
     ax1.axhline(0, color=F1_RED, linestyle="--", lw=1.5)
 
     # Rolling median trendline to prove zero structure
-    bins = np.linspace(min(tyre_ages), max(tyre_ages), 10)
-    bin_centers = 0.5 * (bins[:-1] + bins[1:])
-    indices = np.digitize(tyre_ages, bins)
-    medians = [np.median(residuals[indices == i]) if np.sum(indices == i) > 5 else 0.0 for i in range(1, len(bins))]
-    ax1.plot(bin_centers, medians, color=PURE_WHITE, lw=2, label="Median Trend (Unbiased)")
+    age_values = tyre_ages[valid_age]
+    age_residuals = residuals[valid_age]
+    if np.ptp(age_values) > 0:
+        bins = np.linspace(np.min(age_values), np.max(age_values), min(10, len(age_values) + 1))
+        bin_centers = 0.5 * (bins[:-1] + bins[1:])
+        indices = np.digitize(age_values, bins)
+        medians = [np.median(age_residuals[indices == i]) if np.sum(indices == i) else np.nan for i in range(1, len(bins))]
+        ax1.plot(bin_centers, medians, color=PURE_WHITE, lw=2, label="Binned median")
 
     ax1.set_xlabel("Tyre Age (Laps Completed on Set)", fontsize=10, labelpad=8)
     ax1.set_ylabel("Prediction Residual (ŷ - y in seconds)", fontsize=10, labelpad=8)
@@ -52,14 +65,17 @@ def generate_residual_sanity_plots(
 
     # --- Plot 2: Residuals vs Time Gap ---
     ax2.set_facecolor(CARD_BG)
-    ax2.scatter(gaps, residuals, color="#F59E0B", alpha=0.5, s=25, edgecolors="none")
+    ax2.scatter(gaps[valid_gap], residuals[valid_gap], color="#F59E0B", alpha=0.5, s=25, edgecolors="none")
     ax2.axhline(0, color=F1_RED, linestyle="--", lw=1.5)
 
-    gap_bins = np.linspace(0.1, 4.0, 12)
-    gap_centers = 0.5 * (gap_bins[:-1] + gap_bins[1:])
-    gap_idx = np.digitize(gaps, gap_bins)
-    gap_medians = [np.median(residuals[gap_idx == i]) if np.sum(gap_idx == i) > 5 else 0.0 for i in range(1, len(gap_bins))]
-    ax2.plot(gap_centers, gap_medians, color=PURE_WHITE, lw=2, label="Median Trend (Unbiased)")
+    gap_values = gaps[valid_gap]
+    gap_residuals = residuals[valid_gap]
+    if np.ptp(gap_values) > 0:
+        gap_bins = np.linspace(np.min(gap_values), np.max(gap_values), min(12, len(gap_values) + 1))
+        gap_centers = 0.5 * (gap_bins[:-1] + gap_bins[1:])
+        gap_idx = np.digitize(gap_values, gap_bins)
+        gap_medians = [np.median(gap_residuals[gap_idx == i]) if np.sum(gap_idx == i) else np.nan for i in range(1, len(gap_bins))]
+        ax2.plot(gap_centers, gap_medians, color=PURE_WHITE, lw=2, label="Binned median")
 
     ax2.set_xlabel("Dynamic Time Gap Δt (seconds)", fontsize=10, labelpad=8)
     ax2.set_ylabel("Prediction Residual (ŷ - y in seconds)", fontsize=10, labelpad=8)

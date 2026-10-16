@@ -34,8 +34,8 @@ def generate_baseline_duel_chart(
     keys = ["HammerTime", "XGBoost", "LSTM"]
     colors = [F1_RED, "#6B7280", "#4B5563"]
 
-    maes = [metrics[k]["mae"] for k in keys]
-    r2s = [metrics[k]["r2"] for k in keys]
+    maes = [float(metrics[k]["mae"]) if metrics[k].get("mae") is not None else np.nan for k in keys]
+    r2s = [float(metrics[k]["r2"]) if metrics[k].get("r2") is not None else np.nan for k in keys]
 
     # --- Plot 1: MAE (Lower is Better) ---
     ax1.set_facecolor(CARD_BG)
@@ -44,14 +44,15 @@ def generate_baseline_duel_chart(
 
     for bar, val in zip(bars1, maes):
         ax1.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.008,
-            f"{val:.3f} s", ha="center", va="bottom",
+            bar.get_x() + bar.get_width() / 2, (bar.get_height() if np.isfinite(val) else 0) + 0.008,
+            f"{val:.3f} s" if np.isfinite(val) else "N/A", ha="center", va="bottom",
             color=PURE_WHITE, fontweight="bold", fontsize=10
         )
 
     ax1.set_ylabel("Test Mean Absolute Error (seconds) · Lower is Better", fontsize=10, labelpad=8)
     ax1.set_title("PREDICTION ERROR (MAE)", color=PURE_WHITE, fontsize=12, fontweight="bold", pad=12)
-    ax1.set_ylim(0, max(maes) * 1.35)
+    max_mae = max((value for value in maes if np.isfinite(value)), default=0.0)
+    ax1.set_ylim(0, max(max_mae * 1.35, 0.05))
     ax1.grid(True, linestyle="--", alpha=0.3, axis="y")
     leg1 = ax1.legend(loc="upper right", facecolor="#101018", edgecolor="#2D2D3D", fontsize=8)
     for t in leg1.get_texts(): t.set_color(PURE_WHITE)
@@ -63,8 +64,8 @@ def generate_baseline_duel_chart(
 
     for bar, val in zip(bars2, r2s):
         ax2.text(
-            bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-            f"{val:.3f}", ha="center", va="bottom",
+            bar.get_x() + bar.get_width() / 2, (bar.get_height() if np.isfinite(val) else 0) + 0.02,
+            f"{val:.3f}" if np.isfinite(val) else "N/A", ha="center", va="bottom",
             color=PURE_WHITE, fontweight="bold", fontsize=10
         )
 

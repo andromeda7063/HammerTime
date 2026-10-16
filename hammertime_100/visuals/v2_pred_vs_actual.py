@@ -4,17 +4,20 @@ Scatter plot with 45-degree parity line, annotated R² and MAE.
 Standard: ASD-STE100 Plain English
 """
 
-import os
-import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-sys.path.append(os.path.dirname(__file__))
-from theme import (
-    apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
-    TEXT_MUTED, DRS_CYAN
-)
+try:
+    from .theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN
+    )
+except ImportError:
+    from theme import (
+        apply_broadcast_theme, CARBON_DARK, CARD_BG, F1_RED, PURE_WHITE,
+        TEXT_MUTED, DRS_CYAN
+    )
 
 
 def generate_pred_vs_actual_plot(
@@ -28,6 +31,14 @@ def generate_pred_vs_actual_plot(
     """
     Renders V2 Predicted vs Actual scatter plot with parity line and metrics.
     """
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    if y_true.size != y_pred.size:
+        raise ValueError("y_true and y_pred must have the same length")
+    finite = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true, y_pred = y_true[finite], y_pred[finite]
+    if y_true.size == 0:
+        raise ValueError("At least one finite prediction/target pair is required")
     apply_broadcast_theme()
     fig, ax = plt.subplots(figsize=(9, 8), dpi=150)
     fig.patch.set_facecolor(CARBON_DARK)

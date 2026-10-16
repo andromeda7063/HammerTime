@@ -20,8 +20,8 @@ from theme import (
 
 def generate_blocker_drilldown(
     focus_driver: str = "HAM",
-    total_seconds_lost: float = 14.85,
-    top_blockers: list = [("SAI", 8.4, 0.65), ("VER", 4.2, 0.85), ("ALB", 2.25, 0.45)],
+    total_seconds_lost: float = None,
+    top_blockers: list = None,
     lap_history: np.ndarray = None,
     gap_history: np.ndarray = None,
     output_path: str = "visuals/v7_blockers.png"
@@ -51,12 +51,13 @@ def generate_blocker_drilldown(
     ax_info.text(0.08, 0.80, f"{focus_driver} · LIVE TELEMETRY", color=PURE_WHITE, fontsize=20, fontweight="heavy")
 
     ax_info.text(0.08, 0.68, "TOTAL ESTIMATED DELAY LOST TO TRAFFIC:", color=TEXT_MUTED, fontsize=9)
-    ax_info.text(0.08, 0.58, f"+{total_seconds_lost:.2f} s", color=F1_RED, fontsize=28, fontweight="heavy")
+    lost_label = f"+{total_seconds_lost:.2f} s" if total_seconds_lost is not None else "NOT AVAILABLE"
+    ax_info.text(0.08, 0.58, lost_label, color=F1_RED, fontsize=24, fontweight="heavy")
 
     ax_info.text(0.08, 0.46, "PRIMARY DISTURBANCE SOURCES (BLOCKERS):", color=TEXT_MUTED, fontsize=9, fontweight="bold")
 
     y_pos = 0.36
-    for b_drv, b_sec, b_gap in top_blockers:
+    for b_drv, b_sec, b_gap in (top_blockers or []):
         b_col = TEAM_COLORS.get(b_drv, PURE_WHITE)
         ax_info.text(0.08, y_pos, f"● {b_drv}", color=b_col, fontsize=12, fontweight="heavy")
         ax_info.text(0.28, y_pos, f"+{b_sec:.2f} s lost", color=PURE_WHITE, fontsize=11, fontweight="bold")
@@ -65,12 +66,16 @@ def generate_blocker_drilldown(
 
     # --- Right Panel: Gap History Timeline ---
     ax_plot.set_facecolor(CARD_BG)
-    if lap_history is None or gap_history is None:
-        lap_history = np.arange(1, 51)
-        gap_history = 1.2 + 0.8 * np.sin(lap_history / 4.0) + np.random.normal(0, 0.15, len(lap_history))
-        gap_history = np.clip(gap_history, 0.3, 4.5)
-
-    ax_plot.plot(lap_history, gap_history, color=d_color, lw=2.2, label=f"{focus_driver} Gap to Leader")
+    if lap_history is not None and gap_history is not None:
+        lap_history = np.asarray(lap_history, dtype=float).reshape(-1)
+        gap_history = np.asarray(gap_history, dtype=float).reshape(-1)
+        if lap_history.size != gap_history.size:
+            raise ValueError("lap_history and gap_history must have the same length")
+        valid = np.isfinite(lap_history) & np.isfinite(gap_history)
+        ax_plot.plot(lap_history[valid], gap_history[valid], color=d_color, lw=2.2, label=f"{focus_driver} Gap to Car Ahead")
+    else:
+        ax_plot.text(0.5, 0.5, "Gap history unavailable", transform=ax_plot.transAxes,
+                     color=TEXT_MUTED, ha="center", va="center")
     ax_plot.axhspan(0.0, 0.8, color=F1_RED, alpha=0.15, label="Severe Dirty Air Zone (< 0.8 s)")
     ax_plot.axhspan(0.8, 2.0, color="#FF9900", alpha=0.10, label="Dynamic Aerodynamic Wake (0.8 - 2.0 s)")
     ax_plot.axhline(3.0, color="#10B981", linestyle="--", lw=1.2, label="Clean Air Threshold (> 3.0 s)")
