@@ -113,6 +113,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
         race_ids = [getattr(snap, "race_id", None) for snap in ordered[start:stop]]
         if any(race_id != race_ids[0] for race_id in race_ids[1:]):
             continue
+        if any(bool(getattr(snap, "is_safety_car", False)) for snap in ordered[start:stop]):
+            continue
         if len(local_times) > 1 and not np.all(np.diff(local_times) > 0):
             continue
         # Every adjacent frame must be on the configured grid. This rejects gaps,
@@ -239,6 +241,9 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     if method == "race" and ("RaceId" not in labels_df.columns or
                               not snapshots or any(getattr(s, "race_id", None) is None for s in snapshots)):
         raise ValueError("split_method='race' requires RaceId on labels and race_id on every graph snapshot.")
+    if config.get("preprocess", {}).get("flag_safety_car", False) and any(
+            not hasattr(snapshot, "is_safety_car") for snapshot in snapshots):
+        raise ValueError("Safety-car filtering is enabled, but graph snapshots do not carry is_safety_car metadata.")
 
     prep = config.get("preprocess", {})
     hz = float(prep.get("sample_hz", 4.0))
@@ -247,9 +252,9 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     period = 1.0 / hz
     samples = build_windowed_samples(
         snapshots, labels_df, driver_to_idx, W, K, period,
-        float(data_cfg.get("timestamp_tolerance_sec", period * 0.51)),
-        float(data_cfg.get("continuity_tolerance_sec", period * 0.2)),
-        int(data_cfg.get("min_valid_targets_per_sample", 1)),
+        float(data_cfg["timestamp_tolerance_sec"]),
+        float(data_cfg["continuity_tolerance_sec"]),
+        int(data_cfg["min_valid_targets_per_sample"]),
     )
     if not samples:
         raise ValueError("No valid graph windows matched target labels on the configured time grid.")
