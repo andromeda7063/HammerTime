@@ -46,6 +46,23 @@ class BaselineIsolationTests(unittest.TestCase):
         np.testing.assert_array_equal(flattened, np.array([[1.0, 2.0, 3.0, 4.0]], dtype=np.float32))
         np.testing.assert_array_equal(targets, np.array([0.75], dtype=np.float32))
 
+    def test_extracted_features_empty_raises(self):
+        """Empty dataset samples must raise ValueError."""
+        with self.assertRaises(ValueError):
+            extract_isolated_car_features([])
+
+    def test_multicar_isolation_dimension_invariance(self):
+        """Verify multiple active cars produce correctly dimensioned single-car records."""
+        sample = {
+            "snapshots": [Data(x=torch.ones((3, 4))), Data(x=torch.ones((3, 4)))],
+            "target": torch.tensor([0.1, 0.2, 0.3]),
+            "mask": torch.tensor([True, True, True]),
+        }
+        sequences, flattened, targets = extract_isolated_car_features([sample])
+        self.assertEqual(sequences.shape, (3, 2, 4))
+        self.assertEqual(flattened.shape, (3, 8))
+        self.assertEqual(len(targets), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,11 +69,11 @@ model:
   dropout: 0.1
 
 train:
-  batch_size: 32
+  batch_size: 128
   lr: 0.001
   weight_decay: 0.0001   # L2 regularization via Adam
-  max_epochs: 100
-  early_stopping_patience: 10
+  max_epochs: 25
+  early_stopping_patience: 6
   checkpoint_path: "best.pt"
   num_workers: 0
 
