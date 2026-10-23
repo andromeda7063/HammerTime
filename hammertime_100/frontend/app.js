@@ -1412,6 +1412,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Initialize Telemetry Panel
   telemetryPanel = new TelemetryPanel(data.drivers, data.sectors);
+  trackMap.telemetryPanel = telemetryPanel;
+  trackMap.updateLapAndGaps();
 
   // Initialize Model Intelligence
   new MetricsPanel(data.metrics);
