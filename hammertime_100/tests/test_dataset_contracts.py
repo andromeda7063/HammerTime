@@ -116,6 +116,32 @@ class DatasetContractTests(unittest.TestCase):
         self.assertAlmostEqual(float(scaler.mean_[0]), 27.5)
         self.assertIs(test.dataset.feature_scaler, scaler)
 
+    def test_invalid_split_ratios_raise(self):
+        """Invalid split ratios not summing to 1.0 must raise ValueError."""
+        frames = [snapshot(i * 0.25) for i in range(10)]
+        labels = pd.DataFrame([{"RaceId": "race-a", "Driver": "AA", "TimeSec": 0.5, "DeltaT_Sector": 1.0}])
+        bad_config = {
+            "data": {"window_size": 2, "horizon": 1, "train_ratio": 0.8,
+                     "val_ratio": 0.3, "test_ratio": 0.2, "split_method": "temporal",
+                     "timestamp_tolerance_sec": 0.1275, "continuity_tolerance_sec": 0.05,
+                     "min_valid_targets_per_sample": 1, "random_seed": 42},
+            "preprocess": {"sample_hz": 4.0, "flag_safety_car": False},
+            "train": {"batch_size": 2, "num_workers": 0},
+        }
+        with self.assertRaises(ValueError):
+            create_dataloaders(frames, labels, {"AA": 0, "BB": 1}, bad_config)
+
+    def test_min_valid_targets_filter(self):
+        """Samples with fewer valid targets than min_valid_targets_per_sample are filtered out."""
+        frames = [snapshot(i * 0.25) for i in range(5)]
+        labels = pd.DataFrame([{"RaceId": "race-a", "Driver": "AA", "TimeSec": 0.5, "DeltaT_Sector": 1.0}])
+        samples = build_windowed_samples(
+            frames, labels, {"AA": 0, "BB": 1}, W=2, K=1,
+            timestamp_tolerance_sec=0.1275, continuity_tolerance_sec=0.05,
+            min_valid_targets=2  # requires both AA and BB valid, but only AA provided
+        )
+        self.assertEqual(len(samples), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

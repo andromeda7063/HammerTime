@@ -1,0 +1,35 @@
+{
+  "mae_sec": 0.046294644008195,
+  "r2_score": -0.05705882764147674,
+  "sample_count": 983,
+  "target_mae_pass": true,
+  "target_r2_pass": false,
+  "physics_clean_air": {
+    "test": "Clean Air Calibration (observed gap > 3 s)",
+    "expected": "Mean absolute predicted penalty <= 0.050 s",
+    "observed_mae": 1.0193655280276364e-05,
+    "sample_count": 245,
+    "passed": true,
+    "notes": "Measured on held-out clean-air observations."
+  },
+  "physics_drs_train": {
+    "test": "DRS Train Aerodynamic Wake (observed gap < 0.8 s)",
+    "expected": "0.40 s - 0.80 s predicted delay per complete lap",
+    "observed_lap_delay": -0.0002038748534687329,
+    "complete_laps": 10,
+    "observed_sector_delay": -1.0193742673436645e-05,
+    "passed": false,
+    "notes": "Measured on complete held-out driver laps."
+  },
+  "baselines": {
+    "xgboost": {
+      "mae_sec": 0.06657137721776962,
+      "r2_score": -0.012636899948120117
+    },
+    "lstm": {
+      "mae_sec": 0.0463433712720871,
+      "r2_score": -0.057039856910705566
+    }
+  },
+  "source": "pipeline"
+}

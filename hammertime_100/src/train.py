@@ -87,7 +87,10 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     patience_counter = 0
     history = []
 
-    logger.info(f"Starting ST-GNN training on {device} (Max epochs: {max_epochs}, Patience: {patience})...")
+    if device.type == "cuda":
+        logger.info(f"[*] CUDA IS AVAILABLE & ACTIVE! Utilizing GPU: {torch.cuda.get_device_name(0)} (Max epochs: {max_epochs}, Patience: {patience})...")
+    else:
+        logger.info(f"[*] Running on CPU (CUDA unavailable). (Max epochs: {max_epochs}, Patience: {patience})...")
 
     for epoch in range(1, max_epochs + 1):
         model.train()
