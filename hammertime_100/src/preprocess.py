@@ -58,10 +58,12 @@ def align_driver_telemetry(
     # Ensure Time column is in seconds.
     if "TimeSec" in tel_df.columns:
         tel_df["TimeSec"] = _time_seconds(tel_df["TimeSec"])
+    elif "SessionTime" in tel_df.columns:
+        tel_df["TimeSec"] = _time_seconds(tel_df["SessionTime"])
     elif "Time" in tel_df.columns:
         tel_df["TimeSec"] = _time_seconds(tel_df["Time"])
     else:
-        raise ValueError("Telemetry must contain a Time or TimeSec column.")
+        raise ValueError("Telemetry must contain a SessionTime, Time, or TimeSec column.")
 
     tel_sorted = tel_df.dropna(subset=["TimeSec"]).sort_values("TimeSec").drop_duplicates(subset=["TimeSec"])
     if tel_sorted.empty:
@@ -96,7 +98,7 @@ def align_driver_telemetry(
                 values[:] = np.interp(uniform_times, source_times, source_values)
                 right = np.searchsorted(source_times, uniform_times, side="left")
                 exact = (right < len(source_times)) & np.isclose(
-                    source_times[np.minimum(right, len(source_times) - 1)], uniform_times, atol=1e-9
+                    source_times[np.minimum(right, len(source_times) - 1)], uniform_times, atol=1e-9, rtol=0
                 )
                 left_idx = np.maximum(right - 1, 0)
                 right_idx = np.minimum(right, len(source_times) - 1)
@@ -106,7 +108,7 @@ def align_driver_telemetry(
                 values[~supported] = np.nan
             elif len(valid) == 1:
                 source_time = float(valid["TimeSec"].iloc[0])
-                exact = np.isclose(uniform_times, source_time, atol=1e-9)
+                exact = np.isclose(uniform_times, source_time, atol=1e-9, rtol=0)
                 values[exact] = float(valid[col].iloc[0])
             resampled[col] = values
             if col in ("Speed", "Throttle", "Distance"):
@@ -118,10 +120,10 @@ def align_driver_telemetry(
     resampled["IsValid"] = row_valid
 
     # Attach Lap information
-    resampled["LapNumber"] = 1
-    resampled["Compound"] = "MEDIUM"
+    resampled["LapNumber"] = np.nan
+    resampled["Compound"] = None
     resampled["Team"] = None
-    resampled["TyreLife"] = 1.0
+    resampled["TyreLife"] = np.nan
     resampled["IsPitLap"] = False
     resampled["IsSafetyCar"] = False
     if not laps_df.empty:
@@ -143,6 +145,20 @@ def align_driver_telemetry(
 
             mask = (resampled["TimeSec"] >= lap_start) & (resampled["TimeSec"] < lap_end)
             if mask.any():
+                source_distance = tel_sorted[["TimeSec", "Distance"]].dropna()
+                source_times = source_distance["TimeSec"].to_numpy(dtype=float)
+                source_values = source_distance["Distance"].to_numpy(dtype=float)
+                right = int(np.searchsorted(source_times, lap_start))
+                if right < len(source_times) and np.isclose(source_times[right], lap_start, atol=1e-9, rtol=0):
+                    lap_start_distance = source_values[right]
+                elif 0 < right < len(source_times) and source_times[right] - source_times[right - 1] <= max_interpolate_sec + 1e-9:
+                    lap_start_distance = np.interp(lap_start, source_times[right - 1:right + 1], source_values[right - 1:right + 1])
+                else:
+                    resampled.loc[mask, "IsValid"] = False
+                    continue
+                # FastF1 multi-lap telemetry integrates Distance from the slice
+                # origin; anchor each lap to its observed timing boundary.
+                resampled.loc[mask, "Distance"] -= lap_start_distance
                 resampled.loc[mask, "LapNumber"] = lap_num
                 compound = str(lap.get("Compound", "MEDIUM")).upper()
                 resampled.loc[mask, "Compound"] = compound if compound in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] else "MEDIUM"
@@ -159,6 +175,8 @@ def align_driver_telemetry(
                 status = str(lap.get("TrackStatus", "1"))
                 if flag_safety_car and ("4" in status or "5" in status or "6" in status):
                     resampled.loc[mask, "IsSafetyCar"] = True
+
+    resampled["IsValid"] &= resampled["LapNumber"].notna()
 
     # Calculate mini-sector index [0, M-1] based on distance within lap
     dist_in_lap = resampled["Distance"].fillna(0.0) % lap_length_m
@@ -256,9 +274,10 @@ def process_race(session, config: dict) -> pd.DataFrame:
             drv_tel = drv_laps.get_telemetry()
             if drv_tel.empty:
                 continue
-            time_column = "TimeSec" if "TimeSec" in drv_tel.columns else "Time"
+            time_column = next((column for column in ("TimeSec", "SessionTime", "Time")
+                                if column in drv_tel.columns), None)
             if time_column not in drv_tel.columns:
-                raise ValueError(f"Driver {d} telemetry has no Time or TimeSec column.")
+                raise ValueError(f"Driver {d} telemetry has no SessionTime, Time, or TimeSec column.")
             drv_tel = drv_tel.copy()
             drv_tel["TimeSec"] = _time_seconds(drv_tel[time_column])
             drv_tel = drv_tel.dropna(subset=["TimeSec"])
