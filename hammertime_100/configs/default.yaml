@@ -77,6 +77,15 @@ train:
   checkpoint_path: "best.pt"
   num_workers: 0
 
+# Optional validation-only search. The split, scaler, targets and gates stay fixed.
+tuning:
+  enabled: false
+  seeds: [42, 43, 44]     # First seed supplies the selected candidate's test checkpoint.
+  candidates:
+    - {train.lr: 0.001}  # Include the unchanged configured learning rate.
+    - {train.lr: 0.0003}
+    - {train.lr: 0.003}
+
 baselines:
   xgboost:
     n_estimators: 100

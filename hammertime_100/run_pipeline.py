@@ -308,7 +308,7 @@ def _render_real_outputs(aligned: pd.DataFrame, snapshots: list, labels: pd.Data
     return generated
 
 
-def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
+def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool = False) -> dict:
     """Run all configured sessions, train/evaluate, and render observed outputs."""
     start_time = time.time()
     logger.info("==================================================================")
@@ -323,6 +323,8 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
         raise ValueError(f"Configuration is not a mapping: {cfg_path}")
     from config_validation import validate_config
     validate_config(config)
+    if tune:
+        config.setdefault("tuning", {})["enabled"] = True
 
     base_processed_dir = Path(config["session"]["processed_dir"])
     if not base_processed_dir.is_absolute():
@@ -397,11 +399,18 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
     device = torch.device("cpu")
     logger.info("[+] Training ST-GNN model on CPU (Max Epochs: %s, Patience: %s)...", config["train"].get("max_epochs", 100), config["train"].get("early_stopping_patience", 15))
     checkpoint_path = Path(config["train"]["checkpoint_path"])
-    model = create_model(config).to(device)
-    _preserve_artifact(checkpoint_path, base_processed_dir)
-    _preserve_artifact(Path(config["train"].get("history_path", checkpoint_path.parent / "training_history.csv")),
-                       base_processed_dir)
-    best_val_mae, history = train_model(model, train_loader, val_loader, config, device)
+    tuning_result = None
+    if config.get("tuning", {}).get("enabled", False):
+        from tuning import tune_hyperparameters
+        config, tuning_result = tune_hyperparameters(train_loader, val_loader, config, device)
+        checkpoint_path = Path(config["train"]["checkpoint_path"])
+        best_val_mae = tuning_result["selected_validation_mae_sec"]
+    else:
+        model = create_model(config).to(device)
+        _preserve_artifact(checkpoint_path, base_processed_dir)
+        _preserve_artifact(Path(config["train"].get("history_path", checkpoint_path.parent / "training_history.csv")),
+                           base_processed_dir)
+        best_val_mae, history = train_model(model, train_loader, val_loader, config, device)
     gates = {
         "aligned_data": bool(len(aligned_all) and len(aligned_all["TimeSec"].unique())),
         "targets_and_graphs": bool(len(labels_all) and len(snapshots)),
@@ -420,6 +429,8 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
     report_path = Path(config.get("evaluation", {}).get("report_path", base_processed_dir / "evaluation_report.json"))
     _preserve_artifact(report_path, base_processed_dir)
     report = run_full_evaluation(str(checkpoint_path), test_loader, config, baseline_scores)
+    if tuning_result is not None:
+        report.setdefault("metadata", {})["tuning"] = tuning_result
     physics = report.get("physics_tests", [])
     gates["physics"] = bool(len(physics) == 2 and all(result.get("passed") is True for result in physics))
     artifacts = _render_real_outputs(aligned_all, snapshots, labels_all, report, config)
@@ -452,6 +463,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
         "raw_artifacts": raw_artifacts,
         "evaluation_report": str(base_processed_dir / "evaluation_report.json"),
         "checkpoint": str(checkpoint_path),
+        "tuning_study": tuning_result["study_path"] if tuning_result else None,
         "elapsed_seconds": elapsed,
     }
     logger.info("Pipeline finished in %.1f seconds. Quality gates passed: %s", elapsed, gates["all_passed"])
@@ -462,6 +474,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, help="Experiment YAML path; defaults to configs/default.yaml.")
+    parser.add_argument("--tune", action="store_true", help="Select configured candidates using validation MAE only.")
     parser.add_argument("--retrain", "--force-train", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    run_100_percent_pipeline(args.config)
+    run_100_percent_pipeline(args.config, tune=args.tune)
