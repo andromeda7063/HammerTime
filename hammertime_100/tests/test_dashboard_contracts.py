@@ -78,11 +78,13 @@ class DashboardContractTests(unittest.TestCase):
                 self.assertTrue(any("invalid" in message.value.lower() for message in app.warning))
 
     def test_non_numeric_laps_do_not_crash_slider(self):
-        telemetry = pd.DataFrame({"Driver": ["AAA"], "TimeSec": [1.0], "LapNumber": [None]})
-        app = self.render(telemetry=telemetry)
-        self.assertEqual(len(app.exception), 0)
-        self.assertEqual(len(app.select_slider), 0)
-        self.assertTrue(any("lap" in message.value.lower() for message in app.info))
+        for lap in (None, "unavailable", float("inf"), float("-inf")):
+            with self.subTest(lap=lap):
+                telemetry = pd.DataFrame({"Driver": ["AAA"], "TimeSec": [1.0], "LapNumber": [lap]})
+                app = self.render(telemetry=telemetry)
+                self.assertEqual(len(app.exception), 0)
+                self.assertEqual(len(app.select_slider), 0)
+                self.assertTrue(any("lap" in message.value.lower() for message in app.info))
 
     def test_optional_car_ahead_field_is_not_required_for_gap_history(self):
         telemetry = pd.DataFrame({"Driver": ["AAA"], "TimeSec": [1.0], "LapNumber": [1], "DeltaT": [1.0]})
