@@ -132,7 +132,11 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
     # Fix consistent driver ordering (20 drivers)
     unique_drivers = sorted(aligned_df["Driver"].unique())
     if len(unique_drivers) > num_nodes:
-        unique_drivers = unique_drivers[:num_nodes]
+        raise ValueError(
+            f"graph.num_nodes ({num_nodes}) cannot hold {len(unique_drivers)} observed drivers."
+        )
+    if aligned_df.duplicated(["TimeSec", "Driver"]).any():
+        raise ValueError("Duplicate driver rows at the same graph timestamp are not supported.")
     driver_to_idx = {drv: idx for idx, drv in enumerate(unique_drivers)}
     idx_to_driver = {idx: drv for drv, idx in driver_to_idx.items()}
 
@@ -180,8 +184,9 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                     except (TypeError, ValueError):
                         gap_map[drv] = np.nan
 
+        active_driver_to_idx = {driver: idx for driver, idx in driver_to_idx.items() if mask[idx]}
         edge_index, edge_attr = build_snapshot_edges(
-            ahead_map, gap_map, driver_to_idx, max_gap=max_gap, sigma=sigma
+            ahead_map, gap_map, active_driver_to_idx, max_gap=max_gap, sigma=sigma
         )
 
         race_id = group["RaceId"].iloc[0] if "RaceId" in group.columns else default_race_id
