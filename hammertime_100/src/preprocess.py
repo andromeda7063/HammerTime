@@ -160,12 +160,18 @@ def align_driver_telemetry(
                 # origin; anchor each lap to its observed timing boundary.
                 resampled.loc[mask, "Distance"] -= lap_start_distance
                 resampled.loc[mask, "LapNumber"] = lap_num
-                compound = str(lap.get("Compound", "MEDIUM")).upper()
-                resampled.loc[mask, "Compound"] = compound if compound in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] else "MEDIUM"
+                compound = str(lap.get("Compound")).upper() if pd.notna(lap.get("Compound")) else None
+                resampled.loc[mask, "Compound"] = compound
                 team = lap.get("Team")
                 if pd.notna(team):
                     resampled.loc[mask, "Team"] = str(team)
-                resampled.loc[mask, "TyreLife"] = float(lap.get("TyreLife", 1.0))
+                try:
+                    tyre_age = float(lap.get("TyreLife", np.nan))
+                except (TypeError, ValueError):
+                    tyre_age = np.nan
+                resampled.loc[mask, "TyreLife"] = tyre_age
+                if compound not in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] or not np.isfinite(tyre_age) or tyre_age < 0:
+                    resampled.loc[mask, "IsValid"] = False
                 
                 # Check pit
                 if flag_pit_laps and (pd.notnull(lap.get("PitInTime")) or pd.notnull(lap.get("PitOutTime"))):
