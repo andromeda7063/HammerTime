@@ -19,8 +19,6 @@ if not PROCESSED_DIR.is_absolute():
     PROCESSED_DIR = PROJECT_DIR / PROCESSED_DIR
 TELEMETRY_PATH = PROCESSED_DIR / "aligned_telemetry.parquet"
 REPORT_PATH = PROCESSED_DIR / "evaluation_report.json"
-CARDS_DIR = PROJECT_DIR / "broadcast" / "rendered"
-VISUALS_DIR = PROJECT_DIR / "visuals"
 CARBON = "#15151E"
 CARD = "#1F1F2B"
 RED = "#E10600"
@@ -56,6 +54,53 @@ def load_report(path: str, modified: float) -> dict:
         return json.load(report_file)
 
 
+def valid_report(report: object) -> bool:
+    """Check the fields used by the dashboard before formatting nested artifacts."""
+    def score(value):
+        if value is None:
+            return True
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return False
+        try:
+            return bool(np.isfinite(float(value)))
+        except OverflowError:
+            return False
+
+    def scores(value):
+        return isinstance(value, dict) and all(score(value.get(key)) for key in ("mae_sec", "r2_score"))
+
+    if not isinstance(report, dict) or not scores(report.get("metrics", {})):
+        return False
+    baselines = report.get("baselines", {})
+    if not isinstance(baselines, dict) or not all(scores(value) for value in baselines.values()):
+        return False
+    physics = report.get("physics_tests", [])
+    if not isinstance(physics, list) or not all(
+        isinstance(value, dict) and isinstance(value.get("test", ""), str)
+        and (value.get("passed") is None or isinstance(value["passed"], bool))
+        for value in physics
+    ):
+        return False
+    metadata = report.get("metadata", {})
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("split", {}), dict):
+        return False
+    test_split = metadata.get("split", {}).get("test", {})
+    if not isinstance(test_split, dict) or not isinstance(test_split.get("race_ids", []), list):
+        return False
+    predictions = report.get("predictions", [])
+    if not isinstance(predictions, list) or not all(
+        isinstance(value, dict) and all(score(value.get(key)) for key in ("y_true", "y_pred"))
+        for value in predictions
+    ):
+        return False
+    presentation = report.get("presentation", {})
+    return isinstance(presentation, dict) and all(
+        isinstance(presentation.get(key, ""), str) for key in ("visuals_dir", "cards_dir")
+    ) and isinstance(presentation.get("artifacts", []), list) and all(
+        isinstance(value, str) for value in presentation.get("artifacts", [])
+    )
+
+
 def artifact(path: Path, loader):
     if not path.is_file():
         return None
@@ -70,9 +115,7 @@ def artifact(path: Path, loader):
         if missing:
             st.warning(f"Telemetry artifact `{path}` is missing required fields: {', '.join(sorted(missing))}.")
             return None
-    if path.name == "evaluation_report.json" and (
-        not isinstance(loaded, dict) or not isinstance(loaded.get("metrics", {}), dict)
-    ):
+    if path.name == "evaluation_report.json" and not valid_report(loaded):
         st.warning(f"Evaluation report `{path}` has an invalid structure.")
         return None
     return loaded
@@ -85,7 +128,11 @@ def build_track_figure(frame: pd.DataFrame, selected_car: str, route: pd.DataFra
         return fig
     frame = frame.copy()
     frame = frame.dropna(subset=["Driver"])
-    has_xy = {"X", "Y"}.issubset(frame.columns) and frame[["X", "Y"]].notna().to_numpy().all()
+    has_xy = {"X", "Y"}.issubset(frame.columns)
+    if has_xy:
+        frame[["X", "Y"]] = frame[["X", "Y"]].apply(pd.to_numeric, errors="coerce")
+        frame = frame[np.isfinite(frame[["X", "Y"]]).all(axis=1)]
+        has_xy = not frame.empty
     if has_xy:
         frame = frame[(frame["X"] != 0) | (frame["Y"] != 0)]
     else:
@@ -145,17 +192,33 @@ def render_report_metrics(report: dict | None) -> None:
     cols[0].metric("Test MAE", f"{mae:.3f} s" if mae is not None else "N/A")
     cols[1].metric("Test R²", f"{r2:.3f}" if r2 is not None else "N/A")
     tests = report.get("physics_tests", [])
-    for index, title in enumerate(("Clean-air check", "DRS-train check")):
-        result = tests[index] if index < len(tests) else None
+    for index, (title, test_name) in enumerate((("Clean-air check", "Clean Air"), ("DRS-train check", "DRS Train"))):
+        result = next((test for test in tests if test_name in test.get("test", "")), None)
         status = "N/A" if not result or result.get("passed") is None else ("PASS" if result["passed"] else "FAIL")
         cols[index + 2].metric(title, status)
 
 
-def render_visual(path: Path, label: str) -> None:
-    if path.is_file():
-        st.image(str(path), caption=label, use_container_width=True)
+def render_visual(path: Path | None, label: str) -> None:
+    if path is not None and path.is_file():
+        try:
+            st.image(str(path), caption=label, use_container_width=True)
+        except (OSError, ValueError) as error:
+            st.warning(f"Could not load `{path}`: {error}")
     else:
         st.info(f"{label} has not been generated for this run.")
+
+
+def presentation_files(report: dict | None, directory_key: str) -> list[Path]:
+    """Only expose files recorded in the current report's run-specific manifest."""
+    presentation = report.get("presentation", {}) if report else {}
+    directory = presentation.get(directory_key)
+    if not directory:
+        return []
+    root = Path(directory).resolve()
+    return sorted(
+        Path(value) for value in presentation.get("artifacts", [])
+        if Path(value).resolve().parent == root and Path(value).suffix.lower() == ".png"
+    )
 
 
 with st.sidebar:
@@ -188,8 +251,9 @@ with st.sidebar:
     if report and report.get("RaceId") is not None and selected_race is not None and str(report["RaceId"]) != selected_race:
         report = None
     if telemetry is not None and not telemetry.empty and "LapNumber" in telemetry:
-        lap_values = sorted(pd.to_numeric(telemetry["LapNumber"], errors="coerce").dropna().astype(int).unique())
-        selected_lap = st.select_slider("Race lap", options=lap_values, value=lap_values[min(len(lap_values) - 1, 30)])
+        numeric_laps = pd.to_numeric(telemetry["LapNumber"], errors="coerce")
+        lap_values = sorted(numeric_laps[np.isfinite(numeric_laps) & (numeric_laps % 1 == 0)].astype(int).unique())
+        selected_lap = st.select_slider("Race lap", options=lap_values, value=lap_values[min(len(lap_values) - 1, 30)]) if lap_values else None
         drivers = sorted(telemetry["Driver"].dropna().astype(str).unique())
     else:
         selected_lap, drivers = None, []
@@ -202,6 +266,8 @@ tab_replay, tab_diagnostics, tab_studio, tab_arch = st.tabs(["Race replay", "Mod
 with tab_replay:
     if telemetry is None or telemetry.empty:
         st.info(f"Aligned telemetry is not available. Expected artifact: `{telemetry_path}`")
+    elif selected_lap is None or selected_car is None:
+        st.info("Race replay is unavailable: telemetry has no usable lap or driver values.")
     else:
         selected_lap_rows = telemetry[
             (telemetry["Driver"].astype(str) == selected_car)
@@ -237,7 +303,8 @@ with tab_replay:
             focus = snapshot[snapshot["Driver"].astype(str) == selected_car]
             if not focus.empty:
                 row = focus.iloc[0]
-                st.metric("Gap to car ahead", f"{row.get('DeltaT', float('nan')):.2f} s")
+                gap = pd.to_numeric(row.get("DeltaT"), errors="coerce")
+                st.metric("Gap to car ahead", f"{gap:.2f} s" if pd.notna(gap) and np.isfinite(gap) else "N/A")
                 st.caption(f"Ahead: {row.get('DriverAhead', 'unknown')} · Mini-sector: {row.get('MiniSector', 'unknown')}")
     st.divider()
     st.subheader("Driver blocker analysis")
@@ -255,7 +322,8 @@ with tab_replay:
                 history_fig.add_trace(go.Scatter(x=gap_history["LapNumber"], y=gap_history["DeltaT"], mode="lines+markers", name=f"{selected_car} mean gap"))
                 history_fig.update_layout(title=f"{selected_car} · mean gap to car ahead by lap", xaxis_title="Lap", yaxis_title="Gap (s)", plot_bgcolor=CARD, paper_bgcolor=CARBON, font_color=WHITE)
                 st.plotly_chart(history_fig, use_container_width=True)
-            close = focus_history[focus_history["DeltaT"].between(0, 2.0, inclusive="right")].dropna(subset=["DriverAhead"])
+            close = focus_history[focus_history["DeltaT"].between(0, 2.0, inclusive="right")]
+            close = close.dropna(subset=["DriverAhead"]) if "DriverAhead" in close else close.iloc[0:0]
             if not close.empty:
                 blockers = close.groupby("DriverAhead", as_index=False).agg(
                     observations=("DeltaT", "size"), mean_gap_sec=("DeltaT", "mean")
@@ -277,7 +345,7 @@ with tab_diagnostics:
             if test.get("passed") is not None:
                 st.progress(1.0 if test["passed"] else 0.3, text=f"{test.get('test', 'Physics test')}: {'PASS' if test['passed'] else 'FAIL'}")
     if report and report.get("metadata", {}).get("split", {}).get("test", {}).get("race_ids"):
-        held_out_races = ", ".join(report["metadata"]["split"]["test"]["race_ids"])
+        held_out_races = ", ".join(str(value) for value in report["metadata"]["split"]["test"]["race_ids"])
         st.caption(f"Reported summary metrics cover the held-out split: {held_out_races}.")
     if report:
         baselines = report.get("baselines", {})
@@ -290,27 +358,31 @@ with tab_diagnostics:
     # Plotly Baseline Comparison Bar Chart
     st.subheader("Held-out Baseline Duel")
     baselines_dict = report.get("baselines", {}) if report else {}
-    ht_mae = report.get("metrics", {}).get("mae_sec", 0.087) if report else 0.087
-    model_names = ["HammerTime ST-GNN", "Temporal LSTM", "XGBoost"]
-    lstm_mae = baselines_dict.get("lstm", {}).get("mae_sec", 0.119) or 0.119
-    xgb_mae = baselines_dict.get("xgboost", {}).get("mae_sec", 0.134) or 0.134
-    mae_scores = [ht_mae, lstm_mae, xgb_mae]
-    duel_fig = go.Figure(go.Bar(
-        x=model_names,
-        y=mae_scores,
-        marker={"color": ["#00D2BE", "#6CD3BF", "#A0A0A5"]},
-        text=[f"{s:.3f} s" for s in mae_scores],
-        textposition="outside"
-    ))
-    duel_fig.update_layout(
-        title="Held-out Test MAE (Lower is Better)",
-        yaxis_title="MAE (seconds)",
-        plot_bgcolor=CARD,
-        paper_bgcolor=CARBON,
-        font_color=WHITE,
-        height=320
-    )
-    st.plotly_chart(duel_fig, use_container_width=True)
+    scores = [
+        ("HammerTime ST-GNN", report.get("metrics", {}).get("mae_sec") if report else None, "#00D2BE"),
+        ("Temporal LSTM", baselines_dict.get("lstm", {}).get("mae_sec"), "#6CD3BF"),
+        ("XGBoost", baselines_dict.get("xgboost", {}).get("mae_sec"), "#A0A0A5"),
+    ]
+    available_scores = [(name, value, color) for name, value, color in scores if value is not None]
+    if available_scores:
+        duel_fig = go.Figure(go.Bar(
+            x=[name for name, _, _ in available_scores],
+            y=[value for _, value, _ in available_scores],
+            marker={"color": [color for _, _, color in available_scores]},
+            text=[f"{value:.3f} s" for _, value, _ in available_scores],
+            textposition="outside"
+        ))
+        duel_fig.update_layout(
+            title="Held-out Test MAE (Lower is Better)",
+            yaxis_title="MAE (seconds)",
+            plot_bgcolor=CARD,
+            paper_bgcolor=CARBON,
+            font_color=WHITE,
+            height=320
+        )
+        st.plotly_chart(duel_fig, use_container_width=True)
+    if len(available_scores) < len(scores):
+        st.info("Baseline comparison is incomplete: unreported model scores are unavailable.")
 
     prediction_rows = report.get("predictions", []) if report else []
     if selected_race is not None:
@@ -318,6 +390,8 @@ with tab_diagnostics:
     if prediction_rows:
         predictions = pd.DataFrame(prediction_rows)
         if {"y_true", "y_pred"}.issubset(predictions.columns):
+            predictions = predictions.dropna(subset=["y_true", "y_pred"])
+        if not predictions.empty and {"y_true", "y_pred"}.issubset(predictions.columns):
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=predictions["y_true"], y=predictions["y_pred"], mode="markers", name="Test predictions", marker={"color": "#00D2BE", "opacity": 0.55}))
             extent = [float(np.nanmin(predictions[["y_true", "y_pred"]].values)), float(np.nanmax(predictions[["y_true", "y_pred"]].values))]
@@ -326,20 +400,21 @@ with tab_diagnostics:
             st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Prediction-level diagnostics are unavailable until the evaluation report contains test predictions.")
+    visuals = {path.name: path for path in presentation_files(report, "visuals_dir")}
     for visual_name in ("v5_baseline_duel.png", "v6_physics_cards.png", "v8_residuals.png", "v9_clean_air_cal.png"):
-        render_visual(VISUALS_DIR / visual_name, visual_name.replace("_", " ").removesuffix(".png"))
+        render_visual(visuals.get(visual_name), visual_name.replace("_", " ").removesuffix(".png"))
 
 with tab_studio:
     st.subheader("On-air insight cards")
-    card_files = sorted(CARDS_DIR.glob("*.png")) if CARDS_DIR.is_dir() else []
+    card_files = [path for path in presentation_files(report, "cards_dir") if path.is_file()]
     if card_files:
         for start in range(0, len(card_files), 2):
             columns = st.columns(2)
             for column, card_path in zip(columns, card_files[start:start + 2]):
                 with column:
-                    st.image(str(card_path), caption=card_path.stem.replace("_", " "), use_container_width=True)
+                    render_visual(card_path, card_path.stem.replace("_", " "))
     else:
-        st.info(f"Broadcast cards have not been generated yet. Expected directory: `{CARDS_DIR}`")
+        st.info("Broadcast cards are unavailable for the current run. Generate them with the pipeline.")
 
 with tab_arch:
     st.subheader("Pipeline M1–M9 Architecture Flow")
