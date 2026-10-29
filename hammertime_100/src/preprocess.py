@@ -145,7 +145,9 @@ def align_driver_telemetry(
 
             mask = (resampled["TimeSec"] >= lap_start) & (resampled["TimeSec"] < lap_end)
             if mask.any():
-                source_distance = tel_sorted[["TimeSec", "Distance"]].dropna()
+                source_distance = tel_sorted.reindex(columns=["TimeSec", "Distance"]).copy()
+                source_distance["Distance"] = pd.to_numeric(source_distance["Distance"], errors="coerce")
+                source_distance = source_distance.dropna()
                 source_times = source_distance["TimeSec"].to_numpy(dtype=float)
                 source_values = source_distance["Distance"].to_numpy(dtype=float)
                 right = int(np.searchsorted(source_times, lap_start))
