@@ -135,7 +135,7 @@ def _render_real_outputs(aligned: pd.DataFrame, snapshots: list, labels: pd.Data
     for snapshot in reversed(snapshots):
         if race_id and str(getattr(snapshot, "race_id", "")) != race_id:
             continue
-        at_time = race_rows[np.isclose(race_rows["TimeSec"].to_numpy(dtype=float), float(snapshot.time_sec))]
+        at_time = race_rows[np.isclose(race_rows["TimeSec"].to_numpy(dtype=float), float(snapshot.time_sec), rtol=0)]
         if at_time.empty:
             continue
         position_rows = at_time.dropna(subset=["X", "Y"]) if {"X", "Y"}.issubset(at_time.columns) else pd.DataFrame()

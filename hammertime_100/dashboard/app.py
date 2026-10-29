@@ -282,7 +282,7 @@ with tab_replay:
             # Anchor the selected lap on the focus driver's final sample, then
             # show every car at that same race timestamp, including lapped cars.
             race_times = pd.to_numeric(telemetry["TimeSec"], errors="coerce")
-            snapshot = telemetry[np.isclose(race_times.to_numpy(dtype=float), float(time_value), atol=1e-6)]
+            snapshot = telemetry[np.isclose(race_times.to_numpy(dtype=float), float(time_value), atol=1e-6, rtol=0)]
             lap_frame = telemetry[pd.to_numeric(telemetry["LapNumber"], errors="coerce") == selected_lap]
         route = lap_frame[lap_frame["Driver"].astype(str) == selected_car].sort_values("Distance") if "Distance" in lap_frame else None
         left, right = st.columns([1.5, 1])

@@ -55,10 +55,10 @@ class PipelineContractTests(unittest.TestCase):
         edges, weights = Mock(), Mock()
         edges.detach.return_value.cpu.return_value.numpy.return_value = np.empty((2, 0), dtype=int)
         weights.detach.return_value.cpu.return_value.numpy.return_value = np.empty((0, 1))
-        snapshot = SimpleNamespace(race_id="observed", time_sec=1.0, driver_names=("AA",),
+        snapshot = SimpleNamespace(race_id="observed", time_sec=6000.0, driver_names=("AA",),
                                    edge_index=edges, edge_attr=weights)
         rows = pd.DataFrame({"RaceId": ["observed"] * 2, "Driver": ["AA"] * 2,
-                             "TimeSec": [0.0, 1.0], "LapNumber": [1, 1],
+                             "TimeSec": [6000.0, 6000.05], "LapNumber": [1, 1],
                              "X": [11.0, 12.0], "Y": [21.0, 22.0], "DeltaT": [4.0, 4.0]})
         with tempfile.TemporaryDirectory() as directory:
             config = copy.deepcopy(self.config)
@@ -66,7 +66,7 @@ class PipelineContractTests(unittest.TestCase):
             with patch.dict(sys.modules, modules):
                 paths = pipeline._render_real_outputs(rows, [snapshot], pd.DataFrame(), {}, config)
             call = modules["v1_track_map"].generate_track_map.call_args
-            self.assertEqual(call.args[0], {"AA": (12.0, 22.0)})
+            self.assertEqual(call.args[0], {"AA": (11.0, 21.0)})
             self.assertEqual(call.kwargs["circuit_name"], "observed")
             np.testing.assert_array_equal(call.kwargs["track_xy"], [[11.0, 21.0], [12.0, 22.0]])
             self.assertEqual(len(paths), 1)

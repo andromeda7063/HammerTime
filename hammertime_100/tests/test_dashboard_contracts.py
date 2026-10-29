@@ -105,6 +105,14 @@ class DashboardContractTests(unittest.TestCase):
         self.assertEqual(len(app.get("image")), 0)
         self.assertTrue(any("current run" in message.value.lower() for message in app.info))
 
+    def test_replay_does_not_mix_nearby_session_timestamps(self):
+        telemetry = pd.DataFrame({"Driver": ["AAA", "BBB"], "TimeSec": [6000.0, 6000.05],
+                                   "LapNumber": [1, 1], "X": [1.0, 3.0], "Y": [2.0, 4.0]})
+        app = self.render(telemetry=telemetry)
+        self.assertEqual(len(app.exception), 0)
+        chart = json.loads(app.get("plotly_chart")[0].proto.spec)
+        self.assertEqual(chart["data"][-1]["text"], ["AAA"])
+
     def test_corrupt_current_image_does_not_crash_dashboard(self):
         app = self.render({"metrics": {"mae_sec": 0.1}}, image_content=b"not a PNG")
         self.assertEqual(len(app.exception), 0)
