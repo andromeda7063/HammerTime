@@ -26,97 +26,77 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
 def calculate_mini_sector_durations(
     df: pd.DataFrame,
     max_gap_sec: float | None = None,
+    lap_length_m: float = 5793.0,
+    mini_sectors: int = 20,
 ) -> pd.DataFrame:
-    """
-    Computes the actual time elapsed in each mini-sector per lap and driver.
-    """
-    # Group by Driver, LapNumber, MiniSector
-    # Filter out safety car and pit laps
-    valid = df.get("IsValid", pd.Series(True, index=df.index)).fillna(False).astype(bool)
-    clean_candidates = df[
-        valid
-        & ~df["IsPitLap"].fillna(False).astype(bool)
-        & ~df["IsSafetyCar"].fillna(False).astype(bool)
-    ].copy()
-    if clean_candidates.empty:
-        return pd.DataFrame()
-
-    sample_group = ["Driver"]
-    if "RaceId" in clean_candidates.columns:
-        sample_group.insert(0, "RaceId")
-    clean_candidates = clean_candidates.sort_values(sample_group + ["TimeSec"])
-    sample_steps = clean_candidates.groupby(sample_group)["TimeSec"].diff()
-    sample_steps = sample_steps[sample_steps > 0]
-    sample_period = float(sample_steps.median()) if not sample_steps.empty else 0.0
-
+    """Interpolate observed distance crossings; omit unsupported or partial sectors."""
+    required = {"Driver", "LapNumber", "Compound", "TimeSec", "Distance", "IsPitLap", "IsSafetyCar"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"Telemetry is missing required duration columns: {sorted(missing)}")
+    if lap_length_m <= 0 or mini_sectors <= 0:
+        raise ValueError("lap_length_m and mini_sectors must be positive.")
+    sector_length = lap_length_m / mini_sectors
+    group_keys = ["RaceId", "Driver"] if "RaceId" in df.columns else ["Driver"]
     records = []
-    group_keys = ["Driver", "LapNumber", "MiniSector", "Compound"]
-    if "RaceId" in clean_candidates.columns:
-        group_keys.insert(0, "RaceId")
-    grouped = clean_candidates.groupby(group_keys)
-
-    # Heavy braking / chicane mini-sectors at Monza (Rettifilo T1/T2, Roggia T4/T5, Lesmos T6/T7, Ascari T8/T9/T10, Parabolica T11)
-    corner_sectors = {1, 2, 3, 5, 6, 7, 8, 9, 13, 14, 15, 18, 19}
-
-    for key, grp in grouped:
-        if "RaceId" in clean_candidates.columns:
-            race_id, driver, lap, sector, compound = key
-        else:
-            driver, lap, sector, compound = key
-        grp = grp.sort_values("TimeSec")
-        if max_gap_sec is not None and len(grp) > 1:
-            if grp["TimeSec"].diff().dropna().max() > max_gap_sec:
+    for _, driver_rows in df.groupby(group_keys, sort=False):
+        rows = driver_rows.sort_values("TimeSec").copy()
+        times = pd.to_numeric(rows["TimeSec"], errors="coerce").to_numpy(dtype=float)
+        distances = pd.to_numeric(rows["Distance"], errors="coerce").to_numpy(dtype=float)
+        laps = pd.to_numeric(rows["LapNumber"], errors="coerce").to_numpy(dtype=float)
+        # M2 supplies distance relative to each observed lap start. Keep an
+        # observed endpoint at lap_length_m instead of wrapping it to zero.
+        progress = (laps - 1) * lap_length_m + distances
+        valid = rows.get("IsValid", pd.Series(True, index=rows.index)).fillna(False).to_numpy(dtype=bool)
+        valid &= ~rows["IsPitLap"].fillna(False).to_numpy(dtype=bool)
+        valid &= ~rows["IsSafetyCar"].fillna(False).to_numpy(dtype=bool)
+        valid &= np.isfinite(times) & np.isfinite(progress) & (distances >= 0)
+        breaks = np.ones(len(rows), dtype=bool)
+        if len(rows) > 1:
+            time_step, distance_step = np.diff(times), np.diff(progress)
+            connected = valid[:-1] & valid[1:] & (time_step > 0) & (distance_step > 0)
+            if max_gap_sec is not None:
+                connected &= time_step <= max_gap_sec + 1e-9
+            connected &= np.diff(laps) <= 1
+            breaks[1:] = ~connected
+        segments = np.cumsum(breaks)
+        for segment_id in np.unique(segments[valid]):
+            indices = np.flatnonzero((segments == segment_id) & valid)
+            if len(indices) < 2:
                 continue
-        t_min = grp["TimeSec"].min()
-        avg_gap = float(grp["DeltaT"].mean()) if "DeltaT" in grp.columns else 99.0
-        
-        # Continuous unquantized baseline transit time per mini-sector
-        sec_idx = int(sector)
-        base_transit = 3.50 + float(np.sin(float(sec_idx) * 0.75) * 0.40)
-        
-        # Deterministic driver pace offset
-        drv_hash = (abs(hash(driver)) % 50 - 25) / 1000.0
-        lap_hash = (abs(hash((driver, int(lap), sec_idx))) % 50 - 25) / 10000.0
-
-        # Physical Aerodynamic Wake Loss:
-        # In clean air (>3.0s), zero aerodynamic delay
-        # In DRS train (<0.8s), corner chicanes lose downforce (+0.055s to +0.075s per corner),
-        # while straights experience slipstream benefit (-0.010s to -0.015s)
-        # Cumulative full-lap DRS train delay satisfies [0.40s, 0.80s]
-        if avg_gap < 0.8:
-            wake = float(np.exp(-(avg_gap ** 2) / 2.0))
-            if sec_idx in corner_sectors:
-                aero_loss = 0.065 * wake + lap_hash
-            else:
-                aero_loss = -0.012 * wake + lap_hash
-        elif avg_gap <= 3.0:
-            wake = float(np.exp(-(avg_gap ** 2) / 2.0))
-            if sec_idx in corner_sectors:
-                aero_loss = 0.030 * wake + lap_hash
-            else:
-                aero_loss = -0.006 * wake + lap_hash
-        else:
-            aero_loss = lap_hash
-
-        duration = base_transit + drv_hash + aero_loss
-
-        if 0.5 < duration < 20.0:
-            record = {
-                "Driver": driver,
-                "LapNumber": lap,
-                "MiniSector": sector,
-                "Compound": compound,
-                "Duration": duration,
-                "AvgGap": avg_gap,
-                "TimeSec": t_min  # reference timestamp
-            }
-            if "Team" in grp.columns:
-                teams = grp["Team"].dropna().astype(str)
-                record["Team"] = teams.iloc[0] if not teams.empty else None
-            if "RaceId" in clean_candidates.columns:
-                record["RaceId"] = race_id
-            records.append(record)
-
+            segment_distance, segment_time = progress[indices], times[indices]
+            first = int(np.ceil(segment_distance[0] / sector_length - 1e-9))
+            last = int(np.floor(segment_distance[-1] / sector_length + 1e-9))
+            if last <= first:
+                continue
+            boundaries = np.arange(first, last + 1) * sector_length
+            crossing_times = np.interp(boundaries, segment_distance, segment_time)
+            for index in range(len(boundaries) - 1):
+                lap = (first + index) // mini_sectors + 1
+                sector = (first + index) % mini_sectors
+                entry, exit_time = crossing_times[index:index + 2]
+                observed = indices[(segment_time >= entry) & (segment_time < exit_time)]
+                if not len(observed):
+                    continue
+                sector_rows = rows.iloc[observed]
+                compounds = sector_rows["Compound"].dropna().unique()
+                if len(compounds) != 1 or not (sector_rows["LapNumber"] == lap).all():
+                    continue
+                duration = float(exit_time - entry)
+                if not 0.5 < duration < 20.0:
+                    continue
+                record = {
+                    "Driver": sector_rows["Driver"].iloc[0], "LapNumber": lap,
+                    "MiniSector": sector, "Compound": compounds[0],
+                    "Duration": duration, "AvgGap": float(sector_rows["DeltaT"].mean()) if "DeltaT" in rows else np.nan,
+                    "TimeSec": float(entry),
+                }
+                if "Team" in rows:
+                    teams = sector_rows["Team"].dropna().astype(str)
+                    record["Team"] = teams.iloc[0] if not teams.empty else None
+                if "RaceId" in rows:
+                    record["RaceId"] = sector_rows["RaceId"].iloc[0]
+                records.append(record)
     return pd.DataFrame(records)
 
 
@@ -180,6 +160,8 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     sector_df = calculate_mini_sector_durations(
         aligned_df,
         max_gap_sec=config.get("preprocess", {}).get("max_interpolate_sec"),
+        lap_length_m=float(config["track"]["lap_length_m"]),
+        mini_sectors=int(config["track"]["mini_sectors"]),
     )
 
     if sector_df.empty:
