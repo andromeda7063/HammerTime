@@ -60,7 +60,9 @@ def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> floa
             total_abs_err += diff.sum().item()
             total_samples += int(valid.sum().item())
 
-    return total_abs_err / max(total_samples, 1)
+    if total_samples == 0:
+        raise ValueError("Validation loader has no valid target nodes.")
+    return total_abs_err / total_samples
 
 
 def train_model(model: nn.Module, train_loader, val_loader, config: dict, device: torch.device):
@@ -113,6 +115,9 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                 )
 
             loss.backward()
+            for name, parameter in model.named_parameters():
+                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+                    raise FloatingPointError(f"Non-finite gradient for {name} at epoch {epoch}.")
             optimizer.step()
 
             epoch_loss += loss.item()
