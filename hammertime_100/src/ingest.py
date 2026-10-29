@@ -43,6 +43,23 @@ def load_race(year: int, gp: str, session_type: str = "R", cache_dir: str = "dat
         logger.info(f"Loading FastF1 session: {year} {gp} [{session_type}]...")
         session = fastf1.get_session(year, gp, session_type)
         session.load(telemetry=True, laps=True, weather=True)
+        identity = f"{year} {gp} [{session_type}]"
+        # FastF1 can log an acquisition error and return without loading these
+        # properties. A normal load() return alone does not establish success.
+        try:
+            laps = session.laps
+        except Exception as err:
+            raise RuntimeError(f"FastF1 session {identity} did not load required laps.") from err
+        if not isinstance(laps, pd.DataFrame) or laps.empty:
+            raise RuntimeError(f"FastF1 session {identity} has no loaded laps.")
+        try:
+            car_data = session.car_data
+        except Exception as err:
+            raise RuntimeError(f"FastF1 session {identity} did not load required car telemetry.") from err
+        if not isinstance(car_data, dict) or not any(
+            isinstance(rows, pd.DataFrame) and not rows.empty for rows in car_data.values()
+        ):
+            raise RuntimeError(f"FastF1 session {identity} has no loaded car telemetry.")
         logger.info(f"Successfully loaded session: {session.event['EventName']}")
         return session
     except Exception as e:
