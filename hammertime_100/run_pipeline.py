@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import logging
 import re
@@ -28,20 +29,40 @@ logger = logging.getLogger("hammertime.pipeline")
 
 def _session_specs(config: dict) -> list[dict]:
     """Return configured sessions, retaining the original single-session form."""
-    sessions = config.get("sessions") or [config["session"]]
+    sessions = config.get("sessions")
+    if sessions is None or sessions == []:
+        sessions = [config["session"]]
     if not isinstance(sessions, list) or not sessions:
         raise ValueError("sessions must be a non-empty list when provided.")
     normalized = []
     seen = set()
+    seen_sources, seen_directories = set(), set()
     for item in sessions:
         if not isinstance(item, dict) or not {"year", "gp"}.issubset(item):
             raise ValueError("Each sessions entry must contain year and gp; session_type defaults to 'R'.")
         spec = {**config["session"], **item}
+        if (isinstance(spec["year"], bool) or not isinstance(spec["year"], int)
+                or spec["year"] <= 0 or not isinstance(spec["gp"], str) or not spec["gp"].strip()):
+            raise ValueError("Each sessions entry needs a positive integer year and non-empty gp name.")
         spec["session_type"] = str(spec.get("session_type", "R"))
+        source = (spec["year"], spec["gp"].strip().casefold(), spec["session_type"].strip().upper())
+        if source in seen_sources:
+            raise ValueError(f"Duplicate configured session: {source}")
+        seen_sources.add(source)
+        if spec["gp"].strip().casefold() != str(config["session"]["gp"]).strip().casefold() and "lap_length_m" not in item:
+            raise ValueError(f"Session {spec['gp']} requires its own lap_length_m; the default is for {config['session']['gp']}.")
+        if "lap_length_m" in item and (
+                isinstance(item["lap_length_m"], bool) or not isinstance(item["lap_length_m"], (int, float))
+                or not np.isfinite(item["lap_length_m"]) or item["lap_length_m"] <= 0):
+            raise ValueError("sessions.lap_length_m must be a finite positive distance.")
         race_id = str(spec.get("race_id") or f"{spec['year']}-{spec['gp']}-{spec['session_type']}")
         if race_id in seen:
             raise ValueError(f"Duplicate configured race_id: {race_id}")
         seen.add(race_id)
+        directory = _safe_component(race_id)
+        if directory in seen_directories:
+            raise ValueError(f"Configured race IDs share the same output directory: {directory}")
+        seen_directories.add(directory)
         spec["race_id"] = race_id
         normalized.append(spec)
     return normalized
@@ -336,6 +357,8 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
         config = yaml.safe_load(config_file)
     if not isinstance(config, dict):
         raise ValueError(f"Configuration is not a mapping: {cfg_path}")
+    from config_validation import validate_config
+    validate_config(config)
 
     base_processed_dir = Path(config["session"]["processed_dir"])
     if not base_processed_dir.is_absolute():
@@ -471,4 +494,8 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
 
 
 if __name__ == "__main__":
-    run_100_percent_pipeline()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, help="Experiment YAML path; defaults to configs/default.yaml.")
+    parser.add_argument("--retrain", "--force-train", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    run_100_percent_pipeline(args.config)
