@@ -375,29 +375,15 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
             race_config["track"]["lap_length_m"] = float(spec["lap_length_m"])
 
         logger.info("Loading configured FastF1 session %s", race_id)
-        try:
-            session = load_race(spec["year"], spec["gp"], spec["session_type"], race_config["session"]["cache_dir"])
-            raw_laps_path, raw_telemetry_path = export_raw_tables(session, str(race_dir / "raw"))
-            raw_artifacts.append(str(Path(raw_laps_path).resolve()))
-            if raw_telemetry_path is not None:
-                raw_artifacts.append(str(Path(raw_telemetry_path).resolve()))
-            aligned = process_race(session, race_config)
-            if "RaceId" not in aligned:
-                aligned["RaceId"] = race_id
-            labels = build_targets(aligned, race_config)
-        except Exception as err:
-            cached_tel = base_processed_dir / "aligned_telemetry.parquet"
-            cached_lbl = base_processed_dir / "target_labels.parquet"
-            if cached_tel.is_file() and cached_lbl.is_file():
-                logger.warning("FastF1 session load failed (%s); using existing pre-processed Parquet data.", err)
-                aligned = pd.read_parquet(cached_tel)
-                labels = pd.read_parquet(cached_lbl)
-                if "RaceId" not in aligned.columns:
-                    aligned["RaceId"] = race_id
-                if "RaceId" not in labels.columns:
-                    labels["RaceId"] = race_id
-            else:
-                raise
+        session = load_race(spec["year"], spec["gp"], spec["session_type"], race_config["session"]["cache_dir"])
+        raw_laps_path, raw_telemetry_path = export_raw_tables(session, str(race_dir / "raw"))
+        raw_artifacts.append(str(Path(raw_laps_path).resolve()))
+        if raw_telemetry_path is not None:
+            raw_artifacts.append(str(Path(raw_telemetry_path).resolve()))
+        aligned = process_race(session, race_config)
+        if "RaceId" not in aligned:
+            aligned["RaceId"] = race_id
+        labels = build_targets(aligned, race_config)
         race_snapshots, race_driver_map = build_race_graph_snapshots(aligned, race_config)
         aligned_tables.append(aligned)
         label_tables.append(labels)
