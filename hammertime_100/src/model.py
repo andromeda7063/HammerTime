@@ -96,8 +96,11 @@ class HammerTimeSTGNN(nn.Module):
 
         if edge_index is None or edge_index.size(1) == 0:
             return loop_index, loop_attr
+        edge_index = edge_index.to(device)
         if edge_attr is None:
             edge_attr = torch.ones((edge_index.size(1), 1), dtype=torch.float, device=device)
+        else:
+            edge_attr = edge_attr.to(device)
 
         combined_index = torch.cat([edge_index, loop_index], dim=1)
         combined_attr = torch.cat([edge_attr, loop_attr], dim=0)
