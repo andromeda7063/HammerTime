@@ -119,9 +119,9 @@ def train_xgboost_baseline(X_train: np.ndarray, y_train: np.ndarray, X_test: np.
 
         preds = model.predict(X_test)
         mae = float(mean_absolute_error(y_test, preds))
-        r2 = float(r2_score(y_test, preds))
+        r2 = float(r2_score(y_test, preds)) if len(y_test) >= 2 else None
 
-        logger.info(f"XGBoost Baseline Results | MAE: {mae:.4f} s | R²: {r2:.4f}")
+        logger.info("XGBoost Baseline Results | MAE: %.4f s | R²: %s", mae, r2)
         return {"available": True, "mae_sec": mae, "r2_score": r2, "predictions": preds}
     except Exception:
         logger.exception("XGBoost training failed; refusing to substitute fabricated benchmark scores.")
@@ -173,9 +173,9 @@ def train_lstm_baseline(X_train_seq: np.ndarray, y_train: np.ndarray, X_test_seq
         preds = model(test_x).cpu().numpy()
 
     mae = float(mean_absolute_error(y_test, preds))
-    r2 = float(r2_score(y_test, preds))
+    r2 = float(r2_score(y_test, preds)) if len(y_test) >= 2 else None
 
-    logger.info(f"LSTM Baseline Results | MAE: {mae:.4f} s | R²: {r2:.4f}")
+    logger.info("LSTM Baseline Results | MAE: %.4f s | R²: %s", mae, r2)
     return {"available": True, "mae_sec": mae, "r2_score": r2, "predictions": preds}
 
 
