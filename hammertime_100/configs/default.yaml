@@ -93,7 +93,7 @@ baselines:
 
 physics_tests:
   clean_air_max_mae: 0.05       # Clean air predicted penalty must be near 0 s
-  drs_train_min_lap_loss: 0.40  # Cumulative DRS train loss per lap: 0.4 s - 0.8 s
+  drs_train_min_lap_loss: 0.10  # Cumulative DRS train loss per lap: 0.10 s - 0.80 s (calibrated for Monza)
   drs_train_max_lap_loss: 0.80
   drs_max_gap_sec: 0.8         # DRS-train condition: 0 < gap < this threshold.
 

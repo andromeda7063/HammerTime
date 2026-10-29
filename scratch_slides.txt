@@ -1,0 +1,342 @@
+=== SLIDE 01 ===
+  BCSE209L MACHINE LEARNING  ·  VIT CHENNAI
+  HammerTime 100
+  A dynamic spatio-temporal graph neural network for Formula 1 traffic delay estimation
+  A. Adithya Sai Pratheek  ·  24BAI1445
+  M.S. Abhinav Sriram  ·  24BAI1209
+  2023 Monza Grand Prix case study  ·  github.com/andromeda7063/HammerTime
+
+=== SLIDE 02 ===
+  Problem statement
+  HammerTime 100  ·  VIT Chennai
+  2
+  When a car follows another, how much time does it lose, and where on the lap?
+  Our output: a delay estimate for every driver in every mini-sector, relative to clean air.
+  1
+  Many factors at once
+  Gap, tyre condition, driver pace, track position and interruptions all change lap time.
+  2
+  Telemetry hides the cause
+  Proximity is observable; the aerodynamic loss is not directly measured.
+  3
+  Cars interact
+  Treating each car as a separate time series ignores who is ahead of whom.
+
+=== SLIDE 03 ===
+  Isolated cars vs traffic graph
+  HammerTime 100  ·  VIT Chennai
+  3
+  Typical approach
+  Each car on its own
+  One car's history only
+  No neighbours, no edges
+  XGBoost and LSTM baselines
+  Cannot see who is ahead
+  HammerTime
+  All cars as a changing graph
+  Directed leader to follower edges
+  Edge weight falls with the gap
+  Attention over nearby cars
+  History window plus forecast
+
+=== SLIDE 04 ===
+  Objectives and scope
+  HammerTime 100  ·  VIT Chennai
+  4
+  1
+  Align telemetry
+  Keep driver, lap, mini-sector and race identity on a shared 4 Hz grid.
+  2
+  Model interactions
+  Represent nearby cars as a graph; mask inactive and pit cars.
+  3
+  Learn and compare
+  Spatial plus temporal learning, against single-car baselines and physics checks.
+  4
+  Present results
+  Command line, dashboards, visual suite and broadcast-style graphics.
+
+=== SLIDE 05 ===
+  Real-world impact
+  HammerTime 100  ·  VIT Chennai
+  5
+  Broadcast storytelling
+  Traffic Alert and duel cards explain who is stuck behind whom, and where.
+  Traffic research
+  A framework to study how following distance costs time, sector by sector.
+  Fan engagement
+  An interactive control room lets viewers explore cars, gaps and sectors.
+  Reusable pipeline
+  Configurable for any session FastF1 supports; multi-race ready.
+  Research prototype: the impact is potential until the target is validated on measured data.
+
+=== SLIDE 06 ===
+  System architecture
+  HammerTime 100  ·  VIT Chennai
+  6
+  FastF1 session
+  ›
+  Aligned telemetry
+  ›
+  Targets + graphs
+  ›
+  Windows + splits
+  ›
+  ST-GNN + baselines
+  ›
+  Evaluation JSON
+  Artifacts feed three presentation layers
+  1
+  Streamlit dashboard
+  Replay, diagnostics, baselines, broadcast cards
+  2
+  Browser control room
+  Animated circuit, timing tower, telemetry
+  3
+  Visual suite + cards
+  Nine analysis graphics and broadcast PNGs
+
+=== SLIDE 07 ===
+  Nine-module pipeline, M1 to M9
+  HammerTime 100  ·  VIT Chennai
+  7
+  M1
+  Ingest
+  FastF1 session, laps & telemetry
+  M2
+  Preprocess
+  4 Hz alignment, gaps, SC flags
+  M3
+  Target
+  Sector delay vs clean-air ref
+  M4
+  Graph
+  20 slots, directed RBF edges
+  M5
+  Dataset
+  Windows, purged splits, scaler
+  M6
+  Model
+  2× GAT + temporal Conv1d
+  M7
+  Train
+  Masked L1, early stopping
+  M8
+  Evaluate
+  MAE, R², physics checks
+  M9
+  Baselines
+  Isolated XGBoost & LSTM
+
+=== SLIDE 08 ===
+  How it works: the traffic graph
+  HammerTime 100  ·  VIT Chennai
+  8
+  20
+  driver slots per snapshot
+  ≤ 2 s
+  gap needed for an edge
+  σ = 1 s
+  RBF width for edge weight
+  Weight = exp(−gap² / 2σ²): 0.5 s → 0.88, 1 s → 0.61, 2 s → 0.14
+  Node features: speed, throttle, five tyre-compound flags, tyre age, mini-sector. Inactive, pit and invalid cars stay masked.
+
+=== SLIDE 09 ===
+  How it works: the delay target
+  HammerTime 100  ·  VIT Chennai
+  9
+  sector delay  =  sector duration  −  clean-air reference
+  < 0.8 s
+  Close following
+  Strongest wake, DRS-train zone
+  0.8 – 3 s
+  Following
+  Moderate traffic effect
+  > 3 s
+  Clean air
+  Used to build the reference
+  Reference fallback:
+  Driver
+  ›
+  Teammate
+  ›
+  Session grid
+
+=== SLIDE 10 ===
+  Model design: graph attention
+  HammerTime 100  ·  VIT Chennai
+  10
+  1
+  Input window  W × N × 9
+  2
+  Linear projection  → 64
+  3
+  2 × GATConv  (4 heads, edge_dim 1)
+  4
+  Temporal Conv1d  (kernel 3)
+  5
+  MLP head  → delay per car
+  10
+  history snapshots (2.25 s)
+  5
+  snapshots ahead = 1.25 s
+  64
+  hidden channels
+  1
+  delay per car, per forecast
+  Self-loops let each car keep its own signal when no neighbour is close.
+
+=== SLIDE 11 ===
+  Key stats at a glance
+  HammerTime 100  ·  VIT Chennai
+  11
+  9
+  node features
+  20
+  mini-sectors per lap
+  4 Hz
+  telemetry grid, 0.25 s
+  1.25 s
+  forecast horizon
+  64
+  hidden channels
+  2 × 4
+  GAT layers × heads
+  983
+  held-out observations
+  0.0463 s
+  test MAE, ST-GNN
+  Adam lr 0.001  ·  batch 128  ·  early stopping (patience 6)  ·  70/15/15 purged split  ·  seed 42
+
+=== SLIDE 12 ===
+  How we compared models
+  HammerTime 100  ·  VIT Chennai
+  12
+  ST-GNN
+  Sees other cars
+  Yes
+  Input
+  Multi-car graph, 9 features per node
+  Setup
+  2 GAT layers, Conv1d, 25 epochs max
+  LSTM
+  Sees other cars
+  No
+  Input
+  One car, temporal sequence of 9 features
+  Setup
+  64 units, 2 layers, 40 epochs
+  XGBoost
+  Sees other cars
+  No
+  Input
+  One car, flattened 10 × 9 history
+  Setup
+  100 trees, depth 6, lr 0.05
+  Same split and same active-target selection for all three; single-car models never see neighbour features.
+
+=== SLIDE 13 ===
+  Low error, unproven physics
+  HammerTime 100  ·  VIT Chennai
+  13
+  Held-out MAE
+  target < 0.150 s
+  PASS
+  Held-out R²
+  target 0.68 – 0.82
+  FAIL
+  Clean-air penalty
+  target ≤ 0.050 s
+  PASS
+  DRS lap penalty
+  target 0.40 – 0.80 s
+  FAIL
+  All three models have negative R² (ST-GNN −0.057, LSTM −0.057, XGBoost −0.013).
+
+=== SLIDE 14 ===
+  Why model cars as a graph
+  HammerTime 100  ·  VIT Chennai
+  14
+  30.5%
+  lower MAE than XGBoost
+  0.1%
+  lower MAE than LSTM
+  Only one
+  that sees neighbouring cars
+  Attention weights nearby leaders by proximity, so close cars count more
+  Two layers pass information along a chain of cars in traffic
+  Edges change with the gap at every timestamp
+  Honest read: the margin over LSTM is tiny and R² is negative, so the graph's value is not yet proven.
+
+=== SLIDE 15 ===
+  Controls and dashboards
+  HammerTime 100  ·  VIT Chennai
+  15
+  Browser control room
+  1
+  Play / pause
+  Start or stop the animation
+  2
+  Reset and speed
+  Restore; 1×, 2× or 5×
+  3
+  Timeline scrubber
+  Move through the replay
+  4
+  Driver focus
+  Dropdown, timing tower or canvas
+  Streamlit dashboard
+  1
+  Race and lap
+  Pick session and lap
+  2
+  Focus driver
+  Cars, gaps and edges at a timestamp
+  3
+  Blocker table
+  Ranks cars ahead by close gap
+  4
+  Diagnostics
+  MAE, R², baselines, broadcast cards
+
+=== SLIDE 16 ===
+  The control room in action
+  HammerTime 100  ·  VIT Chennai
+  16
+  Control room overview
+  Animated Monza circuit
+  Driver telemetry view
+  The browser demo uses simulated tracks and does not run the model.
+
+=== SLIDE 17 ===
+  Broadcast graphics
+  HammerTime 100  ·  VIT Chennai
+  17
+  Saved broadcast card: Traffic Alert
+  Nine analysis visuals (V1 to V9) plus cards for duels and blockers.
+
+=== SLIDE 18 ===
+  Limitations and next steps
+  HammerTime 100  ·  VIT Chennai
+  18
+  Limitations
+  Target uses nominal timing and hand-set wake rules
+  R² is negative; DRS check fails
+  Saved graphics are not one linked run
+  Browser demo is simulated, not live inference
+  Next steps
+  Measure sector times from telemetry
+  Context-aware clean-air references
+  Multi-race held-out evaluation
+  Bind every dashboard number to one artifact
+
+=== SLIDE 19 ===
+  Conclusion
+  Built
+  A full pipeline, graph model, baselines, dashboards and broadcast graphics.
+  Found
+  Lowest MAE of the three models, but negative R² and a failed DRS check.
+  Next
+  Replace constructed targets with measured sector times.
+  Thank you  ·  github.com/andromeda7063/HammerTime
+
