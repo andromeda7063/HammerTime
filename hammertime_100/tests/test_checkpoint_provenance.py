@@ -27,6 +27,9 @@ class CheckpointProvenanceTests(unittest.TestCase):
             checkpoint = root / "best.pt"
             checkpoint.write_bytes(b"historical checkpoint")
             config["train"]["checkpoint_path"] = str(checkpoint)
+            report_path = root / "custom_reports" / "held_out.json"
+            report_path.parent.mkdir()
+            config["evaluation"] = {"report_path": str(report_path)}
             config_path = root / "config.yaml"
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             loader = Mock()
@@ -48,6 +51,7 @@ class CheckpointProvenanceTests(unittest.TestCase):
                 result = pipeline.run_100_percent_pipeline(config_path)
             train.assert_called_once()
             self.assertEqual(result["best_validation_mae_sec"], 0.2)
+            self.assertEqual(Path(result["evaluation_report"]), report_path)
             preserved = list((root / "artifact_history").rglob("best.pt"))
             self.assertEqual(len(preserved), 1)
             self.assertEqual(preserved[0].read_bytes(), b"historical checkpoint")

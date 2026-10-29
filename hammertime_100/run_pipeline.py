@@ -434,7 +434,6 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
     physics = report.get("physics_tests", [])
     gates["physics"] = bool(len(physics) == 2 and all(result.get("passed") is True for result in physics))
     artifacts = _render_real_outputs(aligned_all, snapshots, labels_all, report, config)
-    report_path = Path(config.get("evaluation", {}).get("report_path", base_processed_dir / "evaluation_report.json"))
     with report_path.open("w", encoding="utf-8") as report_file:
         json.dump(report, report_file, indent=2, allow_nan=False)
     expected_visuals = {f"v{index}_" for index in range(1, 10)}
@@ -461,7 +460,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
         "presentation_status": presentation_status,
         "artifacts": artifacts,
         "raw_artifacts": raw_artifacts,
-        "evaluation_report": str(base_processed_dir / "evaluation_report.json"),
+        "evaluation_report": str(report_path),
         "checkpoint": str(checkpoint_path),
         "tuning_study": tuning_result["study_path"] if tuning_result else None,
         "elapsed_seconds": elapsed,
