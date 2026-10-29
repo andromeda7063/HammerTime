@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import logging
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -72,6 +75,13 @@ def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "session"
 
 
+def _preserve_artifact(path: Path, processed_dir: Path) -> None:
+    if path.is_file():
+        archive_dir = processed_dir / "artifact_history" / uuid4().hex
+        archive_dir.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(path, archive_dir / path.name)
+
+
 def _contiguous_lap_ranges(laps: list[int]) -> list[tuple[int, int]]:
     if not laps:
         return []
@@ -102,18 +112,13 @@ def _render_real_outputs(aligned: pd.DataFrame, snapshots: list, labels: pd.Data
     from cards import build_broadcast_cards, generate_all_broadcast_cards
 
     generated = []
-    vis_dir = PROJECT_DIR / "visuals"
-    cards_dir = BROADCAST_DIR / "rendered"
-    # Prevent a skipped output from leaving a previous run's image visible.
-    for filename in (
-        "v1_track_map.png", "v2_pred_vs_actual.png", "v3_delay_heatmap.png",
-        "v4_drs_timeline.png", "v5_baseline_duel.png", "v6_physics_cards.png",
-        "v7_blockers.png", "v8_residuals.png", "v9_clean_air_cal.png",
-    ):
-        (vis_dir / filename).unlink(missing_ok=True)
+    presentation_dir = Path(config["session"]["processed_dir"]) / "presentation" / uuid4().hex
+    vis_dir = presentation_dir / "visuals"
+    cards_dir = presentation_dir / "cards"
+    vis_dir.mkdir(parents=True, exist_ok=False)
     cards_dir.mkdir(parents=True, exist_ok=True)
-    for old_card in cards_dir.glob("card_*.png"):
-        old_card.unlink()
+    report["presentation"] = {"visuals_dir": str(vis_dir.resolve()),
+                              "cards_dir": str(cards_dir.resolve()), "artifacts": generated}
     predictions = report.get("predictions", [])
     prediction_df = pd.DataFrame(predictions)
     metrics = report.get("metrics", {})
@@ -149,60 +154,19 @@ def _render_real_outputs(aligned: pd.DataFrame, snapshots: list, labels: pd.Data
                 gap = gap_by_driver.get(follower)
                 if pd.notna(gap):
                     edges.append((names[source], follower, float(edge_weights[edge_idx]), float(gap)))
-        if track_xy is None or len(track_xy) < 2:
-            monza_pts = np.array([
-                [680, 415], [540, 415], [450, 415], [365, 440], [345, 395], [320, 415],
-                [260, 435], [200, 425], [165, 380], [148, 320], [140, 250], [135, 205],
-                [110, 190], [130, 160], [115, 115], [92, 75], [135, 52], [185, 50],
-                [235, 75], [285, 130], [355, 190], [425, 245], [455, 270], [472, 290],
-                [500, 255], [535, 275], [590, 275], [670, 275], [740, 275], [795, 275],
-                [845, 295], [880, 340], [875, 385], [845, 415], [790, 415], [730, 415], [680, 415]
-            ], dtype=float)
-            t_pts = np.linspace(0, 1, len(monza_pts))
-            t_dense = np.linspace(0, 1, 1000)
-            track_x = np.interp(t_dense, t_pts, monza_pts[:, 0])
-            track_y = np.interp(t_dense, t_pts, monza_pts[:, 1])
-            track_xy = np.column_stack([track_x, track_y])
+        route = race_rows[race_rows["Driver"].astype(str) == next(iter(positions))]
+        if "LapNumber" in route and not route.empty:
+            route = route[route["LapNumber"] == route["LapNumber"].iloc[-1]]
+        route = route.sort_values("TimeSec").dropna(subset=["X", "Y"])
+        track_xy = route[["X", "Y"]].to_numpy(dtype=float)
+        track_xy = track_xy[np.isfinite(track_xy).all(axis=1)]
         output = vis_dir / "v1_track_map.png"
-        generate_track_map(positions, edges, circuit_name="Autodromo Nazionale Monza",
+        generate_track_map(positions, edges, circuit_name=str(race_id or "Configured session"),
                            lap_num=int(at_time["LapNumber"].max()), output_path=str(output), track_xy=track_xy)
         generated.append(str(output))
         break
     if not any(path.endswith("v1_track_map.png") for path in generated):
-        logger.info("Synthesizing Monza circuit coordinates for V1 track traffic map...")
-        monza_pts = np.array([
-            [680, 415], [540, 415], [450, 415], [375, 425], [365, 395],
-            [295, 430], [210, 440], [150, 365], [140, 225], [120, 200],
-            [95, 65], [160, 48], [240, 110], [345, 200], [450, 285],
-            [495, 275], [525, 292], [650, 305], [785, 305], [870, 338],
-            [876, 375], [852, 405], [815, 415], [680, 415]
-        ], dtype=float)
-        t_pts = np.linspace(0, 1, len(monza_pts))
-        t_dense = np.linspace(0, 1, 1000)
-        track_x = np.interp(t_dense, t_pts, monza_pts[:, 0])
-        track_y = np.interp(t_dense, t_pts, monza_pts[:, 1])
-        track_xy = np.column_stack([track_x, track_y])
-
-        drivers = ["VER", "PER", "HAM", "RUS", "LEC", "SAI", "NOR", "PIA", "ALO", "STR",
-                   "GAS", "OCO", "ALB", "SAR", "TSU", "LAW", "BOT", "ZHO", "MAG", "HUL"]
-        positions = {}
-        for i, drv in enumerate(drivers):
-            idx = int(((1.0 - (i * 0.045)) % 1.0) * len(track_xy))
-            positions[drv] = (float(track_xy[idx, 0]), float(track_xy[idx, 1]))
-
-        edges = [
-            ("VER", "PER", 0.88, 0.65),
-            ("LEC", "SAI", 0.94, 0.45),
-            ("NOR", "PIA", 0.82, 0.75),
-            ("HAM", "RUS", 0.91, 0.52),
-            ("GAS", "OCO", 0.75, 0.95),
-            ("TSU", "LAW", 0.68, 1.15)
-        ]
-        output = vis_dir / "v1_track_map.png"
-        generate_track_map(positions, edges, circuit_name=str(race_id or "Autodromo Nazionale Monza"),
-                           lap_num=34, output_path=str(output), track_xy=track_xy)
-        generated.append(str(output))
-        logger.info("Generated V1 Track Map via Monza spline at %s", output)
+        logger.info("V1 track map unavailable: no observed positions for the configured session.")
 
     if not prediction_df.empty and {"y_true", "y_pred"}.issubset(prediction_df.columns):
         output = vis_dir / "v2_pred_vs_actual.png"
@@ -432,16 +396,12 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
     from train import train_model
     device = torch.device("cpu")
     logger.info("[+] Training ST-GNN model on CPU (Max Epochs: %s, Patience: %s)...", config["train"].get("max_epochs", 100), config["train"].get("early_stopping_patience", 15))
-    model = create_model(config).to(device)
     checkpoint_path = Path(config["train"]["checkpoint_path"])
-    force_retrain = "--retrain" in sys.argv or "--force-train" in sys.argv
-    if checkpoint_path.is_file() and not force_retrain:
-        logger.info("Found existing trained checkpoint at %s. Loading model. (Pass --retrain to force fresh training)", checkpoint_path)
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        best_val_mae = float(ckpt.get("val_mae", 0.0260))
-    else:
-        best_val_mae, history = train_model(model, train_loader, val_loader, config, device)
+    model = create_model(config).to(device)
+    _preserve_artifact(checkpoint_path, base_processed_dir)
+    _preserve_artifact(Path(config["train"].get("history_path", checkpoint_path.parent / "training_history.csv")),
+                       base_processed_dir)
+    best_val_mae, history = train_model(model, train_loader, val_loader, config, device)
     gates = {
         "aligned_data": bool(len(aligned_all) and len(aligned_all["TimeSec"].unique())),
         "targets_and_graphs": bool(len(labels_all) and len(snapshots)),
@@ -457,10 +417,15 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
     )
 
     from evaluate import run_full_evaluation
+    report_path = Path(config.get("evaluation", {}).get("report_path", base_processed_dir / "evaluation_report.json"))
+    _preserve_artifact(report_path, base_processed_dir)
     report = run_full_evaluation(str(checkpoint_path), test_loader, config, baseline_scores)
     physics = report.get("physics_tests", [])
     gates["physics"] = bool(len(physics) == 2 and all(result.get("passed") is True for result in physics))
     artifacts = _render_real_outputs(aligned_all, snapshots, labels_all, report, config)
+    report_path = Path(config.get("evaluation", {}).get("report_path", base_processed_dir / "evaluation_report.json"))
+    with report_path.open("w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, indent=2, allow_nan=False)
     expected_visuals = {f"v{index}_" for index in range(1, 10)}
     present_visuals = {Path(path).name.split("_", 1)[0] + "_" for path in artifacts if "v" in Path(path).name}
     card_count = sum(1 for path in artifacts if Path(path).name.startswith("card_"))
@@ -486,6 +451,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None) -> dict:
         "artifacts": artifacts,
         "raw_artifacts": raw_artifacts,
         "evaluation_report": str(base_processed_dir / "evaluation_report.json"),
+        "checkpoint": str(checkpoint_path),
         "elapsed_seconds": elapsed,
     }
     logger.info("Pipeline finished in %.1f seconds. Quality gates passed: %s", elapsed, gates["all_passed"])
