@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Titillium+Web:ital,wght@0,300;0,400;0,600;0,700;0,900;1,400;1,700&family=JetBrains+Mono:wght@400;600;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20261023_monza">
+  <link rel="stylesheet" href="style.css?v=20261029_tactical">
 </head>
 <body>
   <!-- Ambient Audio / Broadcast Top Ticker -->
@@ -204,6 +204,57 @@
           <span class="pill-driver" id="pillDriverCode">VER</span>
           <span class="pill-name" id="pillDriverName">Max Verstappen</span>
           <span class="pill-team" id="pillTeamName">Oracle Red Bull Racing</span>
+        </div>
+      </div>
+
+      <!-- Real-Time Tactical Aero & DRS Loss Breakdown Banner -->
+      <div class="driver-tactical-banner" id="driverTacticalBanner">
+        <div class="tactical-status-box" id="tacticalStatusBox">
+          <div class="tactical-badge badge-green" id="tacticalBadge">🟢 IN DRS · GAINING +0.28s</div>
+          <div class="tactical-main-stat text-green" id="tacticalMainStat">NET GAIN: +0.28s / lap</div>
+          <div class="tactical-sub" id="tacticalSub">DRS flap open + slipstream advantage exceeding corner wake loss</div>
+        </div>
+
+        <div class="tactical-divider"></div>
+
+        <div class="tactical-breakdown-box">
+          <div class="breakdown-title">AERODYNAMIC DEFICIT BREAKDOWN (ST-GNN)</div>
+          <div class="breakdown-stat-row">
+            <span class="bd-label">Time Lost to Dirty Air:</span>
+            <span class="bd-val text-red" id="tacticalDirtyAirLoss">-0.42s / lap</span>
+          </div>
+          <div class="tactical-bar-wrap">
+            <div class="tactical-bar-fill bar-aero" id="tacticalBarAero" style="width: 74%;"></div>
+            <div class="tactical-bar-fill bar-tyre" id="tacticalBarTyre" style="width: 26%;"></div>
+          </div>
+          <div class="breakdown-meta" id="tacticalBreakdownMeta">
+            <span class="meta-dot red-dot"></span> Lost to Dirty Air: <strong id="tacticalAeroPct">74%</strong>
+            <span class="meta-dot yellow-dot"></span> Tyre Wear Delta: <strong id="tacticalTyrePct">26%</strong>
+          </div>
+        </div>
+
+        <div class="tactical-divider"></div>
+
+        <div class="tactical-blocker-box">
+          <div class="breakdown-title">DISTURBANCE SOURCE & RIVAL AHEAD</div>
+          <div class="blocker-driver-row">
+            <span class="blocker-tag">CAR AHEAD:</span>
+            <span class="blocker-code" id="tacticalCarAhead">LEC #16 (Ferrari)</span>
+          </div>
+          <div class="blocker-metrics-row">
+            <div class="b-metric">
+              <span class="bm-label">Inter-Car Gap:</span>
+              <span class="bm-val text-teal" id="tacticalGapSec">0.483s</span>
+            </div>
+            <div class="b-metric">
+              <span class="bm-label">Wake Intensity e_ij:</span>
+              <span class="bm-val text-orange" id="tacticalWakeWeight">0.89 (Severe)</span>
+            </div>
+            <div class="b-metric">
+              <span class="bm-label">DRS Status:</span>
+              <span class="bm-val text-green" id="tacticalDrsStatus">WING OPEN (ACTIVE)</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -570,6 +621,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=final_laps_ready"></script>
+  <script src="app.js?v=20261029_p1_fix"></script>
 </body>
 </html>

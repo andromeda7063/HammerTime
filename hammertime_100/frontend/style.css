@@ -773,6 +773,243 @@ body {
   font-size: 0.78rem;
 }
 
+/* ==========================================================================
+   REAL-TIME TACTICAL AERO & DRS BREAKDOWN BANNER
+   ========================================================================== */
+.driver-tactical-banner {
+  display: grid;
+  grid-template-columns: 290px 1px 1fr 1px 1fr;
+  gap: 20px;
+  background: linear-gradient(135deg, rgba(26, 26, 38, 0.95), rgba(18, 18, 27, 0.98));
+  border: 1px solid rgba(225, 6, 0, 0.35);
+  border-radius: 12px;
+  padding: 18px 24px;
+  margin-bottom: 24px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  transition: var(--transition-smooth);
+}
+
+.driver-tactical-banner::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: var(--f1-red);
+  transition: background 0.3s ease;
+}
+
+.driver-tactical-banner.gaining-mode {
+  border-color: rgba(0, 210, 190, 0.4);
+}
+.driver-tactical-banner.gaining-mode::before {
+  background: var(--drs-green);
+}
+
+.driver-tactical-banner.clean-mode {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.driver-tactical-banner.clean-mode::before {
+  background: #6CD3BF;
+}
+
+.tactical-status-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tactical-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-f1);
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 4px 10px;
+  border-radius: 4px;
+  width: fit-content;
+  text-transform: uppercase;
+}
+
+.badge-green {
+  background: rgba(0, 210, 190, 0.15);
+  color: var(--drs-green);
+  border: 1px solid rgba(0, 210, 190, 0.4);
+  box-shadow: 0 0 12px rgba(0, 210, 190, 0.2);
+}
+
+.badge-red {
+  background: rgba(225, 6, 0, 0.15);
+  color: #FF4D4D;
+  border: 1px solid rgba(225, 6, 0, 0.4);
+  box-shadow: 0 0 12px rgba(225, 6, 0, 0.2);
+}
+
+.badge-silver {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--pure-white);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.tactical-main-stat {
+  font-family: var(--font-mono);
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.tactical-sub {
+  font-size: 0.74rem;
+  color: var(--accent-silver);
+  line-height: 1.3;
+}
+
+.tactical-divider {
+  width: 1px;
+  height: 80%;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tactical-breakdown-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.breakdown-title {
+  font-family: var(--font-f1);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--accent-silver);
+  text-transform: uppercase;
+}
+
+.breakdown-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.bd-label {
+  font-size: 0.82rem;
+  color: var(--pure-white);
+}
+
+.bd-val {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+
+.tactical-bar-wrap {
+  width: 100%;
+  height: 8px;
+  background: #111119;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.tactical-bar-fill.bar-aero {
+  background: var(--f1-red);
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+.tactical-bar-fill.bar-tyre {
+  background: #FFD600;
+  height: 100%;
+  transition: width 0.4s ease;
+}
+
+.breakdown-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 0.74rem;
+  color: var(--accent-silver);
+}
+
+.meta-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+.red-dot { background: var(--f1-red); }
+.yellow-dot { background: #FFD600; }
+
+.tactical-blocker-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.blocker-driver-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.blocker-tag {
+  color: var(--accent-silver);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.blocker-code {
+  font-family: var(--font-f1);
+  font-weight: 800;
+  color: var(--pure-white);
+}
+
+.blocker-metrics-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.b-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bm-label {
+  font-size: 0.68rem;
+  color: var(--accent-silver);
+  font-weight: 600;
+}
+
+.bm-val {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+@media (max-width: 1024px) {
+  .driver-tactical-banner {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .tactical-divider {
+    display: none;
+  }
+}
+
 .telemetry-dashboard-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

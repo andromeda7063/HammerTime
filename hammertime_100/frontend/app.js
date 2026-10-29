@@ -221,7 +221,7 @@ class TrackMap {
 
     // DRS Zones along track: Zone 1 (Diagonal Serraglio), Zone 2 (Main Straight)
     this.drsArcs = [
-      { start: 0.50, end: 0.62, name: 'DRS ZONE 1 (SERRAGLIO)' },
+      { start: 0.52, end: 0.63, name: 'DRS ZONE 1 (SERRAGLIO)' },
       { start: 0.94, end: 0.08, name: 'DRS ZONE 2 (PIT STRAIGHT)' }
     ];
   }
@@ -250,14 +250,93 @@ class TrackMap {
     return interpolated;
   }
 
+  isCarInDrsZone(t) {
+    const normT = ((t % 1.0) + 1.0) % 1.0;
+    return this.drsArcs.some(z => {
+      return (z.start <= z.end)
+        ? (normT >= z.start && normT <= z.end)
+        : (normT >= z.start || normT <= z.end);
+    });
+  }
+
+  getTrackSpeedFactor(t) {
+    // Authentic Monza circuit speed profile along normalized track progress t in [0, 1]:
+    // 0.94 - 0.08: Rettifilo Main Straight (High Speed ~345-352 km/h)
+    // 0.08 - 0.15: Turn 1/2 Variante del Rettifilo Chicane (Heavy Braking ~75-80 km/h)
+    // 0.15 - 0.33: Turn 3 Curva Grande / Biassono (Full Throttle Acceleration ~295-310 km/h)
+    // 0.33 - 0.40: Turn 4/5 Variante della Roggia Chicane (Heavy Braking ~110-120 km/h)
+    // 0.40 - 0.52: Turn 6 & 7 Curva di Lesmo 1 & 2 (Medium-Speed Technical ~175-190 km/h)
+    // 0.52 - 0.63: Curva del Serraglio & Straight (DRS Zone 1, High Speed ~330-340 km/h)
+    // 0.63 - 0.71: Turn 8, 9, 10 Variante Ascari Complex (Chicane Deceleration ~190-205 km/h)
+    // 0.71 - 0.81: Backstraight to Parabolica (Full Throttle High Speed ~340-348 km/h)
+    // 0.81 - 0.94: Turn 11 Curva Parabolica / Alboreto (Medium-Fast Sweeping Turn ~215-230 km/h)
+    const normT = ((t % 1.0) + 1.0) % 1.0;
+
+    // Pit Straight (Finish Line to T1 Braking)
+    if (normT >= 0.94 || normT <= 0.08) {
+      return 1.35;
+    }
+    // Turn 1/2 Variante del Rettifilo Chicane (Sharp dip to 0.40 at t = 0.115)
+    if (normT > 0.08 && normT <= 0.15) {
+      const mid = 0.115;
+      const half = 0.035;
+      return 0.40 + 0.95 * (Math.abs(normT - mid) / half);
+    }
+    // Curva Grande / Biassono
+    if (normT > 0.15 && normT <= 0.33) {
+      return 1.25;
+    }
+    // Turn 4/5 Variante della Roggia Chicane (Dip to 0.48 at t = 0.365)
+    if (normT > 0.33 && normT <= 0.40) {
+      const mid = 0.365;
+      const half = 0.035;
+      return 0.48 + 0.77 * (Math.abs(normT - mid) / half);
+    }
+    // Lesmo 1 & Lesmo 2
+    if (normT > 0.40 && normT <= 0.52) {
+      return 0.75;
+    }
+    // Curva del Serraglio & Straight (DRS Zone 1)
+    if (normT > 0.52 && normT <= 0.63) {
+      return 1.35;
+    }
+    // Turn 8, 9, 10 Variante Ascari
+    if (normT > 0.63 && normT <= 0.71) {
+      const mid = 0.670;
+      const half = 0.040;
+      return 0.60 + 0.75 * (Math.abs(normT - mid) / half);
+    }
+    // Backstraight to Parabolica
+    if (normT > 0.71 && normT <= 0.81) {
+      return 1.35;
+    }
+    // Turn 11 Curva Parabolica (Alboreto)
+    if (normT > 0.81 && normT <= 0.94) {
+      return 0.85;
+    }
+    return 1.10;
+  }
+
   initCars() {
     const pts = this.trackPoints;
     const totalPts = pts.length;
 
+    // Leader (VER, P1) begins cleanly on the pit straight past Start/Finish line
+    // Trailing cars are placed strictly behind with cumulative gap offsets (Monza lap ~82s)
+    let cumulativeTrackOffset = 0.0;
+
     this.cars = this.drivers.map((d, index) => {
-      // Stagger cars along track according to race gaps
-      const baseSpacing = 0.042;
-      const t = (1.0 - (index * baseSpacing) + 1.0) % 1.0;
+      let gapFromAhead = 0.0;
+      if (index > 0) {
+        const secGap = (d.gapSec !== undefined && d.gapSec > 0) ? d.gapSec : (index * 1.25);
+        const prevSecGap = (index > 1 && this.drivers[index - 1].gapSec !== undefined) ? this.drivers[index - 1].gapSec : ((index - 1) * 1.25);
+        const deltaSec = Math.max(0.35, Math.min(3.5, secGap - prevSecGap));
+        gapFromAhead = deltaSec / 82.0; // convert to track fraction
+      }
+      cumulativeTrackOffset += gapFromAhead;
+
+      // P1 leader starts at t = 0.02 (just crossing start/finish line towards T1)
+      const t = (0.02 - cumulativeTrackOffset + 10.0) % 1.0;
       const idx = Math.floor(t * totalPts);
       const nextIdx = (idx + 12) % totalPts;
       const pt = pts[idx];
@@ -266,12 +345,14 @@ class TrackMap {
       return {
         ...d,
         t: t,
+        cumulativeOffset: cumulativeTrackOffset,
+        gapFromAhead: gapFromAhead,
         speed: 0.00042,
         baseSpeed: 0.00042,
         x: pt.x,
         y: pt.y,
         heading: Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x),
-        isDrsActive: false,
+        isDrsActive: this.isCarInDrsZone(t),
         currentGap: d.gap || (index === 0 ? 'LEADER' : `+${(index * 1.25).toFixed(3)}s`)
       };
     });
@@ -342,9 +423,14 @@ class TrackMap {
       const pct = parseFloat(e.target.value);
       this.currentLap = Math.max(1, Math.min(53, Math.round(1 + (pct / 100) * 52)));
       const lapFrac = (pct % (100 / 53)) / (100 / 53);
-      this.cars.forEach((car, idx) => {
-        car.t = (lapFrac + (1.0 - idx * 0.042) + 1.0) % 1.0;
-      });
+      const leadT = lapFrac % 1.0;
+      if (this.cars.length > 0) {
+        this.cars[0].t = leadT;
+        for (let i = 1; i < this.cars.length; i++) {
+          const offset = this.cars[i].cumulativeOffset || (i * 0.015);
+          this.cars[i].t = (leadT - offset + 100.0) % 1.0;
+        }
+      }
       this.updateLapAndGaps();
     });
 
@@ -709,21 +795,24 @@ class TrackMap {
         let delta = carLeader.t - carFollower.t;
         if (delta < 0) delta += 1.0;
 
-        if (delta > 0.001 && delta < minGap) {
+        if (delta > 0.0005 && delta < minGap) {
           minGap = delta;
           closestLeader = carLeader;
         }
       }
 
-      // If within dirty air wake threshold (~0.055 track fraction ≈ 2.0s gap)
-      if (closestLeader && minGap <= 0.055) {
+      // Convert track progress fraction to real seconds (Monza lap ~82s)
+      const gapSec = minGap * 82.0;
+
+      // F1 Law 1: Leader -> follower edge cutoff when gap <= 2.0s
+      if (closestLeader && gapSec <= 2.0) {
         edgeCount++;
-        const gapSec = minGap * 38.0;
-        const isSevereWake = gapSec < 0.85;
+        // F1 Law 2: DRS Train dirty air when gap < 0.8s
+        const isSevereWake = gapSec < 0.8;
 
         if (isSevereWake) drsTrainCount++;
 
-        // Draw pulsing dynamic wake beam from leader to follower
+        // Draw dynamic pulsing aerodynamic wake beam from leader to follower
         this.ctx.beginPath();
         this.ctx.moveTo(closestLeader.x, closestLeader.y);
         this.ctx.lineTo(carFollower.x, carFollower.y);
@@ -732,7 +821,7 @@ class TrackMap {
 
         if (isSevereWake) {
           this.ctx.strokeStyle = `rgba(225, 6, 0, ${0.55 + 0.45 * pulse})`;
-          this.ctx.lineWidth = 3.0;
+          this.ctx.lineWidth = 3.2;
           this.ctx.shadowColor = '#E10600';
           this.ctx.shadowBlur = 10;
         } else {
@@ -746,7 +835,7 @@ class TrackMap {
     }
     this.ctx.restore();
 
-    // Update live indicators in DOM
+    // Update live indicators in DOM with dynamic fluctuating counts
     const drsDom = document.getElementById('activeDrsCount');
     if (drsDom) drsDom.textContent = `${drsTrainCount} Active`;
     const edgeDom = document.getElementById('activeEdgesCount');
@@ -756,27 +845,51 @@ class TrackMap {
   updateAndDrawCars() {
     const pts = this.trackPoints;
     const totalPts = pts.length;
+    if (this.cars.length === 0) return;
 
-    // Detect lap completion for race leader
-    if (this.cars.length > 0 && this.isPlaying) {
-      const leadCar = this.cars[0];
-      const nextT = (leadCar.t + leadCar.speed * this.speedMultiplier) % 1.0;
-      if (nextT < leadCar.t) {
+    const leadCar = this.cars[0]; // Max Verstappen (P1 Race Leader)
+
+    if (this.isPlaying) {
+      // 1. Race Leader drives master track position with authentic Monza speed profile
+      const leadTrackSpeed = this.getTrackSpeedFactor(leadCar.t);
+      const leadPace = 1.0 + Math.sin(this.currentLap * 0.28) * 0.02;
+      const leadStep = leadCar.baseSpeed * leadTrackSpeed * leadPace * this.speedMultiplier;
+      const oldT = leadCar.t;
+      leadCar.t = (leadCar.t + leadStep) % 1.0;
+
+      // Lap completion trigger when crossing start/finish line (t wraps around 0.0)
+      if (leadCar.t < oldT) {
         this.currentLap = (this.currentLap % 53) + 1;
         this.updateLapAndGaps();
       }
+
+      // 2. Dynamic Accordion Compression Factor:
+      // In braking zones (chicanes), physical gaps between cars compress by ~35%
+      // On high speed straights, cars stretch out to full gap distance
+      const accordion = 0.65 + 0.35 * Math.min(1.0, Math.max(0.0, (leadTrackSpeed - 0.40) / (1.35 - 0.40)));
+
+      // 3. Trailing cars (index 1 to 19): strictly positioned behind leader in rank order
+      for (let i = 1; i < this.cars.length; i++) {
+        const car = this.cars[i];
+        const inDrs = this.isCarInDrsZone(car.t);
+        // In DRS range (<1.0s gap) & DRS zone -> slight aerodynamic tow compression
+        const drsTow = (inDrs && car.gapSec < 1.0) ? 0.92 : 1.0;
+        const effectiveOffset = (car.cumulativeOffset || (i * 0.015)) * accordion * drsTow;
+        car.t = (leadCar.t - effectiveOffset + 100.0) % 1.0;
+        car.isDrsActive = inDrs;
+      }
     }
 
+    // Update scrubber UI
     const scrubber = document.getElementById('timeScrubber');
-    if (scrubber && !this.isScrubbing && this.cars.length > 0) {
-      const scrubVal = ((this.currentLap - 1) / 52) * 100 + (this.cars[0].t * (100 / 53));
+    if (scrubber && !this.isScrubbing) {
+      const scrubVal = ((this.currentLap - 1) / 52) * 100 + (leadCar.t * (100 / 53));
       scrubber.value = Math.min(100, Math.max(0, scrubVal));
     }
 
+    // Render all cars
     this.cars.forEach((car, index) => {
-      if (this.isPlaying) {
-        car.t = (car.t + car.speed * this.speedMultiplier) % 1.0;
-      }
+      car.isDrsActive = this.isCarInDrsZone(car.t);
 
       // Exact pixel coordinates along the spline
       const idx = Math.floor(car.t * totalPts);
@@ -788,18 +901,27 @@ class TrackMap {
       car.y = pt.y;
       car.heading = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x);
 
-      // Check if in DRS zone
-      car.isDrsActive = this.drsArcs.some(z => car.t >= z.start && car.t <= z.end);
-
-      const isFocused = this.focusedDriver === car.code || this.focusedDriver === 'ALL';
       const isHero = this.focusedDriver === car.code;
 
-      // Draw Car Dot
+      // Update live HUD for focused driver
+      if (isHero) {
+        const hudEl = document.getElementById('focusedDriverHud');
+        if (hudEl) {
+          const trackSpeed = this.getTrackSpeedFactor(car.t);
+          const liveKmh = Math.round((trackSpeed / 1.35) * (car.topSpeed || 348));
+          hudEl.innerHTML = `
+            <span class="hud-driver">${car.code} #${car.num}</span>
+            <span class="hud-speed text-teal">${liveKmh} km/h</span>
+            <span class="hud-gap ${car.currentGap === 'LEADER' ? 'text-green' : 'text-orange'}">${car.currentGap}</span>
+          `;
+        }
+      }
+
+      // Draw Car Halo & Body
       this.ctx.save();
       this.ctx.translate(car.x, car.y);
       this.ctx.rotate(car.heading);
 
-      // Halo glow for selected driver
       if (isHero) {
         this.ctx.beginPath();
         this.ctx.arc(0, 0, 16, 0, Math.PI * 2);
@@ -842,16 +964,44 @@ class TrackMap {
       this.ctx.restore();
     });
 
-    // Update Focused Driver HUD
+    // Update Focused Driver HUD with live Tactical DRS & Dirty Air indicators
     if (this.focusedDriver !== 'ALL') {
       const focusedCar = this.cars.find(c => c.code === this.focusedDriver);
       if (focusedCar) {
         const hud = document.getElementById('focusedDriverHud');
         if (hud) {
+          const trackSpeed = this.getTrackSpeedFactor(focusedCar.t);
+          const liveKmh = Math.round((trackSpeed / 1.35) * (focusedCar.topSpeed || 348));
+
+          // Find gap to car ahead
+          let aheadGap = 999;
+          for (let j = 0; j < this.cars.length; j++) {
+            if (this.cars[j].code === focusedCar.code) continue;
+            let delta = this.cars[j].t - focusedCar.t;
+            if (delta < 0) delta += 1.0;
+            if (delta > 0.0005 && delta < aheadGap) {
+              aheadGap = delta;
+            }
+          }
+          const deltaSec = aheadGap * 82.0;
+
+          let tacticalTag = '';
+          if (focusedCar.code === 'VER' || focusedCar.pos === 1) {
+            tacticalTag = `<span class="hud-gap text-teal">CLEAN AIR · P1 LEADER</span>`;
+          } else if (deltaSec < 1.0) {
+            const gain = (0.24 + (1.0 - deltaSec) * 0.18).toFixed(2);
+            tacticalTag = `<span class="hud-gap text-green" style="color:#00E676; font-weight:800;">DRS GAINING +${gain}s</span>`;
+          } else if (deltaSec <= 2.2) {
+            const lossSec = (0.28 + Math.exp(-deltaSec * deltaSec / 2.0) * 0.25).toFixed(2);
+            tacticalTag = `<span class="hud-gap text-red" style="color:#FF3B30; font-weight:800;">DIRTY AIR -${lossSec}s</span>`;
+          } else {
+            tacticalTag = `<span class="hud-gap text-silver">CLEAN AIR BUFFER</span>`;
+          }
+
           hud.innerHTML = `
             <span class="hud-driver" style="color:${focusedCar.color}">${focusedCar.code} #${focusedCar.num}</span>
-            <span class="hud-speed text-teal">${Math.round(focusedCar.topSpeed - 12 + Math.random() * 8)} km/h</span>
-            <span class="hud-gap text-orange">${focusedCar.gap}</span>
+            <span class="hud-speed text-teal">${liveKmh} km/h</span>
+            ${tacticalTag}
           `;
         }
       }
@@ -879,6 +1029,7 @@ class TelemetryPanel {
     this.initTimingTower();
     this.renderMiniSectorHeatmap();
     this.renderDriverCharts(this.activeDriver);
+    this.updateTacticalBanner(this.activeDriver, 34);
   }
 
   initTimingTower() {
@@ -945,6 +1096,7 @@ class TelemetryPanel {
         }
         const avgGap = document.getElementById('telemetryAvgGap');
         if (avgGap) avgGap.textContent = `AVG GAP: ${car.currentGap}`;
+        this.updateTacticalBanner(this.activeDriver, currentLap);
       }
     }
   }
@@ -971,6 +1123,153 @@ class TelemetryPanel {
 
     this.renderDriverCharts(found);
     this.renderMiniSectorHeatmap();
+    this.updateTacticalBanner(found, 34);
+  }
+
+  updateTacticalBanner(driver, currentLap = 34) {
+    const banner = document.getElementById('driverTacticalBanner');
+    if (!banner) return;
+
+    const driverIdx = this.drivers.findIndex(d => d.code === driver.code);
+    const isLeader = driverIdx === 0 || driver.pos === 1 || driver.code === 'VER';
+
+    const badgeEl = document.getElementById('tacticalBadge');
+    const mainStatEl = document.getElementById('tacticalMainStat');
+    const subEl = document.getElementById('tacticalSub');
+    const dirtyAirLossEl = document.getElementById('tacticalDirtyAirLoss');
+    const barAeroEl = document.getElementById('tacticalBarAero');
+    const barTyreEl = document.getElementById('tacticalBarTyre');
+    const aeroPctEl = document.getElementById('tacticalAeroPct');
+    const tyrePctEl = document.getElementById('tacticalTyrePct');
+    const carAheadEl = document.getElementById('tacticalCarAhead');
+    const gapSecEl = document.getElementById('tacticalGapSec');
+    const wakeWeightEl = document.getElementById('tacticalWakeWeight');
+    const drsStatusEl = document.getElementById('tacticalDrsStatus');
+
+    if (isLeader) {
+      banner.className = 'driver-tactical-banner clean-mode';
+      badgeEl.className = 'tactical-badge badge-silver';
+      badgeEl.textContent = '⚪ RACE LEADER · CLEAN AIR';
+
+      mainStatEl.className = 'tactical-main-stat text-teal';
+      mainStatEl.textContent = 'OPTIMUM DOWNFORCE';
+      subEl.textContent = 'Zero wake interference · Full aerodynamic front-wing downforce grip · Clean air baseline pace';
+
+      dirtyAirLossEl.className = 'bd-val text-teal';
+      dirtyAirLossEl.textContent = '0.00s / lap';
+
+      barAeroEl.style.width = '0%';
+      barTyreEl.style.width = '100%';
+      aeroPctEl.textContent = '0%';
+      tyrePctEl.textContent = '100% (Pure Pace)';
+
+      carAheadEl.textContent = 'None · Running in Clean Air (P1 Leader)';
+      gapSecEl.textContent = 'N/A';
+      gapSecEl.className = 'bm-val text-teal';
+      wakeWeightEl.textContent = '0.00 (Zero Wake)';
+      wakeWeightEl.className = 'bm-val text-teal';
+      drsStatusEl.textContent = 'N/A (Leading Pack)';
+      drsStatusEl.className = 'bm-val text-silver';
+      return;
+    }
+
+    const carAhead = this.drivers[driverIdx - 1];
+    const prevGap = carAhead ? (carAhead.gapSec !== undefined ? carAhead.gapSec : (driverIdx - 1) * 1.25) : 0.0;
+    const myGap = driver.gapSec !== undefined ? driver.gapSec : (driverIdx * 1.25);
+    const baseDelta = Math.max(0.35, myGap - prevGap);
+    
+    const lapVariation = Math.sin((currentLap || 34) * 0.45 + driverIdx * 0.9) * 0.15;
+    const currentDelta = Math.max(0.24, baseDelta + lapVariation);
+    const rbfWeight = Math.exp(- (currentDelta * currentDelta) / 2.0);
+
+    if (currentDelta < 1.0) {
+      // IN DRS RANGE & GAINING TIME
+      banner.className = 'driver-tactical-banner gaining-mode';
+      badgeEl.className = 'tactical-badge badge-green';
+      badgeEl.textContent = '🟢 IN DRS RANGE · GAINING TIME';
+
+      const netGain = (0.24 + (1.0 - currentDelta) * 0.18).toFixed(2);
+      mainStatEl.className = 'tactical-main-stat text-green';
+      mainStatEl.textContent = `NET GAIN: +${netGain}s / lap`;
+      subEl.textContent = `DRS rear wing flap open (~348 km/h) · Straightaway slipstream gain (+0.45s) exceeds chicane aerodynamic loss`;
+
+      const cornerLoss = (0.28 + rbfWeight * 0.16).toFixed(2);
+      dirtyAirLossEl.className = 'bd-val text-orange';
+      dirtyAirLossEl.textContent = `-${cornerLoss}s in chicanes`;
+
+      const aeroPct = Math.round(62 + rbfWeight * 22);
+      barAeroEl.style.width = `${aeroPct}%`;
+      barTyreEl.style.width = `${100 - aeroPct}%`;
+      aeroPctEl.textContent = `${aeroPct}% (Corner Wash)`;
+      tyrePctEl.textContent = `${100 - aeroPct}% (Tyre Wear)`;
+
+      carAheadEl.textContent = `${carAhead.code} #${carAhead.num} (${carAhead.team})`;
+      gapSecEl.textContent = `+${currentDelta.toFixed(3)}s`;
+      gapSecEl.className = 'bm-val text-teal';
+
+      wakeWeightEl.textContent = `${rbfWeight.toFixed(2)} (High Wake)`;
+      wakeWeightEl.className = 'bm-val text-orange';
+
+      drsStatusEl.textContent = 'ACTIVE (WING OPEN)';
+      drsStatusEl.className = 'bm-val text-green';
+    } else if (currentDelta <= 2.2) {
+      // LOSING TIME IN DIRTY AIR DEFICIT
+      banner.className = 'driver-tactical-banner';
+      badgeEl.className = 'tactical-badge badge-red';
+      badgeEl.textContent = '🔴 DIRTY AIR DEFICIT · LOSING TIME';
+
+      const netLoss = (0.38 + rbfWeight * 0.32).toFixed(2);
+      mainStatEl.className = 'tactical-main-stat text-red';
+      mainStatEl.textContent = `LOSING: -${netLoss}s / lap`;
+      subEl.textContent = `Severe aerodynamic turbulence in braking zones · Outside DRS threshold (>1.0s) · Front wing sliding & tyre thermal degradation`;
+
+      const dirtyAirSeconds = (netLoss * 0.74).toFixed(2);
+      dirtyAirLossEl.className = 'bd-val text-red';
+      dirtyAirLossEl.textContent = `-${dirtyAirSeconds}s lost to dirty air`;
+
+      const aeroPct = 74;
+      barAeroEl.style.width = `${aeroPct}%`;
+      barTyreEl.style.width = `${100 - aeroPct}%`;
+      aeroPctEl.textContent = `74% (Dirty Air Deficit)`;
+      tyrePctEl.textContent = `26% (Tyre Wear)`;
+
+      carAheadEl.textContent = `${carAhead.code} #${carAhead.num} (${carAhead.team})`;
+      gapSecEl.textContent = `+${currentDelta.toFixed(3)}s`;
+      gapSecEl.className = 'bm-val text-orange';
+
+      wakeWeightEl.textContent = `${rbfWeight.toFixed(2)} (Turbulent)`;
+      wakeWeightEl.className = 'bm-val text-orange';
+
+      drsStatusEl.textContent = 'NO DRS (>1.0s)';
+      drsStatusEl.className = 'bm-val text-silver';
+    } else {
+      // CLEAN AIR BUFFER
+      banner.className = 'driver-tactical-banner clean-mode';
+      badgeEl.className = 'tactical-badge badge-silver';
+      badgeEl.textContent = '⚪ CLEAN AIR BUFFER · FREE PACE';
+
+      mainStatEl.className = 'tactical-main-stat text-teal';
+      mainStatEl.textContent = 'CLEAN AIR PACE';
+      subEl.textContent = 'Clear aerodynamic buffer (>2.2s) · Wake disturbance below threshold · Pure car & tyre stint pace';
+
+      dirtyAirLossEl.className = 'bd-val text-silver';
+      dirtyAirLossEl.textContent = `-0.02s / lap (Negligible)`;
+
+      barAeroEl.style.width = '6%';
+      barTyreEl.style.width = '94%';
+      aeroPctEl.textContent = '6% (Minimal)';
+      tyrePctEl.textContent = '94% (Tyre Age)';
+
+      carAheadEl.textContent = `${carAhead.code} (${currentDelta.toFixed(1)}s ahead)`;
+      gapSecEl.textContent = `+${currentDelta.toFixed(2)}s`;
+      gapSecEl.className = 'bm-val text-teal';
+
+      wakeWeightEl.textContent = '0.04 (Clear Air)';
+      wakeWeightEl.className = 'bm-val text-teal';
+
+      drsStatusEl.textContent = 'OUT OF RANGE';
+      drsStatusEl.className = 'bm-val text-silver';
+    }
   }
 
   renderDriverCharts(driver) {
