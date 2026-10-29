@@ -75,3 +75,13 @@ Focused contract tests are in `tests/test_dataset_contracts.py` and `tests/test_
 - Visuals and cards can be unavailable when required real session data is missing; the implementation does not invent data to complete the gate.
 - The dashboard reads files from the default configured output locations. Editing configuration paths may require corresponding dashboard path changes.
 - This report reflects static source review only. Dependency resolution, imports, data contracts under real sessions, training, model scoring, dashboard rendering, and artifact generation have not been executed here.
+
+## Overnight source audit — 2026-10-30
+
+The historical source-review record above is preserved. The latest audit and exact verification evidence are in [`../MORNING_REPORT.md`](../MORNING_REPORT.md); unresolved scientific questions are in [`../OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md).
+
+The audit removes formula-generated sector durations and stale-data/session fallbacks. Targets now use observed distance boundary crossings, and preprocessing uses shared session time and observed lap origins. Missing metadata remains invalid. These correctness changes invalidate any unproven numerical interpretation of the historical checkpoint or example frontend content.
+
+Presentation output now goes to fresh `data/processed/presentation/<run-id>/visuals/` and `cards/` directories. Earlier images are preserved. The current evaluation report carries a `presentation` manifest, and Streamlit displays only listed images. This supersedes the earlier description of clearing the known image files. Ordinary training runs preserve existing checkpoints, histories and reports under `artifact_history/` before replacement and do not automatically reuse them.
+
+Optional hyperparameter selection uses a declared candidate list and seeds, mean validation MAE, and one fixed split/scaler. The first declared seed supplies the selected checkpoint. Test metrics and physics gates do not select candidates. Existing configuration values and acceptance thresholds are preserved; no new empirical performance or tuned winner is asserted.

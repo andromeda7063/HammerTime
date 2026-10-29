@@ -21,3 +21,17 @@ Every parameter tuned or assumed from `claude.md` and `claude_arc.md` is recorde
 | A12 | Missing telemetry gap tolerance | [ASSUMED] Not specified | 1.0 s maximum | `hammertime_100/configs/default.yaml` (`preprocess.max_interpolate_sec`) | Interpolation is supported only across gaps up to this configured limit; unsupported rows are marked invalid. |
 
 Values in this ledger describe configuration and label semantics. They do not establish predictive performance or physical validation results. See [`hammertime_100/REPORT.md`](hammertime_100/REPORT.md) for source status and verification limits.
+
+## Overnight audit additions — 2026-10-30
+
+The entries above are preserved as historical configuration records.
+
+| ID | Parameter or contract | Previous behavior | Audited behavior | Location | Rationale |
+|---|---|---|---|---|---|
+| A13 | Mini-sector duration measurement | Prescribed sine/hash/wake formula | Interpolate observed distance boundary crossings, without extrapolating partial or unsupported sectors | `hammertime_100/src/target.py` | Targets must be measured from real telemetry. No change to clean-air thresholds, clipping, or duration plausibility limits. |
+| A14 | Telemetry time origin | Driver-slice `Time` | Explicit `TimeSec`, otherwise shared `SessionTime`, otherwise `Time` | `hammertime_100/src/preprocess.py` | Lap timing and all drivers must use the same session clock. |
+| A15 | Distance origin and missing lap/tyre metadata | Cumulative slice distance; default lap/compound/age | Anchor each lap at its observed start; mask unsupported metadata | `hammertime_100/src/preprocess.py` | Avoid accumulated distance offsets and invented clean laps or tyre features. Per-lap integration accuracy remains a reviewer question. |
+| A16 | Session load success | Successful return from FastF1 `load()` | Loaded, nonempty laps and car telemetry are required | `hammertime_100/src/ingest.py` | FastF1 may internally log acquisition errors without raising them to the caller. |
+| A17 | Missing dashboard results | Example MAEs and legacy images | Unavailable scores; only current report manifest images | `hammertime_100/dashboard/app.py` | Missing or malformed artifacts are not research evidence. |
+| A18 | Hyperparameter selection | One configured fit; no explicit study | Optional declared model/optimizer candidates, scored by mean validation MAE across declared seeds; retain the first seed | `hammertime_100/src/tuning.py`, `configs/default.yaml` | Hold splits, scaling, targets, metrics and gates fixed. Test/physics results cannot select a candidate. The search remains unmeasured until authentic telemetry is available. |
+| A19 | Presentation timestamp matching | NumPy default relative tolerance | Fixed absolute tolerance with `rtol=0` | `hammertime_100/run_pipeline.py`, `dashboard/app.py` | A larger session timestamp must not widen the time slice and mix observations from adjacent frames. Existing absolute tolerances are preserved. |

@@ -9,7 +9,7 @@ The repository contains two implementations. `hammertime_50/` is the earlier pro
 Use Python 3.12 or newer. From the repository root, install the declared dependencies with either:
 
 ```bash
-uv sync
+uv sync --frozen
 ```
 
 or:
@@ -32,23 +32,39 @@ The runner uses FastF1 and its local cache. It raises an error when the requeste
 
 ```yaml
 sessions:
+  - year: 2022
+    gp: Monza
+    session_type: R
+    race_id: 2022-Monza-R
   - year: 2023
     gp: Monza
     session_type: R
     race_id: 2023-Monza-R
-  - year: 2023
-    gp: Silverstone
-    session_type: R
-    race_id: 2023-Silverstone-R
   - year: 2024
-    gp: Monaco
+    gp: Monza
     session_type: R
-    race_id: 2024-Monaco-R
+    race_id: 2024-Monza-R
 data:
   split_method: race
 ```
 
 Race identifiers must be unique. Each session gets its own FastF1 cache subdirectory and processed-data directory. Clean-air target references are calculated within each session because sector times do not transfer across circuits. Feature scaling and model fitting use the training partition.
+
+Sessions for a different circuit must supply their own positive `lap_length_m`; they cannot inherit Monza's geometry. Repeated source sessions under different IDs and IDs that map to the same directory are rejected.
+
+## Reproducible hyperparameter selection
+
+Use the committed lockfile with `uv sync --frozen`. Run a declared experiment with:
+
+```bash
+uv run --frozen python hammertime_100/run_pipeline.py --config hammertime_100/configs/default.yaml --tune
+```
+
+The optional `tuning` section declares three learning rates and three seeds; normal runs keep tuning disabled. Selection uses mean validation MAE across the declared seeds on one unchanged split and train-fitted scaler. The first declared seed supplies the selected candidate's checkpoint; the best seed is not cherry-picked. Every trial keeps its checkpoint and history under `data/processed/tuning/<study-id>/`, and `study.json` records all validation scores. Test evaluation follows selection once. Candidate overrides are restricted to model capacity/dropout and optimizer learning rate/weight decay; targets, split settings and gate thresholds cannot be searched.
+
+Each ordinary run trains the configured model afresh. Existing checkpoints, histories and evaluation reports are copied to `data/processed/artifact_history/` before replacement. A checkpoint merely existing is not proof it belongs to the current experiment.
+
+No tuned winner is claimed by the overnight audit: live FastF1 did not supply usable laps/telemetry. Session-wide clean-air references also make the present labels retrospective calibrations; strict prospective forecasting needs a separately agreed reference-fitting protocol. See [the morning report](MORNING_REPORT.md) and [open questions](OPEN_QUESTIONS.md).
 
 ## Dashboard
 
@@ -69,18 +85,20 @@ With the default configuration, outputs are written under `hammertime_100/`:
 - `data/processed/aligned_telemetry.parquet` and `target_labels.parquet`: combined session data.
 - `data/processed/evaluation_report.json`: held-out metrics, baseline results, physics checks, split metadata, and prediction records.
 - `best.pt`: model checkpoint, including the training-fitted feature scaler.
-- `visuals/v1_...png` through `visuals/v9_...png`: generated only when their required source data is available.
-- `broadcast/rendered/card_*.png`: cards generated from observed close-gap telemetry; predicted loss is shown only when a matching held-out prediction exists.
+- `data/processed/presentation/<run-id>/visuals/v1_...png` through `v9_...png`: generated only when their required source data is available.
+- `data/processed/presentation/<run-id>/cards/card_*.png`: cards generated from observed close-gap telemetry; predicted loss is shown only when a matching held-out prediction exists.
 
 The returned runner summary reports artifact paths, quality-gate results, and presentation availability. A missing artifact or failed gate remains a failure; the runner does not fill gaps with demo output.
+
+The evaluation report's `presentation` manifest identifies the current images. The dashboard does not treat older checked-in images as current results. The separate `frontend/` demonstration retains unverified historical/sample content and is not the audited dashboard.
 
 Focused contract tests are being added under `hammertime_100/tests/`. To run them from the repository root:
 
 ```bash
-python -m unittest discover -s hammertime_100/tests
+uv run --frozen python -m unittest discover -s hammertime_100/tests
 ```
 
-The tests use small in-memory fixtures and do not require FastF1 data or network access. They still require project dependencies such as PyTorch, PyTorch Geometric, pandas, NumPy, and scikit-learn. They were not executed as part of this source review.
+The tests use small in-memory fixtures and do not require FastF1 data or network access. They require the declared project dependencies. The overnight audit ran the expanded suite, including dashboard and checkpoint integration contracts; exact commands and results are in [MORNING_REPORT.md](MORNING_REPORT.md).
 
 ## Project records
 
