@@ -9,6 +9,7 @@ import torch
 import yaml
 from sklearn.metrics import mean_absolute_error, r2_score
 from torch import nn
+from torch.utils.data import SequentialSampler
 
 from model import create_model
 
@@ -23,6 +24,10 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
 @torch.no_grad()
 def predict_test_set(model: nn.Module, test_loader, device: torch.device):
     """Return flattened valid targets/predictions and row-level held-out records."""
+    # Records are enriched from ``dataset.samples`` below. A shuffled or custom
+    # sampler would silently associate predictions with the wrong metadata.
+    if not isinstance(getattr(test_loader, "sampler", None), SequentialSampler):
+        raise ValueError("Held-out evaluation requires a sequential, non-shuffled data loader.")
     model.eval()
     all_targets, all_preds, records = [], [], []
     samples = getattr(test_loader.dataset, "samples", [])
