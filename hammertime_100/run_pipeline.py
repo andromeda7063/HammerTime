@@ -83,6 +83,34 @@ def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "session"
 
 
+def _load_configured_race(spec: dict, config: dict) -> tuple[pd.DataFrame, list[str], dict]:
+    if spec.get("source", "fastf1") == "openf1":
+        from openf1_client import load_openf1_tables
+        from openf1_adapter import normalize_openf1_tables
+        bundle = load_openf1_tables(config)
+        aligned = normalize_openf1_tables(bundle, config)
+        output_dir = Path(config["session"]["processed_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)
+        coverage_path = output_dir / "coverage_report.json"
+        manifest_path = output_dir / "source_manifest.json"
+        metadata = {"provider": "openf1", "session": bundle["session"],
+                    "requests": bundle["provenance"], "coverage": aligned.attrs.get("coverage", {})}
+        for path, content in ((coverage_path, metadata["coverage"]), (manifest_path, metadata)):
+            with path.open("w", encoding="utf-8") as output:
+                json.dump(content, output, indent=2, allow_nan=False)
+        aligned.to_parquet(output_dir / "aligned_telemetry.parquet", index=False)
+        artifacts = [*bundle["raw_artifacts"], str(coverage_path.resolve()), str(manifest_path.resolve())]
+        return aligned, artifacts, metadata
+    from ingest import load_race, export_raw_tables
+    from preprocess import process_race
+    session = load_race(spec["year"], spec["gp"], spec["session_type"], config["session"]["cache_dir"])
+    raw_laps, raw_telemetry = export_raw_tables(session, str(Path(config["session"]["processed_dir"]) / "raw"))
+    artifacts = [str(Path(raw_laps).resolve())]
+    if raw_telemetry is not None:
+        artifacts.append(str(Path(raw_telemetry).resolve()))
+    return process_race(session, config), artifacts, {"provider": "fastf1"}
+
+
 def _preserve_artifact(path: Path, processed_dir: Path) -> None:
     if path.is_file():
         archive_dir = processed_dir / "artifact_history" / uuid4().hex
@@ -388,9 +416,6 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
         checkpoint_path = PROJECT_DIR / checkpoint_path
     config["train"]["checkpoint_path"] = str(checkpoint_path)
 
-    from ingest import load_race
-    from ingest import export_raw_tables
-    from preprocess import process_race
     from target import build_targets
     from graph import build_race_graph_snapshots
 
@@ -398,6 +423,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
     aligned_tables, label_tables, snapshots = [], [], []
     raw_artifacts = []
     driver_maps = {}
+    source_metadata = {}
     for spec in session_specs:
         race_id = spec["race_id"]
         race_config = copy.deepcopy(config)
@@ -412,13 +438,9 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
         if "lap_length_m" in spec:
             race_config["track"]["lap_length_m"] = float(spec["lap_length_m"])
 
-        logger.info("Loading configured FastF1 session %s", race_id)
-        session = load_race(spec["year"], spec["gp"], spec["session_type"], race_config["session"]["cache_dir"])
-        raw_laps_path, raw_telemetry_path = export_raw_tables(session, str(race_dir / "raw"))
-        raw_artifacts.append(str(Path(raw_laps_path).resolve()))
-        if raw_telemetry_path is not None:
-            raw_artifacts.append(str(Path(raw_telemetry_path).resolve()))
-        aligned = process_race(session, race_config)
+        logger.info("Loading configured %s session %s", spec["source"], race_id)
+        aligned, race_artifacts, source_metadata[race_id] = _load_configured_race(spec, race_config)
+        raw_artifacts.extend(race_artifacts)
         if "RaceId" not in aligned:
             aligned["RaceId"] = race_id
         labels = build_targets(aligned, race_config)
@@ -482,6 +504,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
         report.setdefault("metadata", {})["tuning"] = tuning_result
     report.setdefault("metadata", {})["provenance"] = _run_provenance(
         cfg_path, config, raw_artifacts, base_processed_dir, checkpoint_path)
+    report["metadata"]["sources"] = source_metadata
     physics = report.get("physics_tests", [])
     gates["physics"] = bool(len(physics) == 2 and all(result.get("passed") is True for result in physics))
     artifacts = _render_real_outputs(aligned_all, snapshots, labels_all, report, config)
