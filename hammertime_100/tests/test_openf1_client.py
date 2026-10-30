@@ -50,9 +50,16 @@ class OpenF1ClientTests(unittest.TestCase):
                      "date_start": "2023-09-03T12:00:00+00:00",
                      "date_end": "2023-09-03T12:00:30Z"}]
         if endpoint == "drivers":
-            return [{"driver_number": 1, "full_name": "Driver One"}]
+            return [{"driver_number": 1, "full_name": "Driver One"},
+                    {"driver_number": 22, "full_name": "DNS Driver"},
+                    {"driver_number": 23, "full_name": "Invalid Timestamp Driver"}]
         if endpoint == "laps":
-            return [{"driver_number": 1, "lap_number": 1}]
+            return [{"driver_number": 1, "lap_number": 1, "lap_duration": 90.0,
+                     "date_start": "2023-09-03T12:00:00+00:00"},
+                    {"driver_number": 22, "lap_number": 1, "lap_duration": None,
+                     "date_start": "2023-09-03T12:00:00+00:00"},
+                    {"driver_number": 23, "lap_number": 1, "lap_duration": 90.0,
+                     "date_start": "not-a-date"}]
         if endpoint in ("stints", "race_control"):
             return [{"session_key": 42, "event": "present"}]
         if endpoint == "pit":
@@ -62,10 +69,14 @@ class OpenF1ClientTests(unittest.TestCase):
         return []
 
     def test_fetches_required_data_and_returns_cache_provenance(self):
+        car_drivers = []
+
         def get(url, params, timeout):
             if url.endswith("/pit"):
                 return FakeResponse([], status=404, raw=b'{"detail":"No results found"}',
                                     text='{"detail":"No results found"}')
+            if url.endswith("/car_data"):
+                car_drivers.append(params["driver_number"])
             return FakeResponse(self.payload(url, params))
 
         with patch("openf1_client.requests.get", side_effect=get):
@@ -74,6 +85,7 @@ class OpenF1ClientTests(unittest.TestCase):
         self.assertTrue({"drivers", "laps", "stints", "race_control", "pit", "car_data"}
                         <= set(result["tables"]))
         self.assertEqual(len(result["tables"]["car_data"]), 1)
+        self.assertEqual(car_drivers, ["1"])
         self.assertTrue(result["raw_artifacts"])
         self.assertTrue(all(Path(path).is_absolute() for path in result["raw_artifacts"]))
         self.assertTrue(result["provenance"])
@@ -212,7 +224,8 @@ class OpenF1ClientTests(unittest.TestCase):
                     if failure == "empty_stints" and endpoint == "stints":
                         return FakeResponse([])
                     if failure == "missing_driver" and endpoint == "laps":
-                        return FakeResponse([{"driver_number": 2, "lap_number": 1}])
+                        return FakeResponse([{"driver_number": 2, "lap_number": 1,
+                                              "lap_duration": 90, "date_start": "2023-09-03T12:00:00+00:00"}])
                     return FakeResponse(self.payload(url, params))
 
                 expected_error = "Required OpenF1 tables are empty" if failure == "empty_stints" else "missing drivers"

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 import pandas as pd
+import numpy as np
 import requests
 
 
@@ -276,9 +277,18 @@ def load_openf1_tables(config: dict) -> dict:
     empty_required = [name for name in required if tables[name].empty]
     if empty_required:
         raise OpenF1AcquisitionError(f"Required OpenF1 tables are empty: {', '.join(empty_required)}.")
-    if "driver_number" not in laps.columns:
-        raise OpenF1AcquisitionError("OpenF1 laps data has no driver_number field.")
-    lap_drivers = sorted({str(value) for value in laps["driver_number"].dropna()})
+    missing_lap_fields = {"driver_number", "lap_duration", "date_start"} - set(laps.columns)
+    if missing_lap_fields:
+        raise OpenF1AcquisitionError(
+            f"OpenF1 laps data is missing fields needed to identify timed laps: {', '.join(sorted(missing_lap_fields))}."
+        )
+    lap_duration = pd.to_numeric(laps["lap_duration"], errors="coerce")
+    lap_start = pd.to_datetime(laps["date_start"], errors="coerce", utc=True)
+    timed_lap_mask = (laps["driver_number"].notna() & lap_duration.gt(0)
+                      & np.isfinite(lap_duration) & lap_start.notna())
+    lap_drivers = sorted({str(value) for value in laps.loc[timed_lap_mask, "driver_number"]})
+    if not lap_drivers:
+        raise OpenF1AcquisitionError("OpenF1 laps contain no finite, positive timed laps with valid date_start.")
     if "driver_number" not in drivers.columns:
         raise OpenF1AcquisitionError("OpenF1 drivers data has no driver_number field.")
     known_drivers = set(drivers["driver_number"].dropna().astype(str))
