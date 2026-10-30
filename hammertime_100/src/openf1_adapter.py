@@ -148,6 +148,21 @@ def _integrate_lap(samples: pd.DataFrame, start: float, end: float,
                          "Distance": distances}), None, float(distances[-1])
 
 
+def _lap_sample_window(samples: pd.DataFrame, start: float, end: float,
+                       max_gap: float) -> pd.DataFrame:
+    """Keep lap observations and possible interpolation brackets only.
+
+    A target inside [start, end] can only be supported by observations within
+    max_gap of that interval. Including both exterior brackets therefore
+    preserves bounded interpolation and integration while avoiding a full
+    session scan for every lap.
+    """
+    times = samples["TimeSec"].to_numpy(dtype=float)
+    left = int(np.searchsorted(times, start - max_gap, side="left"))
+    right = int(np.searchsorted(times, end + max_gap, side="right"))
+    return samples.iloc[left:right]
+
+
 def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
     """Convert an OpenF1 bundle to the aligned telemetry table used by the pipeline.
 
@@ -282,6 +297,10 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
         f"{config.get('session', {}).get('session_type', 'R')}"
     )
 
+    telemetry_by_driver = {
+        str(driver): rows.sort_values("TimeSec").reset_index(drop=True)
+        for driver, rows in telemetry.groupby("Driver", sort=False)
+    }
     aligned_parts: list[pd.DataFrame] = []
     invalid_reasons: dict[str, list[str]] = {}
 
@@ -298,7 +317,8 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
         lap_start = float(lap["TimeSec"])
         lap_end = lap_start + float(lap["LapDurationSec"])
         lap_key = f"{driver}:{lap_no}"
-        driver_samples = telemetry[telemetry["Driver"] == driver].copy()
+        driver_samples = telemetry_by_driver.get(driver, telemetry.iloc[0:0])
+        driver_samples = _lap_sample_window(driver_samples, lap_start, lap_end, max_gap)
         trace, reason, integrated_m = _integrate_lap(driver_samples, lap_start, lap_end, max_gap)
         if reason:
             record_invalid(lap_key, reason)

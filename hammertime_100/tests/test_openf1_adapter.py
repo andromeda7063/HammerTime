@@ -9,7 +9,8 @@ import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
-from openf1_adapter import _seconds_from_origin, normalize_openf1_tables
+from openf1_adapter import (_integrate_lap, _interpolate_supported, _lap_sample_window,
+                           _seconds_from_origin, normalize_openf1_tables)
 
 
 def bundle(*, gap=False, race_control=None):
@@ -50,6 +51,37 @@ def config():
 
 
 class OpenF1NormalizationTests(unittest.TestCase):
+    def test_lap_window_matches_full_source_for_brackets_and_long_gaps(self):
+        # Boundary brackets just outside the lap must be retained. Observations
+        # farther away cannot support an in-lap estimate under max_gap.
+        source = pd.DataFrame({
+            "TimeSec": [-20.0, -1.0, 0.5, 2.0, 3.0, 4.0, 40.0],
+            "Speed": [99.0, 36.0, 72.0, 36.0, 10.0, 20.0, 99.0],
+            "X": [0.0, 10.0, 20.0, 40.0, 60.0, 80.0, 100.0],
+        })
+        for start, end, max_gap in ((0.0, 2.0, 1.0), (0.0, 2.0, 0.6),
+                                    (1.0, 3.0, 1.0)):
+            with self.subTest(start=start, end=end, max_gap=max_gap):
+                window = _lap_sample_window(source, start, end, max_gap)
+                full_trace, full_reason, full_distance = _integrate_lap(
+                    source, start, end, max_gap
+                )
+                window_trace, window_reason, window_distance = _integrate_lap(
+                    window, start, end, max_gap
+                )
+                self.assertEqual(window_reason, full_reason)
+                if full_distance is None:
+                    self.assertIsNone(window_distance)
+                else:
+                    self.assertAlmostEqual(window_distance, full_distance)
+                pd.testing.assert_frame_equal(window_trace, full_trace)
+                targets = np.linspace(start, end, 9)
+                np.testing.assert_allclose(
+                    _interpolate_supported(window, "X", targets, max_gap),
+                    _interpolate_supported(source, "X", targets, max_gap),
+                    equal_nan=True,
+                )
+
     def test_iso_timestamps_with_mixed_fractional_precision_share_one_clock(self):
         origin = pd.Timestamp("2023-09-03T13:00:00Z")
         values = pd.Series(["2023-09-03T13:00:00+00:00", "2023-09-03T13:00:00.250000Z",
