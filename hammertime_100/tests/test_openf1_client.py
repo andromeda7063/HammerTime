@@ -147,9 +147,14 @@ class OpenF1ClientTests(unittest.TestCase):
         self.assertTrue(calls)
 
     def test_rejects_mismatched_session_identity(self):
-        for field, value in (("session_key", 41), ("year", 2024), ("location", "Spa"),
-                             ("session_name", "Qualifying")):
+        for field, value, message in (("session_key", 41, "session_key"), ("year", 2024, "year"),
+                                      ("location", "Spa", "location"),
+                                      ("session_name", "Qualifying", "session_name")):
             with self.subTest(field=field):
+                isolated = tempfile.TemporaryDirectory()
+                config = {**self.config, "session": {**self.config["session"],
+                                                      "cache_dir": isolated.name}}
+
                 def get(url, params, timeout):
                     data = self.payload(url, params)
                     if url.endswith("/sessions"):
@@ -157,8 +162,74 @@ class OpenF1ClientTests(unittest.TestCase):
                     return FakeResponse(data)
 
                 with patch("openf1_client.requests.get", side_effect=get):
-                    with self.assertRaises(OpenF1AcquisitionError):
-                        load_openf1_tables(self.config)
+                    with self.assertRaisesRegex(OpenF1AcquisitionError, message):
+                        load_openf1_tables(config)
+                isolated.cleanup()
+
+    def test_rejects_wrong_session_key_rows_from_fetched_and_cached_endpoints(self):
+        for endpoint in ("drivers", "laps", "stints", "pit", "race_control", "car_data",
+                         "location", "weather"):
+            with self.subTest(endpoint=endpoint):
+                isolated = tempfile.TemporaryDirectory()
+                config = {**self.config, "session": {**self.config["session"],
+                                                      "cache_dir": isolated.name},
+                          "openf1": {**self.config["openf1"],
+                                     "fetch_location": endpoint == "location",
+                                     "fetch_weather": endpoint == "weather"}}
+                hits = 0
+
+                def get(url, params, timeout):
+                    nonlocal hits
+                    name = url.rsplit("/", 1)[-1]
+                    rows = self.payload(url, params)
+                    if name == endpoint:
+                        hits += 1
+                        if rows:
+                            rows[0]["session_key"] = 99
+                        else:
+                            rows = [{"session_key": 99, "driver_number": 1}]
+                    return FakeResponse(rows)
+
+                with patch("openf1_client.requests.get", side_effect=get):
+                    for _ in range(2):
+                        with self.assertRaisesRegex(OpenF1AcquisitionError, "pinned session_key=42"):
+                            load_openf1_tables(config)
+                self.assertEqual(hits, 1, "second failure should come from the hash-verified cache")
+                isolated.cleanup()
+
+    def test_required_data_and_driver_membership_fail_before_telemetry(self):
+        for failure in ("empty_stints", "missing_driver"):
+            with self.subTest(failure=failure):
+                isolated = tempfile.TemporaryDirectory()
+                config = {**self.config, "session": {**self.config["session"],
+                                                      "cache_dir": isolated.name}}
+                telemetry_calls = []
+
+                def get(url, params, timeout):
+                    endpoint = url.rsplit("/", 1)[-1]
+                    if endpoint in ("car_data", "location", "weather"):
+                        telemetry_calls.append(endpoint)
+                    if failure == "empty_stints" and endpoint == "stints":
+                        return FakeResponse([])
+                    if failure == "missing_driver" and endpoint == "laps":
+                        return FakeResponse([{"driver_number": 2, "lap_number": 1}])
+                    return FakeResponse(self.payload(url, params))
+
+                expected_error = "Required OpenF1 tables are empty" if failure == "empty_stints" else "missing drivers"
+                with patch("openf1_client.requests.get", side_effect=get):
+                    with self.assertRaisesRegex(OpenF1AcquisitionError, expected_error):
+                        load_openf1_tables(config)
+                self.assertEqual(telemetry_calls, [])
+                isolated.cleanup()
+
+    def test_duplicate_session_metadata_is_rejected(self):
+        def get(url, params, timeout):
+            rows = self.payload(url, params)
+            return FakeResponse(rows + rows if url.endswith("/sessions") else rows)
+
+        with patch("openf1_client.requests.get", side_effect=get):
+            with self.assertRaisesRegex(OpenF1AcquisitionError, "Expected one OpenF1 session"):
+                load_openf1_tables(self.config)
 
     def test_uses_only_session_section_session_key(self):
         config = {**self.config, "openf1": {**self.config["openf1"], "session_key": 99}}

@@ -165,7 +165,18 @@ class _OpenF1Client:
 def _single(rows: list[dict], label: str) -> dict:
     if not rows:
         raise OpenF1AcquisitionError(f"No OpenF1 {label} metadata matched the configured session.")
+    if len(rows) != 1:
+        raise OpenF1AcquisitionError(f"Expected one OpenF1 {label} metadata row, received {len(rows)}.")
     return rows[0]
+
+
+def _assert_session_rows(rows: list[dict], endpoint: str, expected_key: str) -> None:
+    for index, row in enumerate(rows):
+        if "session_key" in row and str(row["session_key"]) != expected_key:
+            raise OpenF1AcquisitionError(
+                f"OpenF1 {endpoint} row {index} has session_key={row['session_key']!r}; "
+                f"expected pinned session_key={expected_key}."
+            )
 
 
 def _as_utc(value: str) -> datetime:
@@ -215,6 +226,7 @@ def load_openf1_tables(config: dict) -> dict:
                            sleeper=time.sleep, clock=time.monotonic)
     key = str(session_key)
     session_rows = client.fetch("sessions", {"session_key": key})
+    _assert_session_rows(session_rows, "sessions", key)
     session_meta = _single(session_rows, "session")
     response_key = session_meta.get("session_key")
     if str(response_key) != key:
@@ -244,19 +256,32 @@ def load_openf1_tables(config: dict) -> dict:
     }
     for endpoint, params in endpoint_params.items():
         try:
-            tables[endpoint] = pd.DataFrame(client.fetch(endpoint, params))
+            rows = client.fetch(endpoint, params)
         except OpenF1AcquisitionError as exc:
             if endpoint == "pit" and "HTTP 404" in str(exc):
-                tables[endpoint] = pd.DataFrame()
+                rows = []
             else:
                 raise
+        _assert_session_rows(rows, endpoint, key)
+        tables[endpoint] = pd.DataFrame(rows)
 
     laps = tables["laps"]
     drivers = tables["drivers"]
+    required = ("session", "drivers", "laps", "stints", "race_control")
+    empty_required = [name for name in required if tables[name].empty]
+    if empty_required:
+        raise OpenF1AcquisitionError(f"Required OpenF1 tables are empty: {', '.join(empty_required)}.")
     if "driver_number" not in laps.columns:
         raise OpenF1AcquisitionError("OpenF1 laps data has no driver_number field.")
     lap_drivers = sorted({str(value) for value in laps["driver_number"].dropna()})
-    driver_rows = drivers[drivers["driver_number"].astype(str).isin(lap_drivers)] if "driver_number" in drivers else drivers.iloc[0:0]
+    if "driver_number" not in drivers.columns:
+        raise OpenF1AcquisitionError("OpenF1 drivers data has no driver_number field.")
+    known_drivers = set(drivers["driver_number"].dropna().astype(str))
+    missing_drivers = [number for number in lap_drivers if number not in known_drivers]
+    if missing_drivers:
+        raise OpenF1AcquisitionError(
+            f"OpenF1 driver metadata is missing drivers with laps: {', '.join(missing_drivers)}."
+        )
     start = _as_utc(session_meta["date_start"])
     end = _as_utc(session_meta["date_end"])
     if end <= start:
@@ -271,12 +296,16 @@ def load_openf1_tables(config: dict) -> dict:
             params = {"session_key": key, "driver_number": driver_number,
                       "date>": _utc_text(cursor - timedelta(microseconds=1)),
                       "date<": _utc_text(upper)}
-            car_rows.extend(client.fetch("car_data", params))
+            rows = client.fetch("car_data", params)
+            _assert_session_rows(rows, "car_data", key)
+            car_rows.extend(rows)
             cursor = upper
     tables["car_data"] = pd.DataFrame(car_rows)
 
     if section.get("fetch_weather", False):
-        tables["weather"] = pd.DataFrame(client.fetch("weather", {"session_key": key}))
+        rows = client.fetch("weather", {"session_key": key})
+        _assert_session_rows(rows, "weather", key)
+        tables["weather"] = pd.DataFrame(rows)
     else:
         tables["weather"] = pd.DataFrame()
     if section.get("fetch_location", True):
@@ -287,16 +316,12 @@ def load_openf1_tables(config: dict) -> dict:
                 params = {"session_key": key, "driver_number": driver_number,
                           "date>": _utc_text(cursor - timedelta(microseconds=1)),
                           "date<": _utc_text(upper)}
-                location_rows.extend(client.fetch("location", params))
+                rows = client.fetch("location", params)
+                _assert_session_rows(rows, "location", key)
+                location_rows.extend(rows)
                 cursor = upper
     tables["location"] = pd.DataFrame(location_rows)
 
-    required = ("session", "drivers", "laps", "stints", "race_control")
-    empty_required = [name for name in required if tables[name].empty]
-    if empty_required:
-        raise OpenF1AcquisitionError(f"Required OpenF1 tables are empty: {', '.join(empty_required)}.")
-    if driver_rows.empty:
-        raise OpenF1AcquisitionError("No OpenF1 driver metadata matches drivers with completed laps.")
     missing_car = [number for number in lap_drivers if tables["car_data"].empty or
                    not tables["car_data"]["driver_number"].astype(str).eq(number).any()]
     if missing_car:
