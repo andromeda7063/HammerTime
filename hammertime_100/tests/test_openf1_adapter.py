@@ -131,6 +131,28 @@ class OpenF1NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Ambiguous.*safety-car"):
             normalize_openf1_tables(bundle(race_control=control), config())
 
+    def test_local_green_flag_does_not_clear_global_safety_car(self):
+        origin = pd.Timestamp("2024-09-01T12:00:00Z")
+        control = [
+            {"date": origin, "message": "SAFETY CAR DEPLOYED", "scope": "Track"},
+            {"date": origin + pd.Timedelta(seconds=1), "message": "GREEN FLAG",
+             "flag": "GREEN", "scope": "Sector", "sector": 2},
+            {"date": origin + pd.Timedelta(seconds=3), "message": "GREEN FLAG",
+             "flag": "GREEN", "scope": "Track"},
+        ]
+        aligned = normalize_openf1_tables(bundle(race_control=control), config())
+        self.assertTrue(aligned.loc[aligned["LapNumber"] == 2, "IsSafetyCar"].all())
+
+    def test_ending_without_observed_deployment_fails_clearly(self):
+        control = [{"date": "2024-09-01T12:00:01Z", "message": "VSC ENDING"}]
+        with self.assertRaisesRegex(ValueError, "deployment"):
+            normalize_openf1_tables(bundle(race_control=control), config())
+
+    def test_unparseable_race_control_time_cannot_hide_safety_car(self):
+        control = [{"date": "unavailable", "message": "SAFETY CAR DEPLOYED"}]
+        with self.assertRaisesRegex(ValueError, "race-control.*date"):
+            normalize_openf1_tables(bundle(race_control=control), config())
+
     def test_invalid_observed_speeds_are_rejected(self):
         for invalid in (-1.0, np.inf):
             with self.subTest(speed=invalid):

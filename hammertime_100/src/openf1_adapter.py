@@ -47,19 +47,27 @@ def _is_safety_message(message: object) -> bool:
 
 def _control_windows(frame: pd.DataFrame, origin: pd.Timestamp) -> list[tuple[float, float]]:
     """Map deployment through an observed green/clear message to SC windows."""
-    if frame.empty or "date" not in frame or "message" not in frame:
+    if frame.empty:
         return []
+    if not {"date", "message"}.issubset(frame.columns):
+        raise ValueError("OpenF1 race-control records require date and message.")
     rows = frame.copy()
     rows["_time"] = _seconds_from_origin(rows["date"], origin)
-    rows = rows.dropna(subset=["_time"]).sort_values("_time")
+    if rows["_time"].isna().any():
+        raise ValueError("OpenF1 race-control records contain an invalid date.")
+    rows = rows.sort_values("_time")
     windows: list[tuple[float, float]] = []
     active_start: float | None = None
     for _, row in rows.iterrows():
         message = str(row["message"]).strip().lower()
         stamp = float(row["_time"])
-        clear = any(token in message for token in (
+        scope = str(row.get("scope", "")).casefold()
+        global_scope = (scope == "track" or
+                        (scope in ("", "none", "nan") and pd.isna(row.get("sector"))
+                         and pd.isna(row.get("driver_number"))))
+        clear = global_scope and (str(row.get("flag", "")).upper() == "GREEN" or any(token in message for token in (
             "green flag", "track clear", "all clear", "clear of the track", "safety car withdrawn"
-        ))
+        )))
         if clear:
             if active_start is not None:
                 windows.append((active_start, stamp))
@@ -75,7 +83,8 @@ def _control_windows(frame: pd.DataFrame, origin: pd.Timestamp) -> list[tuple[fl
         elif ongoing:
             # Ending notices signal a transition, while the restriction remains
             # active until an observed green/clear message.
-            continue
+            if active_start is None:
+                raise ValueError("OpenF1 safety-car ending notice has no observed deployment.")
         else:
             raise ValueError(f"Ambiguous OpenF1 safety-car race-control message: {row['message']!r}")
     if active_start is not None:
