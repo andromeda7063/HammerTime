@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import logging
+import platform
 import re
 import shutil
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from uuid import uuid4
 
@@ -80,6 +85,47 @@ def _preserve_artifact(path: Path, processed_dir: Path) -> None:
         archive_dir = processed_dir / "artifact_history" / uuid4().hex
         archive_dir.mkdir(parents=True, exist_ok=False)
         shutil.copy2(path, archive_dir / path.name)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _run_provenance(config_path: Path, config: dict, raw_artifacts: list[str],
+                    processed_dir: Path, checkpoint_path: Path) -> dict:
+    versions = {"python": platform.python_version()}
+    for package in ("fastf1", "numpy", "pandas", "torch", "torch-geometric", "scikit-learn"):
+        try:
+            versions[package] = version(package)
+        except PackageNotFoundError:
+            versions[package] = None
+    repository = PROJECT_DIR.parent
+
+    def git_output(*args: str) -> str | None:
+        try:
+            result = subprocess.run(["git", "-C", str(repository), *args], capture_output=True,
+                                    text=True, check=False)
+        except OSError:
+            return None
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    effective_config = json.dumps(config, sort_keys=True, default=str).encode("utf-8")
+    return {
+        "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git_head": git_output("rev-parse", "HEAD"),
+        "git_status": git_output("status", "--porcelain", "--untracked-files=all", "--", "hammertime_100"),
+        "software_versions": versions,
+        "source_config_sha256": _sha256_file(config_path),
+        "effective_config_sha256": hashlib.sha256(effective_config).hexdigest(),
+        "raw_artifacts_sha256": {str(Path(path).resolve()): _sha256_file(Path(path)) for path in raw_artifacts},
+        "aligned_telemetry_sha256": _sha256_file(processed_dir / "aligned_telemetry.parquet"),
+        "target_labels_sha256": _sha256_file(processed_dir / "target_labels.parquet"),
+        "checkpoint_sha256": _sha256_file(checkpoint_path),
+    }
 
 
 def _contiguous_lap_ranges(laps: list[int]) -> list[tuple[int, int]]:
@@ -431,6 +477,8 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
     report = run_full_evaluation(str(checkpoint_path), test_loader, config, baseline_scores)
     if tuning_result is not None:
         report.setdefault("metadata", {})["tuning"] = tuning_result
+    report.setdefault("metadata", {})["provenance"] = _run_provenance(
+        cfg_path, config, raw_artifacts, base_processed_dir, checkpoint_path)
     physics = report.get("physics_tests", [])
     gates["physics"] = bool(len(physics) == 2 and all(result.get("passed") is True for result in physics))
     artifacts = _render_real_outputs(aligned_all, snapshots, labels_all, report, config)
