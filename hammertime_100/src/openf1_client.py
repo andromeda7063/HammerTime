@@ -283,7 +283,7 @@ def load_openf1_tables(config: dict) -> dict:
             f"OpenF1 laps data is missing fields needed to identify timed laps: {', '.join(sorted(missing_lap_fields))}."
         )
     lap_duration = pd.to_numeric(laps["lap_duration"], errors="coerce")
-    lap_start = pd.to_datetime(laps["date_start"], errors="coerce", utc=True)
+    lap_start = pd.to_datetime(laps["date_start"], format="ISO8601", errors="coerce", utc=True)
     timed_lap_mask = (laps["driver_number"].notna() & lap_duration.gt(0)
                       & np.isfinite(lap_duration) & lap_start.notna())
     lap_drivers = sorted({str(value) for value in laps.loc[timed_lap_mask, "driver_number"]})

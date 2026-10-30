@@ -55,7 +55,9 @@ class OpenF1ClientTests(unittest.TestCase):
                     {"driver_number": 23, "full_name": "Invalid Timestamp Driver"}]
         if endpoint == "laps":
             return [{"driver_number": 1, "lap_number": 1, "lap_duration": 90.0,
-                     "date_start": "2023-09-03T12:00:00+00:00"},
+                     "date_start": "2023-09-03T12:00:00.123456+00:00"},
+                    {"driver_number": 1, "lap_number": 2, "lap_duration": 90.1,
+                     "date_start": "2023-09-03T13:01:30+01:00"},
                     {"driver_number": 22, "lap_number": 1, "lap_duration": None,
                      "date_start": "2023-09-03T12:00:00+00:00"},
                     {"driver_number": 23, "lap_number": 1, "lap_duration": 90.0,
@@ -92,6 +94,19 @@ class OpenF1ClientTests(unittest.TestCase):
         with patch("openf1_client.requests.get", side_effect=AssertionError("404 empty result should be cached")):
             cached = load_openf1_tables(self.config)
         self.assertTrue(cached["tables"]["pit"].empty)
+
+    def test_mixed_precision_utc_lap_starts_keep_driver_eligible(self):
+        car_drivers = []
+
+        def get(url, params, timeout):
+            if url.endswith("/car_data"):
+                car_drivers.append(params["driver_number"])
+            return FakeResponse(self.payload(url, params))
+
+        with patch("openf1_client.requests.get", side_effect=get):
+            result = load_openf1_tables(self.config)
+        self.assertEqual(car_drivers, ["1"])
+        self.assertEqual(len(result["tables"]["laps"]), 4)
 
     def test_retries_timeout_then_caches_success(self):
         calls = []
