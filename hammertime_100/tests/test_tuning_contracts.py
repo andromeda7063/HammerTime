@@ -91,6 +91,40 @@ class TuningContractTests(unittest.TestCase):
                     tune_hyperparameters(self.train_loader, self.val_loader, self.config, torch.device("cpu"))
         self.assertTrue(torch.equal(state, self.train_loader.generator.get_state()))
 
+    def test_declared_study_is_saved_before_training_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.config["session"]["processed_dir"] = directory
+
+            def fit(*_args):
+                paths = list(Path(directory).glob("tuning/*/study.json"))
+                self.assertEqual(len(paths), 1)
+                saved = json.loads(paths[0].read_text())
+                self.assertEqual(saved["status"], "running")
+                self.assertEqual(saved["seeds"], [42, 43])
+                self.assertEqual(saved["candidates"], self.config["tuning"]["candidates"])
+                self.assertNotIn("selected_candidate_index", saved)
+                return 0.2, []
+
+            with patch("tuning.create_model", return_value=Mock()), patch("tuning.train_model", side_effect=fit):
+                _, result = tune_hyperparameters(self.train_loader, self.val_loader, self.config, torch.device("cpu"))
+            self.assertEqual(json.loads(Path(result["study_path"]).read_text())["status"], "complete")
+
+    def test_failed_trial_keeps_partial_study_and_failure_context(self):
+        state = self.train_loader.generator.get_state().clone()
+        with tempfile.TemporaryDirectory() as directory:
+            self.config["session"]["processed_dir"] = directory
+            with patch("tuning.create_model", return_value=Mock()), \
+                    patch("tuning.train_model", side_effect=[(0.2, []), RuntimeError("failed fit")]):
+                with self.assertRaisesRegex(RuntimeError, "failed fit"):
+                    tune_hyperparameters(self.train_loader, self.val_loader, self.config, torch.device("cpu"))
+            saved = json.loads(next(Path(directory).glob("tuning/*/study.json")).read_text())
+            self.assertEqual(saved["status"], "failed")
+            self.assertEqual(saved["active_trial"]["seed"], 43)
+            self.assertEqual(saved["trials"][0]["runs"][0]["validation_mae_sec"], 0.2)
+            self.assertEqual(saved["error"]["type"], "RuntimeError")
+            self.assertNotIn("selected_candidate_index", saved)
+        self.assertTrue(torch.equal(state, self.train_loader.generator.get_state()))
+
 
 if __name__ == "__main__":
     unittest.main()

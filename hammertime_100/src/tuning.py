@@ -3,6 +3,8 @@
 import copy
 import json
 import math
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import fmean
 from uuid import uuid4
@@ -52,15 +54,35 @@ def tune_hyperparameters(train_loader, val_loader, config: dict, device):
     study_dir = Path(config["session"]["processed_dir"]) / "tuning" / uuid4().hex
     study_dir.mkdir(parents=True, exist_ok=False)
     trials, retained_configs = [], []
+    split = getattr(train_loader.dataset, "split_metadata", {})
+    result = {"status": "running", "selection_metric": "mean_validation_mae_sec",
+              "started_at_utc": datetime.now(timezone.utc).isoformat(),
+              "configuration": copy.deepcopy(config), "candidates": copy.deepcopy(candidates),
+              "seeds": list(seeds), "device": str(device),
+              "split": split if isinstance(split, dict) else {}, "trials": trials,
+              "study_path": str(study_dir / "study.json")}
+
+    def save_study():
+        temporary = study_dir / "study.json.tmp"
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(result, output, indent=2, allow_nan=False)
+        os.replace(temporary, study_dir / "study.json")
+
+    save_study()
     try:
         for index, candidate_config in enumerate(trial_configs):
             runs = []
+            candidate_result = {"candidate": candidates[index], "runs": runs}
+            trials.append(candidate_result)
             for seed in seeds:
                 trial = copy.deepcopy(candidate_config)
                 trial_dir = study_dir / f"candidate_{index:02d}" / f"seed_{seed}"
                 trial["data"]["random_seed"] = seed
                 trial["train"]["checkpoint_path"] = str(trial_dir / "best.pt")
                 trial["train"]["history_path"] = str(trial_dir / "training_history.csv")
+                result["active_trial"] = {"candidate_index": index, "seed": seed,
+                                          "checkpoint": trial["train"]["checkpoint_path"]}
+                save_study()
                 generator.manual_seed(seed)
                 model = create_model(trial).to(device)
                 score, history = train_model(model, train_loader, val_loader, trial, device)
@@ -68,19 +90,23 @@ def tune_hyperparameters(train_loader, val_loader, config: dict, device):
                     raise FloatingPointError(f"Non-finite validation score for candidate {index}, seed {seed}.")
                 runs.append({"seed": seed, "validation_mae_sec": float(score),
                              "epochs": len(history), "checkpoint": trial["train"]["checkpoint_path"]})
+                save_study()
                 if seed == seeds[0]:
                     retained_configs.append(trial)
-            trials.append({"candidate": candidates[index], "runs": runs,
-                           "mean_validation_mae_sec": fmean(run["validation_mae_sec"] for run in runs)})
+            candidate_result["mean_validation_mae_sec"] = fmean(run["validation_mae_sec"] for run in runs)
+            save_study()
+    except BaseException as error:
+        result.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
+        save_study()
+        raise
     finally:
         generator.set_state(original_state)
     selected_index = min(range(len(trials)), key=lambda index: trials[index]["mean_validation_mae_sec"])
     selected_config = retained_configs[selected_index]
-    result = {"selection_metric": "mean_validation_mae_sec", "selected_candidate_index": selected_index,
-              "mean_validation_mae_sec": trials[selected_index]["mean_validation_mae_sec"],
-              "selected_validation_mae_sec": trials[selected_index]["runs"][0]["validation_mae_sec"],
-              "retained_seed": seeds[0], "trials": trials,
-              "study_path": str(study_dir / "study.json")}
-    with (study_dir / "study.json").open("w", encoding="utf-8") as output:
-        json.dump(result, output, indent=2, allow_nan=False)
+    result.pop("active_trial", None)
+    result.update(status="complete", selected_candidate_index=selected_index,
+                  mean_validation_mae_sec=trials[selected_index]["mean_validation_mae_sec"],
+                  selected_validation_mae_sec=trials[selected_index]["runs"][0]["validation_mae_sec"],
+                  retained_seed=seeds[0], completed_at_utc=datetime.now(timezone.utc).isoformat())
+    save_study()
     return selected_config, result
