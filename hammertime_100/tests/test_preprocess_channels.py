@@ -34,6 +34,15 @@ class DistanceChannelTests(unittest.TestCase):
         self.assertTrue(result["IsValid"].all())
         np.testing.assert_allclose(result["Distance"], [0, 50, 100])
 
+    def test_duplicate_timestamp_keeps_later_valid_measurement(self):
+        telemetry = pd.DataFrame({"TimeSec": [0.0, 0.5, 0.5, 1.0],
+                                  "Speed": [180.0, np.nan, 180.0, 180.0],
+                                  "Throttle": [80.0, np.nan, 80.0, 80.0],
+                                  "Distance": [0.0, np.nan, 60.0, 100.0]})
+        result = self.align(telemetry)
+        self.assertTrue(result["IsValid"].all())
+        np.testing.assert_allclose(result["Distance"], [0.0, 60.0, 100.0])
+
 
 if __name__ == "__main__":
     unittest.main()

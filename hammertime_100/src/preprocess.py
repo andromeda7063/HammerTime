@@ -65,7 +65,10 @@ def align_driver_telemetry(
     else:
         raise ValueError("Telemetry must contain a SessionTime, Time, or TimeSec column.")
 
-    tel_sorted = tel_df.dropna(subset=["TimeSec"]).sort_values("TimeSec").drop_duplicates(subset=["TimeSec"])
+    # Keep duplicate timestamps until each measurement has been validated.
+    # A row may be missing one channel while another row at the same instant
+    # contains its observed value.
+    tel_sorted = tel_df.dropna(subset=["TimeSec"]).sort_values("TimeSec")
     if tel_sorted.empty:
         logger.warning(f"Driver {driver} has no valid timestamps.")
         return pd.DataFrame()
@@ -90,7 +93,7 @@ def align_driver_telemetry(
         if col in tel_sorted.columns:
             valid = tel_sorted[["TimeSec", col]].copy()
             valid[col] = pd.to_numeric(valid[col], errors="coerce")
-            valid = valid.dropna()
+            valid = valid.dropna().drop_duplicates(subset=["TimeSec"], keep="first")
             values = np.full(len(uniform_times), np.nan, dtype=float)
             if len(valid) > 1:
                 source_times = valid["TimeSec"].to_numpy(dtype=float)
@@ -147,7 +150,9 @@ def align_driver_telemetry(
             if mask.any():
                 source_distance = tel_sorted.reindex(columns=["TimeSec", "Distance"]).copy()
                 source_distance["Distance"] = pd.to_numeric(source_distance["Distance"], errors="coerce")
-                source_distance = source_distance.dropna()
+                source_distance = source_distance.dropna().drop_duplicates(
+                    subset=["TimeSec"], keep="first"
+                )
                 source_times = source_distance["TimeSec"].to_numpy(dtype=float)
                 source_values = source_distance["Distance"].to_numpy(dtype=float)
                 right = int(np.searchsorted(source_times, lap_start))
