@@ -1,21 +1,15 @@
 # HammerTime
 
-HammerTime is a research prototype for modeling Formula 1 traffic delay from FastF1 telemetry. It builds time-aligned race graphs, predicts mini-sector delay relative to a session-specific clean-air reference, and reports held-out model, baseline, physics, and presentation results.
+HammerTime is a research prototype for modeling Formula 1 traffic delay from FastF1 or explicitly selected OpenF1 telemetry. It builds time-aligned race graphs, predicts mini-sector delay relative to a session-specific clean-air reference, and reports held-out model, baseline, physics, and presentation results.
 
 The repository contains two implementations. `hammertime_50/` is the earlier prototype and its historical report. `hammertime_100/` contains the expanded M1–M9 pipeline, dashboard, visual generators, and broadcast-card generator. The 100-tier label describes scope; it does not mean that performance or physics gates have passed. See [the implementation report](hammertime_100/REPORT.md) for current status and limits.
 
 ## Setup
 
-Use Python 3.12 or newer. From the repository root, install the declared dependencies with either:
+Use Python 3.12 or newer. From the repository root, install the locked dependencies with UV:
 
 ```bash
 uv sync --frozen
-```
-
-or:
-
-```bash
-python -m pip install -r hammertime_100/requirements.txt
 ```
 
 PyTorch Geometric installation can depend on the selected PyTorch and platform build. Follow its installation guidance if the package resolver cannot select compatible wheels.
@@ -25,7 +19,7 @@ PyTorch Geometric installation can depend on the selected PyTorch and platform b
 Edit [`hammertime_100/configs/default.yaml`](hammertime_100/configs/default.yaml) to select a FastF1 session and output locations. Then run from the repository root:
 
 ```bash
-uv run python hammertime_100/run_pipeline.py
+uv run --frozen python hammertime_100/run_pipeline.py
 ```
 
 The runner uses FastF1 and its local cache. It raises an error when the requested session cannot be loaded; it does not create synthetic race data. One configured race uses a temporal split. To use a race-held-out split, set `data.split_method: race` and provide at least three entries in `sessions`, each with `year`, `gp`, and optionally `session_type` and `race_id`:
@@ -52,6 +46,18 @@ Race identifiers must be unique. Each session gets its own FastF1 cache subdirec
 
 Sessions for a different circuit must supply their own positive `lap_length_m`; they cannot inherit Monza's geometry. Repeated source sessions under different IDs and IDs that map to the same directory are rejected.
 
+### OpenF1 Monza 2023
+
+OpenF1 historical coverage starts in 2023; Monza 2021 is not supported by this provider. Use the separate pinned configuration for the 2023 race (session key 9157):
+
+```bash
+uv run --frozen python hammertime_100/run_pipeline.py --config hammertime_100/configs/openf1_monza_2023.yaml
+```
+
+`session.source` defaults to `fastf1`; `openf1` requires an explicit `session_key` and validated HTTP settings. Source failures propagate without switching providers. Exact responses and request metadata are cached under the race's `openf1/` directory. Successful chunks can be resumed, and cached hashes/session identity are checked before reuse. Optional location/weather transport failures are recorded as unavailable; required timing, tyre metadata and car telemetry failures stop the run.
+
+The adapter converts UTC timestamps to a shared clock and integrates observed speed separately within each lap. Unsupported speed gaps invalidate the lap's distance; distance is never scaled to force the circuit length. It retains the existing gap calculation instead of substituting the slower OpenF1 interval feed. Review `coverage_report.json` and `source_manifest.json` beside the per-session aligned table before interpreting model results. The separate output root is `data/processed/openf1_monza_2023/`.
+
 ## Reproducible hyperparameter selection
 
 Use the committed lockfile with `uv sync --frozen`. Run a declared experiment with:
@@ -71,10 +77,18 @@ No tuned winner is claimed by the overnight audit: live FastF1 did not supply us
 After a pipeline run, launch the artifact-backed dashboard from the repository root:
 
 ```bash
-uv run streamlit run hammertime_100/dashboard/app.py
+uv run --frozen streamlit run hammertime_100/dashboard/app.py
 ```
 
 The dashboard reads the configured combined telemetry Parquet file, evaluation JSON report, generated visuals, and cards. Missing artifacts are reported as unavailable.
+
+To view an OpenF1 run, set the same explicit configuration; relative config paths resolve from the current working directory:
+
+```bash
+HAMMERTIME_CONFIG=hammertime_100/configs/openf1_monza_2023.yaml uv run --frozen streamlit run hammertime_100/dashboard/app.py
+```
+
+The dashboard also honors `evaluation.report_path` when configured. Missing or invalid configuration is reported before results are displayed.
 
 ## Output locations
 

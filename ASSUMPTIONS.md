@@ -44,3 +44,17 @@ The entries above are preserved as historical configuration records.
 | A21 | Duplicate telemetry timestamps | Deduplicate rows before channel validity checks | Keep the first finite observation independently for each channel at a timestamp | `hammertime_100/src/preprocess.py` | Missing Speed or Distance in one duplicate row must not hide another observed value at the same time. |
 | A22 | Held-out sample ordering | Assume evaluation loader iterates in dataset order | Require a sequential sampler before attaching `dataset.samples` metadata | `hammertime_100/src/evaluate.py` | Prevent wrong driver/lap/gap attribution when a custom or shuffled loader reorders predictions. |
 | A23 | Run provenance | Report supplied split and scaler but no content hashes | Record source/effective config, raw exports, aligned data, targets, checkpoint hashes, Git state and software versions | `hammertime_100/run_pipeline.py` | Allow a reviewer to identify the exact files and environment behind each completed evaluation report. |
+
+## OpenF1 adapter additions — 2026-10-30
+
+The user's explicit OpenF1 adapter request extends the earlier FastF1-only scope recorded in `claude.md`; the earlier record is preserved.
+
+| ID | Contract | Chosen behavior | Rationale |
+|---|---|---|---|
+| A24 | Source selection | Default FastF1; explicit OpenF1 source and session key 9157 for Monza 2023; no provider fallback | OpenF1 starts in 2023. The user selected 2023 after the 2021 coverage mismatch was established. Provider-independent race identity prevents holding out another copy of the same event. |
+| A25 | OpenF1 clock | UTC session `date_start` supplies a common origin; ISO timestamps may use different fractional precision or UTC offsets | Driver slices must not have separate time origins. Valid mixed-precision timestamps must not be coerced to missing. |
+| A26 | OpenF1 distance | Trapezoidal integration of observed km/h divided by 3.6, independently anchored at supported lap starts; any speed gap above the existing maximum invalidates that lap's distance | No extrapolation, gap filling beyond the configured limit, or stretching to circuit length. Integrated-distance deviations are evidence to report, not a parameter to tune around physics gates. |
+| A27 | Metadata compatibility | Pit-event `lap_number` and explicit out-lap markers; lap-wide SC/VSC flags through observed clearing; tyre age equals stint start age + lap offset + 1 | Match the existing FastF1 lap-level feature/filter semantics. FastF1 3.8.3 increments stint StartLaps by one for its first completed lap. No fabricated pit timestamps are supplied. |
+| A28 | Acquisition policy | 300-second windows, 30-second timeout, three attempts, 2.1-second request spacing, verified response cache | These are explicit client reliability settings, not model or physics thresholds. Optional channel transport failures remain visible; wrong-session rows and required-data failures remain fatal. |
+| A29 | Study evidence | Persist declarations before fitting and update completed trials/failure context atomically | An interrupted search must retain its protocol and partial evidence without inventing a selected candidate. |
+| A30 | Dashboard source configuration | Optional `HAMMERTIME_CONFIG` and configured evaluation-report path | Display the requested run's artifacts and validate reports even when their filename differs from the default. |
