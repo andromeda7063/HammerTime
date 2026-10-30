@@ -11,3 +11,8 @@ Recorded 2026-10-30 (Asia/Kolkata). These require scientific or product decision
 7. **Custom evaluation samplers:** `predict_test_set` attaches row metadata in `dataset.samples` order. M5's sequential test loader satisfies this requirement; shuffled or custom evaluation samplers are not supported without an explicit sample-index contract.
 8. **Gate summary interpretation:** `run_pipeline.py` combines module/physics/presentation gates in `all_passed`, while MAE/R² acceptance flags are separate under `metrics`. Should a later reviewed change incorporate those existing flags into the aggregate? Until then, inspect both. This audit did not change thresholds or gate aggregation.
 9. **Session aliases:** exact configured year/gp/type duplicates are rejected, including case differences. Different names for the same real event (for example, circuit versus event names) would require canonical FastF1 identity to detect reliably; verify session provenance before claiming race-held-out independence.
+
+## 2026-10-30 continuation notes
+
+- Item 7 now fails closed for shuffled or custom evaluation samplers: `predict_test_set` requires the default sequential sampler before assigning sample metadata. Supporting an alternative sampler still needs an explicit index contract; no such support is claimed.
+- The causal temporal convolution changes the interpretation of saved model weights. Historical checkpoints remain preserved, but a fresh authentic-data training run is required before making any performance comparison. No run was possible while FastF1 returned no usable session laps or telemetry.

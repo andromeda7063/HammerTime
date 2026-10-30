@@ -35,3 +35,12 @@ The entries above are preserved as historical configuration records.
 | A17 | Missing dashboard results | Example MAEs and legacy images | Unavailable scores; only current report manifest images | `hammertime_100/dashboard/app.py` | Missing or malformed artifacts are not research evidence. |
 | A18 | Hyperparameter selection | One configured fit; no explicit study | Optional declared model/optimizer candidates, scored by mean validation MAE across declared seeds; retain the first seed | `hammertime_100/src/tuning.py`, `configs/default.yaml` | Hold splits, scaling, targets, metrics and gates fixed. Test/physics results cannot select a candidate. The search remains unmeasured until authentic telemetry is available. |
 | A19 | Presentation timestamp matching | NumPy default relative tolerance | Fixed absolute tolerance with `rtol=0` | `hammertime_100/run_pipeline.py`, `dashboard/app.py` | A larger session timestamp must not widen the time slice and mix observations from adjacent frames. Existing absolute tolerances are preserved. |
+
+## Continuation additions — 2026-10-30
+
+| ID | Parameter or contract | Previous behavior | Audited behavior | Location | Rationale |
+|---|---|---|---|---|---|
+| A20 | Temporal convolution context | Symmetric padding; last output omitted the oldest value of its configured kernel window | Left padding by `kernel_size - 1`; the last output uses the full latest causal window | `hammertime_100/src/model.py` | Match the documented history-only prediction contract. This changes model computation, so historical checkpoints are not evidence for the revised model. |
+| A21 | Duplicate telemetry timestamps | Deduplicate rows before channel validity checks | Keep the first finite observation independently for each channel at a timestamp | `hammertime_100/src/preprocess.py` | Missing Speed or Distance in one duplicate row must not hide another observed value at the same time. |
+| A22 | Held-out sample ordering | Assume evaluation loader iterates in dataset order | Require a sequential sampler before attaching `dataset.samples` metadata | `hammertime_100/src/evaluate.py` | Prevent wrong driver/lap/gap attribution when a custom or shuffled loader reorders predictions. |
+| A23 | Run provenance | Report supplied split and scaler but no content hashes | Record source/effective config, raw exports, aligned data, targets, checkpoint hashes, Git state and software versions | `hammertime_100/run_pipeline.py` | Allow a reviewer to identify the exact files and environment behind each completed evaluation report. |
