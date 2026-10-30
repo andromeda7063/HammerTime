@@ -8,6 +8,7 @@ Standard: ASD-STE100 Plain English
 import logging
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import GATConv
 import yaml
 
@@ -75,7 +76,7 @@ class HammerTimeSTGNN(nn.Module):
             in_channels=hidden_dim,
             out_channels=hidden_dim,
             kernel_size=conv1d_kernel,
-            padding=conv1d_kernel // 2
+            padding=0
         )
 
         # Stage 4: MLP Regression Head
@@ -137,6 +138,9 @@ class HammerTimeSTGNN(nn.Module):
         z = torch.stack(outs, dim=2)
 
         # Temporal convolution over W window
+        # Pad only on the left so the final output uses the complete recent
+        # history and never depends on future (right-padding) positions.
+        z = F.pad(z, (self.tconv.kernel_size[0] - 1, 0))
         z = torch.relu(self.tconv(z))
 
         # Take last time step

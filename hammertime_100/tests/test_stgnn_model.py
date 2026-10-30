@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 import torch
+from torch import nn
 from torch_geometric.data import Data
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -12,6 +13,11 @@ if str(SRC_DIR) not in sys.path:
 
 from model import HammerTimeSTGNN, create_model
 from graph import build_node_feature_vector, build_snapshot_edges
+
+
+class PassThroughEdges(nn.Module):
+    def forward(self, features, edge_index, edge_attr):
+        return features
 
 
 class STGNNModelTests(unittest.TestCase):
@@ -110,6 +116,23 @@ class STGNNModelTests(unittest.TestCase):
         self.assertEqual(idx.size(1), 2 + num_nodes)
         self.assertEqual(attr.size(0), 2 + num_nodes)
         self.assertTrue((attr[-num_nodes:] == 1.0).all())
+
+    def test_temporal_kernel_uses_full_recent_history(self):
+        model = HammerTimeSTGNN(in_dim=1, hidden_dim=1, gat_heads=1,
+                                conv1d_kernel=3, dropout=0.0)
+        model.gat1 = PassThroughEdges()
+        model.gat2 = PassThroughEdges()
+        model.head = nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            model.proj.weight.fill_(1.0)
+            model.proj.bias.zero_()
+            model.tconv.weight.fill_(1.0)
+            model.tconv.bias.zero_()
+            model.head.weight.fill_(1.0)
+        snapshots = [Data(x=torch.tensor([[value]]),
+                          edge_index=torch.empty((2, 0), dtype=torch.long))
+                     for value in (2.0, 0.0, 0.0)]
+        self.assertEqual(model(snapshots).item(), 2.0)
 
     def test_rbf_gaussian_weight_decay(self):
         """Verify RBF weight decreases monotonically with increasing time gap."""
