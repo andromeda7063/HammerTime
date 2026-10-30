@@ -265,24 +265,6 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
     dt = 1.0 / sample_hz
     shared_grid = np.arange(session_start, session_end + dt * 1e-6, dt)
 
-    # Two lap intervals may overlap slightly without sharing a sample on the
-    # session grid. Reject only overlaps that would create duplicate row keys.
-    grid_times_by_driver: dict[str, set[float]] = defaultdict(set)
-    for _, row in laps.sort_values(["Driver", "LapNumber", "TimeSec"]).iterrows():
-        driver = row["Driver"]
-        lap_start = float(row["TimeSec"])
-        lap_end = lap_start + float(row["LapDurationSec"])
-        lap_grid = shared_grid[(shared_grid >= lap_start - 1e-9) & (shared_grid < lap_end - 1e-9)]
-        previous = grid_times_by_driver[driver]
-        duplicate_times = previous.intersection(map(float, lap_grid))
-        if duplicate_times:
-            first_duplicate = min(duplicate_times)
-            raise ValueError(
-                "OpenF1 lap interval overlap produces duplicate aligned rows "
-                f"for driver {driver} at TimeSec {first_duplicate:g}."
-            )
-        previous.update(map(float, lap_grid))
-
     # Resolve each lap's tyre metadata by stint range. Stint starting tyre age
     # advances by lap offset; no currentTyreLife sample is used as a substitute.
     stints["Driver"] = stints.get("driver_number", pd.Series(dtype=object)).map(_driver_key)
@@ -402,12 +384,17 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
         raise ValueError("No OpenF1 driver laps could be aligned to the shared session grid.")
     combined = pd.concat(aligned_parts, ignore_index=True)
     duplicate_rows = combined.duplicated(["Driver", "TimeSec"], keep=False)
+    ambiguous_counts = {}
     if duplicate_rows.any():
-        row = combined.loc[duplicate_rows, ["Driver", "TimeSec"]].iloc[0]
-        raise ValueError(
-            "OpenF1 normalization produced duplicate driver/timestamp rows "
-            f"for driver {row['Driver']} at TimeSec {float(row['TimeSec']):g}."
-        )
+        # Source lap-start timestamps can overlap start+duration from the prior
+        # lap. Preserve one invalid grid row without choosing either identity.
+        ambiguous = combined.loc[duplicate_rows].groupby(
+            ["RaceId", "Driver", "TimeSec"], as_index=False
+        )[["IsPitLap", "IsSafetyCar"]].any()
+        ambiguous_counts = {str(driver): int(count) for driver, count in ambiguous.groupby("Driver").size().items()}
+        ambiguous = ambiguous.reindex(columns=combined.columns)
+        ambiguous["IsValid"] = False
+        combined = pd.concat([combined.loc[~duplicate_rows], ambiguous], ignore_index=True)
     processed = compute_time_gaps(combined, sample_hz=sample_hz, lap_length_m=lap_length)
     valid = processed.get("IsValid", pd.Series(False, index=processed.index)).fillna(False).astype(bool)
     coverage = {
@@ -417,6 +404,7 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
         "valid_rows": int(valid.sum()),
         "retained_samples": int(valid.sum()),
         "retained_sectors": int(processed.loc[valid, "MiniSector"].nunique()),
+        "ambiguous_lap_frames": ambiguous_counts,
         "invalid_lap_reasons": invalid_reasons,
         "lap_distance_errors_m": distance_errors,
     }

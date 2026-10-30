@@ -183,12 +183,18 @@ class OpenF1NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive"):
             normalize_openf1_tables(data, config())
 
-    def test_overlapping_laps_sharing_grid_time_are_rejected(self):
+    def test_overlapping_laps_mask_ambiguous_frame_without_choosing_a_lap(self):
         data = bundle()
         origin = data["session"]["date_start"]
         data["tables"]["laps"].loc[1, "date_start"] = origin + pd.Timedelta(1, unit="s")
-        with self.assertRaisesRegex(ValueError, "overlap.*duplicate aligned rows"):
-            normalize_openf1_tables(data, config())
+        aligned = normalize_openf1_tables(data, config())
+        ambiguous = aligned[aligned["TimeSec"] == 1.0]
+        self.assertEqual(len(ambiguous), 1)
+        self.assertFalse(ambiguous["IsValid"].any())
+        self.assertTrue(ambiguous["LapNumber"].isna().all())
+        self.assertTrue(ambiguous["Distance"].isna().all())
+        self.assertFalse(aligned.duplicated(["Driver", "TimeSec"]).any())
+        self.assertEqual(aligned.attrs["coverage"]["ambiguous_lap_frames"], {"1": 1})
 
     def test_sub_grid_overlap_without_shared_grid_time_is_retained(self):
         data = bundle()
