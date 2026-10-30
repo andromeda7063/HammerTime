@@ -24,7 +24,7 @@ def _table(bundle: dict, *names: str) -> pd.DataFrame:
 
 
 def _utc_series(values: pd.Series) -> pd.Series:
-    return pd.to_datetime(values, utc=True, errors="coerce")
+    return pd.to_datetime(values, utc=True, errors="coerce", format="ISO8601")
 
 
 def _seconds_from_origin(values: pd.Series, origin: pd.Timestamp) -> pd.Series:

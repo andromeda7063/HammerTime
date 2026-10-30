@@ -9,7 +9,7 @@ import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
-from openf1_adapter import normalize_openf1_tables
+from openf1_adapter import _seconds_from_origin, normalize_openf1_tables
 
 
 def bundle(*, gap=False, race_control=None):
@@ -50,6 +50,12 @@ def config():
 
 
 class OpenF1NormalizationTests(unittest.TestCase):
+    def test_iso_timestamps_with_mixed_fractional_precision_share_one_clock(self):
+        origin = pd.Timestamp("2023-09-03T13:00:00Z")
+        values = pd.Series(["2023-09-03T13:00:00+00:00", "2023-09-03T13:00:00.250000Z",
+                            "2023-09-03T15:00:00.500+02:00"])
+        np.testing.assert_allclose(_seconds_from_origin(values, origin), [0.0, 0.25, 0.5])
+
     def test_builds_session_clock_lap_distance_metadata_and_race_id(self):
         aligned = normalize_openf1_tables(bundle(), config())
         self.assertEqual(set(aligned["RaceId"]), {"2024-Test-R"})
