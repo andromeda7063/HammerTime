@@ -247,6 +247,14 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
     raw_lap_numbers = laps["LapNumber"].dropna().to_numpy(dtype=float)
     if np.any(~np.isfinite(raw_lap_numbers)) or np.any(raw_lap_numbers % 1 != 0):
         raise ValueError("OpenF1 lap_number values must be finite integers.")
+    if np.any(raw_lap_numbers <= 0):
+        raise ValueError("OpenF1 lap_number values must be positive integers.")
+    lap_id_rows = laps.dropna(subset=["Driver", "LapNumber"])
+    duplicate_laps = lap_id_rows.duplicated(["Driver", "LapNumber"], keep=False)
+    if duplicate_laps.any():
+        duplicate_ids = lap_id_rows.loc[duplicate_laps, ["Driver", "LapNumber"]].drop_duplicates()
+        driver, lap_no = duplicate_ids.iloc[0]
+        raise ValueError(f"OpenF1 duplicate driver/lap record for driver {driver}, lap {int(lap_no)}.")
     laps["LapDurationSec"] = pd.to_numeric(laps.get("lap_duration"), errors="coerce")
     laps = laps.dropna(subset=["Driver", "LapNumber", "TimeSec", "LapDurationSec"])
     laps = laps[(laps["LapDurationSec"] > 0) & np.isfinite(laps["LapDurationSec"])]
@@ -256,6 +264,24 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
     session_end = float((laps["TimeSec"] + laps["LapDurationSec"]).max())
     dt = 1.0 / sample_hz
     shared_grid = np.arange(session_start, session_end + dt * 1e-6, dt)
+
+    # Two lap intervals may overlap slightly without sharing a sample on the
+    # session grid. Reject only overlaps that would create duplicate row keys.
+    grid_times_by_driver: dict[str, set[float]] = defaultdict(set)
+    for _, row in laps.sort_values(["Driver", "LapNumber", "TimeSec"]).iterrows():
+        driver = row["Driver"]
+        lap_start = float(row["TimeSec"])
+        lap_end = lap_start + float(row["LapDurationSec"])
+        lap_grid = shared_grid[(shared_grid >= lap_start - 1e-9) & (shared_grid < lap_end - 1e-9)]
+        previous = grid_times_by_driver[driver]
+        duplicate_times = previous.intersection(map(float, lap_grid))
+        if duplicate_times:
+            first_duplicate = min(duplicate_times)
+            raise ValueError(
+                "OpenF1 lap interval overlap produces duplicate aligned rows "
+                f"for driver {driver} at TimeSec {first_duplicate:g}."
+            )
+        previous.update(map(float, lap_grid))
 
     # Resolve each lap's tyre metadata by stint range. Stint starting tyre age
     # advances by lap offset; no currentTyreLife sample is used as a substitute.
@@ -375,6 +401,13 @@ def normalize_openf1_tables(bundle: dict, config: dict) -> pd.DataFrame:
     if not aligned_parts:
         raise ValueError("No OpenF1 driver laps could be aligned to the shared session grid.")
     combined = pd.concat(aligned_parts, ignore_index=True)
+    duplicate_rows = combined.duplicated(["Driver", "TimeSec"], keep=False)
+    if duplicate_rows.any():
+        row = combined.loc[duplicate_rows, ["Driver", "TimeSec"]].iloc[0]
+        raise ValueError(
+            "OpenF1 normalization produced duplicate driver/timestamp rows "
+            f"for driver {row['Driver']} at TimeSec {float(row['TimeSec']):g}."
+        )
     processed = compute_time_gaps(combined, sample_hz=sample_hz, lap_length_m=lap_length)
     valid = processed.get("IsValid", pd.Series(False, index=processed.index)).fillna(False).astype(bool)
     coverage = {

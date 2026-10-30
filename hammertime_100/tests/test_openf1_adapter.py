@@ -68,6 +68,7 @@ class OpenF1NormalizationTests(unittest.TestCase):
         self.assertTrue((aligned.loc[aligned["LapNumber"] == 2, "TyreLife"] == 5).all())
         self.assertTrue(aligned.loc[aligned["LapNumber"] == 2, "IsPitLap"].all())
         self.assertIn("coverage", aligned.attrs)
+        self.assertAlmostEqual(aligned.attrs["coverage"]["lap_distance_errors_m"]["1:1"], -80.0)
 
     def test_unsupported_speed_gap_invalidates_affected_lap(self):
         aligned = normalize_openf1_tables(bundle(gap=True), config())
@@ -135,9 +136,9 @@ class OpenF1NormalizationTests(unittest.TestCase):
         origin = pd.Timestamp("2024-09-01T12:00:00Z")
         control = [
             {"date": origin, "message": "SAFETY CAR DEPLOYED", "scope": "Track"},
-            {"date": origin + pd.Timedelta(seconds=1), "message": "GREEN FLAG",
+            {"date": origin + pd.Timedelta(1, unit="s"), "message": "GREEN FLAG",
              "flag": "GREEN", "scope": "Sector", "sector": 2},
-            {"date": origin + pd.Timedelta(seconds=3), "message": "GREEN FLAG",
+            {"date": origin + pd.Timedelta(3, unit="s"), "message": "GREEN FLAG",
              "flag": "GREEN", "scope": "Track"},
         ]
         aligned = normalize_openf1_tables(bundle(race_control=control), config())
@@ -167,6 +168,34 @@ class OpenF1NormalizationTests(unittest.TestCase):
         data["tables"]["laps"].loc[0, "lap_number"] = 1.5
         with self.assertRaisesRegex(ValueError, "finite integers"):
             normalize_openf1_tables(data, config())
+
+    def test_duplicate_driver_lap_records_are_rejected(self):
+        data = bundle()
+        data["tables"]["laps"] = pd.concat(
+            [data["tables"]["laps"], data["tables"]["laps"].iloc[[0]]], ignore_index=True
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate.*driver.*lap"):
+            normalize_openf1_tables(data, config())
+
+    def test_nonpositive_lap_number_is_rejected(self):
+        data = bundle()
+        data["tables"]["laps"].loc[0, "lap_number"] = 0
+        with self.assertRaisesRegex(ValueError, "positive"):
+            normalize_openf1_tables(data, config())
+
+    def test_overlapping_laps_sharing_grid_time_are_rejected(self):
+        data = bundle()
+        origin = data["session"]["date_start"]
+        data["tables"]["laps"].loc[1, "date_start"] = origin + pd.Timedelta(1, unit="s")
+        with self.assertRaisesRegex(ValueError, "overlap.*duplicate aligned rows"):
+            normalize_openf1_tables(data, config())
+
+    def test_sub_grid_overlap_without_shared_grid_time_is_retained(self):
+        data = bundle()
+        origin = data["session"]["date_start"]
+        data["tables"]["laps"].loc[1, "date_start"] = origin + pd.Timedelta(1.5, unit="s")
+        aligned = normalize_openf1_tables(data, config())
+        self.assertFalse(aligned.duplicated(["Driver", "TimeSec"]).any())
 
     def test_missing_required_inputs_fail_clearly(self):
         data = bundle()
