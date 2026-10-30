@@ -3,6 +3,32 @@
 import math
 
 
+def validate_session_source(session: dict, options: dict | None = None) -> None:
+    source = session.get("source", "fastf1")
+    if source not in ("fastf1", "openf1"):
+        raise ValueError("session.source must be 'fastf1' or 'openf1'.")
+    if source == "fastf1":
+        return
+    if session["year"] < 2023:
+        raise ValueError("OpenF1 historical data starts in 2023; this year is unsupported.")
+    key = session.get("session_key")
+    if isinstance(key, bool) or not isinstance(key, int) or key <= 0:
+        raise ValueError("OpenF1 requires a positive integer session.session_key.")
+    if not isinstance(options, dict):
+        raise ValueError("OpenF1 requires an openf1 configuration mapping.")
+    if options.get("base_url") != "https://api.openf1.org/v1":
+        raise ValueError("openf1.base_url must be https://api.openf1.org/v1.")
+    for name in ("timeout_sec", "max_attempts", "chunk_seconds", "request_interval_sec"):
+        item = options.get(name)
+        if (isinstance(item, bool) or not isinstance(item, (int, float))
+                or not math.isfinite(item) or item < 0
+                or (name != "request_interval_sec" and item == 0)
+                or (name in ("max_attempts", "chunk_seconds") and not isinstance(item, int))):
+            raise ValueError(f"Invalid or missing openf1.{name}: {item!r}")
+    if not isinstance(options.get("fetch_location"), bool):
+        raise ValueError("openf1.fetch_location must be a boolean.")
+
+
 def validate_config(config: dict) -> None:
     if not isinstance(config, dict):
         raise ValueError("Configuration must be a mapping.")
@@ -31,6 +57,7 @@ def validate_config(config: dict) -> None:
         if not isinstance(value(path), str) or not value(path).strip():
             raise ValueError(f"{path} must be a non-empty string.")
     number("session.year", minimum=1, integer=True)
+    validate_session_source(config["session"], config.get("openf1"))
     for path in ("track.mini_sectors", "graph.num_nodes", "data.window_size", "train.batch_size",
                  "train.max_epochs", "train.early_stopping_patience", "model.in_dim", "model.hidden_dim",
                  "model.gat_heads", "model.edge_dim", "model.conv1d_kernel",

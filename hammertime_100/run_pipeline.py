@@ -49,9 +49,12 @@ def _session_specs(config: dict) -> list[dict]:
         if not isinstance(item, dict) or not {"year", "gp"}.issubset(item):
             raise ValueError("Each sessions entry must contain year and gp; session_type defaults to 'R'.")
         spec = {**config["session"], **item}
+        spec["source"] = spec.get("source", "fastf1")
         if (isinstance(spec["year"], bool) or not isinstance(spec["year"], int)
                 or spec["year"] <= 0 or not isinstance(spec["gp"], str) or not spec["gp"].strip()):
             raise ValueError("Each sessions entry needs a positive integer year and non-empty gp name.")
+        from config_validation import validate_session_source
+        validate_session_source(spec, config.get("openf1"))
         spec["session_type"] = str(spec.get("session_type", "R"))
         source = (spec["year"], spec["gp"].strip().casefold(), spec["session_type"].strip().upper())
         if source in seen_sources:
