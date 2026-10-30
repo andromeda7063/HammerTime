@@ -1,14 +1,17 @@
 """Measured mini-sector duration contracts; all observations stay in memory."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
+import target
 from target import calculate_mini_sector_durations
 
 
@@ -80,6 +83,48 @@ class TargetMeasurementTests(unittest.TestCase):
         self.assertEqual(result["LapNumber"].tolist(), [1, 1])
         self.assertEqual(result["MiniSector"].tolist(), [0, 1])
         self.assertAlmostEqual(result["Duration"].sum(), 2.8)
+
+    def test_build_targets_strips_large_pandas_attrs_on_copy_without_mutating_input(self):
+        rows = pd.concat([
+            observations(),
+            observations(times=(10.0, 10.7, 11.4, 12.1, 12.8)).assign(Driver="BB"),
+        ], ignore_index=True)
+        rows["DeltaT"] = rows["Driver"].map({"AA": 1.0, "BB": 2.0})
+        rows.attrs = {
+            "coverage": {f"{driver}:{lap}": {"distance_error": -46.0}
+                         for driver in range(20) for lap in range(1, 52)},
+            "provenance": {f"request-{i}": {"sha256": "x" * 64, "status": 200}
+                           for i in range(900)},
+        }
+        original_attrs = rows.attrs.copy()
+        cfg = {
+            "target": {"clean_air_gap_sec": 0.5, "min_clean_samples": 1,
+                       "clip_delta_sec": [-10.0, 10.0]},
+            "preprocess": {"max_interpolate_sec": 1.0},
+            "track": {"lap_length_m": 100.0, "mini_sectors": 2},
+            "session": {"race_id": "attr-test"},
+        }
+        seen_attrs = []
+        calculate = target.calculate_mini_sector_durations
+
+        def record_attrs(frame, *args, **kwargs):
+            seen_attrs.append(dict(frame.attrs))
+            return calculate(frame, *args, **kwargs)
+
+        with (tempfile.TemporaryDirectory() as decorated_dir,
+              patch("target.calculate_mini_sector_durations", side_effect=record_attrs)):
+            decorated_cfg = {**cfg, "session": {**cfg["session"],
+                                                   "processed_dir": decorated_dir}}
+            decorated = target.build_targets(rows, decorated_cfg)
+
+        self.assertEqual(seen_attrs, [{}])
+        self.assertEqual(rows.attrs, original_attrs)
+        plain = rows.copy()
+        plain.attrs = {}
+        with tempfile.TemporaryDirectory() as plain_dir:
+            plain_cfg = {**cfg, "session": {**cfg["session"], "processed_dir": plain_dir}}
+            expected = target.build_targets(plain, plain_cfg)
+        pd.testing.assert_frame_equal(decorated, expected)
 
 
 if __name__ == "__main__":

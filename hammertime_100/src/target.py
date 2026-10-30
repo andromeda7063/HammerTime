@@ -149,6 +149,11 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     clip_range = config["target"]["clip_delta_sec"]
 
     aligned_df = aligned_df.copy()
+    # Provenance and coverage are descriptive metadata, not target inputs.
+    # Pandas propagates and deep-copies attrs for every slice; sector extraction
+    # creates many slices, so keep that metadata on the caller's original frame
+    # and strip it from this working copy.
+    aligned_df.attrs = {}
     if "RaceId" not in aligned_df.columns:
         session_cfg = config.get("session", {})
         aligned_df["RaceId"] = str(session_cfg.get("race_id") or (
