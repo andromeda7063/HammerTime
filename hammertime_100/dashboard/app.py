@@ -1,6 +1,7 @@
 """Artifact-backed HammerTime race replay and model diagnostics dashboard."""
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -11,14 +12,36 @@ import yaml
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_DIR / "configs" / "default.yaml"
-with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-    CONFIG = yaml.safe_load(config_file)
+configured_path = os.environ.get("HAMMERTIME_CONFIG")
+CONFIG_PATH = Path(configured_path).expanduser() if configured_path else PROJECT_DIR / "configs" / "default.yaml"
+if not CONFIG_PATH.is_absolute():
+    CONFIG_PATH = Path.cwd() / CONFIG_PATH
+CONFIG_ERROR = None
+try:
+    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+        CONFIG = yaml.safe_load(config_file)
+    if not isinstance(CONFIG, dict) or not isinstance(CONFIG.get("session"), dict):
+        raise ValueError("configuration must contain a session mapping")
+    evaluation_config = CONFIG.get("evaluation", {})
+    if not isinstance(evaluation_config, dict):
+        raise ValueError("evaluation configuration must be a mapping")
+    processed_value = CONFIG["session"].get("processed_dir", "data/processed")
+    if not isinstance(processed_value, (str, Path)) or (
+        "report_path" in evaluation_config and not isinstance(evaluation_config["report_path"], (str, Path))
+    ):
+        raise ValueError("processed_dir and evaluation.report_path must be file paths")
+except (OSError, TypeError, ValueError, yaml.YAMLError) as error:
+    CONFIG = {"session": {"processed_dir": "data/processed"}}
+    CONFIG_ERROR = f"Could not load dashboard config `{CONFIG_PATH}`: {error}"
+
 PROCESSED_DIR = Path(CONFIG["session"].get("processed_dir", "data/processed"))
 if not PROCESSED_DIR.is_absolute():
     PROCESSED_DIR = PROJECT_DIR / PROCESSED_DIR
 TELEMETRY_PATH = PROCESSED_DIR / "aligned_telemetry.parquet"
-REPORT_PATH = PROCESSED_DIR / "evaluation_report.json"
+configured_report_path = CONFIG.get("evaluation", {}).get("report_path", PROCESSED_DIR / "evaluation_report.json")
+REPORT_PATH = Path(configured_report_path).expanduser()
+if not REPORT_PATH.is_absolute():
+    REPORT_PATH = Path.cwd() / REPORT_PATH
 CARBON = "#15151E"
 CARD = "#1F1F2B"
 RED = "#E10600"
@@ -30,6 +53,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+if CONFIG_ERROR:
+    st.error(CONFIG_ERROR)
+    st.stop()
 st.markdown(
     f"""<style>
     .stApp {{ background: {CARBON}; color: {WHITE}; }}
@@ -115,7 +141,7 @@ def artifact(path: Path, loader):
         if missing:
             st.warning(f"Telemetry artifact `{path}` is missing required fields: {', '.join(sorted(missing))}.")
             return None
-    if path.name == "evaluation_report.json" and not valid_report(loaded):
+    if loader is load_report and not valid_report(loaded):
         st.warning(f"Evaluation report `{path}` has an invalid structure.")
         return None
     return loaded
@@ -238,7 +264,7 @@ with st.sidebar:
     if not artifact_dir.is_absolute():
         artifact_dir = PROJECT_DIR / artifact_dir
     telemetry_path = artifact_dir / "aligned_telemetry.parquet"
-    report_path = artifact_dir / "evaluation_report.json"
+    report_path = REPORT_PATH if artifact_dir.resolve() == PROCESSED_DIR.resolve() else artifact_dir / "evaluation_report.json"
     telemetry = artifact(telemetry_path, load_telemetry)
     report = artifact(report_path, load_report)
     if telemetry is not None and "RaceId" in telemetry.columns:
