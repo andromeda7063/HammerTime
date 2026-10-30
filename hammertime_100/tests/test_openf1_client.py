@@ -13,7 +13,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from openf1_client import OpenF1AcquisitionError, load_openf1_tables
+from openf1_client import OpenF1AcquisitionError, OpenF1UnavailableError, load_openf1_tables
 
 
 class FakeResponse:
@@ -286,6 +286,76 @@ class OpenF1ClientTests(unittest.TestCase):
         with patch("openf1_client.requests.get", side_effect=get):
             with self.assertRaisesRegex(OpenF1AcquisitionError, "car_data is empty"):
                 load_openf1_tables(self.config)
+
+    def test_weather_transport_failure_is_recorded_and_required_data_returns(self):
+        config = {**self.config, "openf1": {**self.config["openf1"], "fetch_weather": True}}
+        weather_calls = 0
+
+        def get(url, params, timeout):
+            nonlocal weather_calls
+            if url.endswith("/weather"):
+                weather_calls += 1
+                return FakeResponse([], status=500)
+            return FakeResponse(self.payload(url, params))
+
+        with patch("openf1_client.requests.get", side_effect=get), patch("openf1_client.time.sleep"):
+            result = load_openf1_tables(config)
+        self.assertEqual(weather_calls, 2)
+        self.assertTrue(result["tables"]["weather"].empty)
+        self.assertFalse(result["tables"]["laps"].empty)
+        self.assertEqual(result["provenance"]["optional_failures"][0]["endpoint"], "weather")
+        self.assertEqual(result["provenance"]["optional_failures"][0]["query"], {"session_key": "42"})
+        self.assertIn("500", result["provenance"]["optional_failures"][0]["exception"])
+
+    def test_location_failure_keeps_observed_rows_and_stops_later_windows(self):
+        config = {**self.config,
+                  "openf1": {**self.config["openf1"], "fetch_location": True, "chunk_seconds": 300}}
+        location_requests = []
+
+        def get(url, params, timeout):
+            if url.endswith("/sessions"):
+                rows = self.payload(url, params)
+                rows[0]["date_end"] = "2023-09-03T12:10:01+00:00"
+                return FakeResponse(rows)
+            if url.endswith("/location"):
+                location_requests.append(dict(params))
+                if len(location_requests) == 1:
+                    return FakeResponse([{"session_key": 42, "driver_number": 1, "x": 12}])
+                return FakeResponse([], status=500)
+            return FakeResponse(self.payload(url, params))
+
+        with patch("openf1_client.requests.get", side_effect=get), patch("openf1_client.time.sleep"):
+            result = load_openf1_tables(config)
+        self.assertEqual(len(location_requests), 3)  # first window; second window retries twice
+        self.assertEqual(len(result["tables"]["location"]), 1)
+        failure = result["provenance"]["optional_failures"][0]
+        self.assertEqual(failure["endpoint"], "location")
+        self.assertEqual(failure["query"], location_requests[1])
+        self.assertIn("500", failure["exception"])
+
+    def test_required_car_data_transport_failure_still_aborts(self):
+        def get(url, params, timeout):
+            if url.endswith("/car_data"):
+                return FakeResponse([], status=500)
+            return FakeResponse(self.payload(url, params))
+
+        with patch("openf1_client.requests.get", side_effect=get), patch("openf1_client.time.sleep"):
+            with self.assertRaises(OpenF1UnavailableError):
+                load_openf1_tables(self.config)
+
+    def test_optional_session_key_mismatch_remains_fatal(self):
+        config = {**self.config,
+                  "openf1": {**self.config["openf1"], "fetch_location": True}}
+
+        def get(url, params, timeout):
+            if url.endswith("/location"):
+                return FakeResponse([{"session_key": 99, "driver_number": 1, "x": 12}])
+            return FakeResponse(self.payload(url, params))
+
+        with patch("openf1_client.requests.get", side_effect=get):
+            with self.assertRaisesRegex(OpenF1AcquisitionError, "pinned session_key=42") as raised:
+                load_openf1_tables(config)
+        self.assertNotIsInstance(raised.exception, OpenF1UnavailableError)
 
 
 if __name__ == "__main__":

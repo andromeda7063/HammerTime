@@ -20,6 +20,10 @@ class OpenF1AcquisitionError(RuntimeError):
     """Raised when required OpenF1 data cannot be acquired reliably."""
 
 
+class OpenF1UnavailableError(OpenF1AcquisitionError):
+    """Raised when a transient HTTP or network failure exhausts its retries."""
+
+
 class _OpenF1Client:
     def __init__(self, section: dict, cache_dir: Path, *, get: Callable,
                  sleeper: Callable, clock: Callable):
@@ -134,7 +138,7 @@ class _OpenF1Client:
             except requests.RequestException as exc:
                 raise OpenF1AcquisitionError(f"OpenF1 request failed for {endpoint}: {exc}") from exc
             break
-        raise OpenF1AcquisitionError(
+        raise OpenF1UnavailableError(
             f"OpenF1 request failed for {endpoint} query {query!r} after "
             f"{self.max_attempts} attempts: {last_error}"
         )
@@ -249,6 +253,7 @@ def load_openf1_tables(config: dict) -> dict:
         )
 
     tables: dict[str, pd.DataFrame] = {"session": pd.DataFrame(session_rows)}
+    optional_failures: list[dict] = []
     endpoint_params = {
         "drivers": {"session_key": key}, "laps": {"session_key": key},
         "stints": {"session_key": key}, "pit": {"session_key": key},
@@ -303,12 +308,18 @@ def load_openf1_tables(config: dict) -> dict:
     tables["car_data"] = pd.DataFrame(car_rows)
 
     if section.get("fetch_weather", False):
-        rows = client.fetch("weather", {"session_key": key})
-        _assert_session_rows(rows, "weather", key)
+        params = {"session_key": key}
+        try:
+            rows = client.fetch("weather", params)
+            _assert_session_rows(rows, "weather", key)
+        except OpenF1UnavailableError as exc:
+            rows = []
+            optional_failures.append({"endpoint": "weather", "query": params, "exception": str(exc)})
         tables["weather"] = pd.DataFrame(rows)
     else:
         tables["weather"] = pd.DataFrame()
     if section.get("fetch_location", True):
+        location_unavailable = False
         for driver_number in lap_drivers:
             cursor = start
             while cursor < end:
@@ -316,15 +327,24 @@ def load_openf1_tables(config: dict) -> dict:
                 params = {"session_key": key, "driver_number": driver_number,
                           "date>": _utc_text(cursor - timedelta(microseconds=1)),
                           "date<": _utc_text(upper)}
-                rows = client.fetch("location", params)
-                _assert_session_rows(rows, "location", key)
+                try:
+                    rows = client.fetch("location", params)
+                    _assert_session_rows(rows, "location", key)
+                except OpenF1UnavailableError as exc:
+                    optional_failures.append({"endpoint": "location", "query": params,
+                                              "exception": str(exc)})
+                    location_unavailable = True
+                    break
                 location_rows.extend(rows)
                 cursor = upper
+            if location_unavailable:
+                break
     tables["location"] = pd.DataFrame(location_rows)
 
     missing_car = [number for number in lap_drivers if tables["car_data"].empty or
                    not tables["car_data"]["driver_number"].astype(str).eq(number).any()]
     if missing_car:
         raise OpenF1AcquisitionError(f"OpenF1 car_data is empty for drivers with laps: {', '.join(missing_car)}.")
+    provenance = {**client.provenance, "optional_failures": optional_failures}
     return {"session": session_meta, "tables": tables, "raw_artifacts": client.raw_artifacts,
-            "provenance": client.provenance}
+            "provenance": provenance}
