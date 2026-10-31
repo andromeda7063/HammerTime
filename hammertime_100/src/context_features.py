@@ -156,7 +156,7 @@ def prepare_context_features(
     if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA):
         raise ValueError(f"Unsupported feature schema {schema!r}.")
     if schema == LEGACY_SCHEMA:
-        return aligned_df.copy()
+        return aligned_df
     if sample_hz <= 0 or mini_sectors <= 0:
         raise ValueError("sample_hz and mini_sectors must be positive.")
     required = {"RaceId", "Driver", "TimeSec", "MiniSector", "Speed"}
@@ -164,22 +164,29 @@ def prepare_context_features(
     if missing:
         raise ValueError(f"Context feature input is missing columns: {sorted(missing)}")
 
-    result = aligned_df.copy().reset_index(drop=True)
+    # Build a local frame without carrying potentially large provenance attrs
+    # into another deep copy. The source frame and its attrs remain untouched.
+    result = pd.DataFrame(aligned_df, copy=False)
+    result.attrs = {}
+    result = result.reset_index(drop=True)
     race_ids = result["RaceId"].astype(str)
-    circuit_ids, lap_lengths = [], []
-    for race_id in race_ids:
-        metadata = sessions_by_race.get(race_id)
-        if metadata is None:
-            raise ValueError(f"No circuit metadata supplied for race {race_id!r}.")
+    normalized_metadata = {}
+    for race_id, metadata in sessions_by_race.items():
+        key = str(race_id)
         circuit_id = metadata.get("circuit_id")
         lap_length = _finite(metadata.get("lap_length_m"))
         if circuit_id is None or not str(circuit_id).strip() or lap_length is None or lap_length <= 0:
-            raise ValueError(f"Invalid circuit metadata for race {race_id!r}.")
-        circuit_ids.append(str(circuit_id))
-        lap_lengths.append(lap_length)
+            raise ValueError(f"Invalid circuit metadata for race {key!r}.")
+        normalized_metadata[key] = (str(circuit_id), lap_length)
+    observed_races = set(race_ids.unique())
+    unknown_races = observed_races.difference(normalized_metadata)
+    if unknown_races:
+        raise ValueError(f"No circuit metadata supplied for race IDs: {sorted(unknown_races)}")
+    circuit_map = {race: metadata[0] for race, metadata in normalized_metadata.items()}
+    lap_length_map = {race: metadata[1] for race, metadata in normalized_metadata.items()}
     result["RaceId"] = race_ids
-    result["CircuitId"] = circuit_ids
-    result["lap_length_m"] = np.asarray(lap_lengths, dtype=np.float64)
+    result["CircuitId"] = race_ids.map(circuit_map).to_numpy()
+    result["lap_length_m"] = race_ids.map(lap_length_map).to_numpy(dtype=np.float64)
 
     sectors = pd.to_numeric(result["MiniSector"], errors="coerce").to_numpy(dtype=float)
     valid_sector = np.isfinite(sectors)
@@ -202,36 +209,56 @@ def prepare_context_features(
         speeds = pd.to_numeric(result["Speed"], errors="coerce").to_numpy(dtype=float) / 3.6
         x = pd.to_numeric(result["X"], errors="coerce").to_numpy(dtype=float)
         y = pd.to_numeric(result["Y"], errors="coerce").to_numpy(dtype=float)
-        geometry = np.zeros(len(result), dtype=float)
-        for _, group in result.groupby(["RaceId", "Driver"], sort=False, dropna=False):
-            indexes = group.sort_values("TimeSec", kind="stable").index.to_numpy()
-            positions = result.index.get_indexer(indexes)
-            for i in range(2, len(positions)):
-                p0, p1, p2 = positions[i - 2:i + 1]
-                if not all(np.isfinite(value) for value in (x[p0], y[p0], x[p1], y[p1], x[p2], y[p2],
-                                                             times[p0], times[p1], times[p2],
-                                                             speeds[p0], speeds[p1], speeds[p2])):
-                    continue
-                dt0, dt1 = times[p1] - times[p0], times[p2] - times[p1]
-                expected_dt = 1.0 / float(sample_hz)
-                tolerance = max(1e-6, expected_dt * 0.05)
-                if abs(dt0 - expected_dt) > tolerance or abs(dt1 - expected_dt) > tolerance:
-                    continue
-                dx0, dy0 = x[p1] - x[p0], y[p1] - y[p0]
-                dx1, dy1 = x[p2] - x[p1], y[p2] - y[p1]
-                if math.hypot(dx0, dy0) <= 1e-6 or math.hypot(dx1, dy1) <= 1e-6:
-                    continue
-                heading_change = math.atan2(dx0 * dy1 - dy0 * dx1, dx0 * dx1 + dy0 * dy1)
-                distance = 0.5 * (speeds[p0] + speeds[p1]) * dt0 + 0.5 * (speeds[p1] + speeds[p2]) * dt1
-                if not math.isfinite(distance) or distance <= 1e-6:
-                    continue
-                curvature = abs(heading_change / distance)
-                lateral_accel = speeds[p2] ** 2 * curvature
-                if math.isfinite(curvature) and math.isfinite(lateral_accel):
-                    geometry[p2] = curvature
-                    result.iloc[p2, result.columns.get_loc("GeometrySupported")] = 1.0
-                    result.iloc[p2, result.columns.get_loc("lateral_accel_proxy")] = lateral_accel
-        result["abs_curvature"] = geometry
+        row_position = np.arange(len(result), dtype=np.int64)
+        trajectory = pd.DataFrame({
+            "RaceId": result["RaceId"].to_numpy(),
+            "Driver": result["Driver"].to_numpy(),
+            "TimeSec": times,
+            "SpeedMps": speeds,
+            "X": x,
+            "Y": y,
+            "_row_position": row_position,
+        }).sort_values(["RaceId", "Driver", "TimeSec"], kind="stable")
+        grouped = trajectory.groupby(["RaceId", "Driver"], sort=False, dropna=False)
+        previous1 = grouped[["TimeSec", "SpeedMps", "X", "Y"]].shift(1)
+        previous2 = grouped[["TimeSec", "SpeedMps", "X", "Y"]].shift(2)
+        t0 = previous2["TimeSec"].to_numpy(dtype=float)
+        t1 = previous1["TimeSec"].to_numpy(dtype=float)
+        t2 = trajectory["TimeSec"].to_numpy(dtype=float)
+        v0 = previous2["SpeedMps"].to_numpy(dtype=float)
+        v1 = previous1["SpeedMps"].to_numpy(dtype=float)
+        v2 = trajectory["SpeedMps"].to_numpy(dtype=float)
+        x0, y0 = previous2["X"].to_numpy(dtype=float), previous2["Y"].to_numpy(dtype=float)
+        x1, y1 = previous1["X"].to_numpy(dtype=float), previous1["Y"].to_numpy(dtype=float)
+        x2 = trajectory["X"].to_numpy(dtype=float)
+        y2 = trajectory["Y"].to_numpy(dtype=float)
+        dt0, dt1 = t1 - t0, t2 - t1
+        expected_dt = 1.0 / float(sample_hz)
+        tolerance = max(1e-6, expected_dt * 0.05)
+        dx0, dy0 = x1 - x0, y1 - y0
+        dx1, dy1 = x2 - x1, y2 - y1
+        segment0 = np.hypot(dx0, dy0)
+        segment1 = np.hypot(dx1, dy1)
+        distance = 0.5 * (v0 + v1) * dt0 + 0.5 * (v1 + v2) * dt1
+        finite = np.isfinite(np.column_stack((t0, t1, t2, v0, v1, v2, x0, y0, x1, y1, x2, y2))).all(axis=1)
+        supported = finite & (np.abs(dt0 - expected_dt) <= tolerance)
+        supported &= np.abs(dt1 - expected_dt) <= tolerance
+        supported &= (segment0 > 1e-6) & (segment1 > 1e-6) & (distance > 1e-6)
+        heading_change = np.arctan2(dx0 * dy1 - dy0 * dx1, dx0 * dx1 + dy0 * dy1)
+        curvature = np.zeros(len(trajectory), dtype=np.float64)
+        curvature[supported] = np.abs(heading_change[supported] / distance[supported])
+        lateral_accel = np.zeros(len(trajectory), dtype=np.float64)
+        lateral_accel[supported] = v2[supported] ** 2 * curvature[supported]
+        support_by_row = np.zeros(len(result), dtype=np.float64)
+        curvature_by_row = np.zeros(len(result), dtype=np.float64)
+        lateral_by_row = np.zeros(len(result), dtype=np.float64)
+        original_positions = trajectory["_row_position"].to_numpy(dtype=np.int64)
+        support_by_row[original_positions[supported]] = 1.0
+        curvature_by_row[original_positions[supported]] = curvature[supported]
+        lateral_by_row[original_positions[supported]] = lateral_accel[supported]
+        result["GeometrySupported"] = support_by_row
+        result["abs_curvature"] = curvature_by_row
+        result["lateral_accel_proxy"] = lateral_by_row
 
     result["SpeedDeltaToTrainReference"] = 0.0
     result["ReferenceAvailable"] = 0.0
@@ -251,23 +278,24 @@ def fit_context_calibration(
     if missing:
         raise ValueError(f"Calibration input is missing columns: {sorted(missing)}")
     frame_keys = _membership_keys(train_input_membership)
-    race_values = aligned_df["RaceId"].astype(str)
-    time_values = pd.to_numeric(aligned_df["TimeSec"], errors="coerce")
-    def is_training_frame(race, time) -> bool:
-        if _finite(time) is None or pd.isna(race):
-            return False
-        return (str(race), round(float(time), 9)) in frame_keys
-
-    selected = np.fromiter((is_training_frame(race, time)
-                            for race, time in zip(race_values, time_values)),
-                           dtype=bool, count=len(aligned_df))
-    active = aligned_df.get("IsValid", pd.Series(True, index=aligned_df.index)).map(lambda value: _truthy(value, True))
-    not_pit = ~aligned_df.get("IsPitLap", pd.Series(False, index=aligned_df.index)).map(_truthy)
-    speeds = pd.to_numeric(aligned_df["Speed"], errors="coerce")
-    sectors = pd.to_numeric(aligned_df["MiniSector"], errors="coerce")
+    frame = pd.DataFrame(aligned_df, copy=False)
+    frame.attrs = {}
+    race_values = frame["RaceId"].astype(str)
+    time_values = pd.to_numeric(frame["TimeSec"], errors="coerce")
+    membership_index = pd.MultiIndex.from_tuples(sorted(frame_keys), names=["RaceId", "TimeSec"])
+    aligned_index = pd.MultiIndex.from_arrays(
+        [race_values.to_numpy(), np.round(time_values.to_numpy(dtype=float), 9)],
+        names=["RaceId", "TimeSec"],
+    )
+    selected = aligned_index.isin(membership_index)
+    active = frame.get("IsValid", pd.Series(True, index=frame.index)).fillna(True).astype(bool)
+    not_pit = ~frame.get("IsPitLap", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+    speeds = pd.to_numeric(frame["Speed"], errors="coerce")
+    sectors = pd.to_numeric(frame["MiniSector"], errors="coerce")
     usable = selected & active.to_numpy(dtype=bool) & not_pit.to_numpy(dtype=bool)
     usable &= np.isfinite(speeds.to_numpy(dtype=float)) & np.isfinite(sectors.to_numpy(dtype=float))
-    work = aligned_df.loc[usable, ["RaceId", "TimeSec", "Driver", "CircuitId"]].copy()
+    work = frame.loc[usable, ["RaceId", "TimeSec", "Driver", "CircuitId"]].copy()
+    work.attrs = {}
     work["MiniSector"] = sectors.loc[usable].astype(int).to_numpy()
     work["Speed"] = speeds.loc[usable].to_numpy(dtype=float)
     work = work.drop_duplicates(["RaceId", "TimeSec", "Driver"])
@@ -290,7 +318,9 @@ def fit_context_calibration(
 
 def apply_context_calibration(aligned_df: pd.DataFrame, calibration: Mapping) -> pd.DataFrame:
     """Apply only an exact circuit/mini-sector reference; unseen keys stay unsupported."""
-    result = aligned_df.copy()
+    result = pd.DataFrame(aligned_df, copy=False)
+    result.attrs = {}
+    result = result.reset_index(drop=True)
     refs = {}
     for item in calibration.get("references", []):
         key = (str(item["circuit_id"]), int(item["mini_sector"]))
@@ -305,14 +335,21 @@ def apply_context_calibration(aligned_df: pd.DataFrame, calibration: Mapping) ->
     deltas = np.zeros(len(result), dtype=np.float32)
     supported = np.zeros(len(result), dtype=np.float32)
     if "CircuitId" in result.columns:
-        circuits = result["CircuitId"].astype(str).to_numpy()
-        for i, (circuit, sector, speed) in enumerate(zip(circuits, sectors, speeds)):
-            if pd.isna(sector) or not np.isfinite(speed):
-                continue
-            reference = refs.get((circuit, int(sector)))
-            if reference is not None:
-                deltas[i] = float(speed) - reference
-                supported[i] = 1.0
+        circuit_values = result["CircuitId"].astype(str)
+        sector_values = sectors.fillna(-1).astype(int)
+        reference_index = pd.MultiIndex.from_tuples(list(refs), names=["CircuitId", "MiniSector"])
+        reference_array = np.asarray(list(refs.values()), dtype=float)
+        aligned_keys = pd.MultiIndex.from_arrays(
+            [circuit_values.to_numpy(), sector_values.to_numpy()],
+            names=["CircuitId", "MiniSector"],
+        )
+        reference_positions = reference_index.get_indexer(aligned_keys)
+        reference_values = np.full(len(result), np.nan, dtype=float)
+        found_reference = reference_positions >= 0
+        reference_values[found_reference] = reference_array[reference_positions[found_reference]]
+        available = np.isfinite(reference_values) & np.isfinite(speeds.to_numpy(dtype=float))
+        deltas[available] = speeds.to_numpy(dtype=float)[available] - reference_values[available]
+        supported[available] = 1.0
     result["SpeedDeltaToTrainReference"] = deltas
     result["ReferenceAvailable"] = supported
     return result

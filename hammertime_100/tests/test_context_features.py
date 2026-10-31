@@ -64,7 +64,9 @@ class ContextFeatureTests(unittest.TestCase):
         self.assertEqual(len(metadata["raw_units"]), 19)
 
     def test_context_preparation_is_causal_and_preserves_rows(self):
+        self.rows.attrs["provenance"] = {"marker": "keep caller attrs"}
         prepared = prepare_context_features(self.rows, self.session_map)
+        self.assertEqual(self.rows.attrs["provenance"], {"marker": "keep caller attrs"})
         self.assertEqual(len(prepared), len(self.rows))
         self.assertEqual(prepared["TimeSec"].tolist(), self.rows["TimeSec"].tolist())
         self.assertEqual(prepared["GeometrySupported"].tolist(), [0.0, 0.0, 1.0, 1.0])
@@ -88,7 +90,9 @@ class ContextFeatureTests(unittest.TestCase):
         self.assertEqual(calibration["training_frame_count"], 2)
         self.assertEqual(calibration["training_row_count"], 2)
         self.assertEqual(calibration["references"][0]["median_speed_kph"], 105.0)
+        prepared.attrs["provenance"] = {"marker": "keep caller attrs"}
         applied = apply_context_calibration(prepared, calibration)
+        self.assertEqual(prepared.attrs["provenance"], {"marker": "keep caller attrs"})
         self.assertEqual(applied.loc[2, "SpeedDeltaToTrainReference"], 0.0)
         self.assertEqual(applied.loc[2, "ReferenceAvailable"], 0.0)
         refit_unseen = prepared.copy()
