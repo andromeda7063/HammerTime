@@ -64,7 +64,7 @@ The multi-session preparation runner must demonstrate that each session's `lap_l
 
 ## Validation-only training entry point
 
-`train_prepared.py` loads only a verified `prepared_cohort.pkl`, reconstructs the existing train/validation loaders from its frozen data and config, and checks that the rebuilt split membership matches the prepared membership. It then calls the declared ablation runner with one candidate and no test loader. The runner records the run as a pilot; it reports validation metrics only and does not score the test partition. `--seed` must match the seed frozen into the prepared config. `--epochs`, when supplied, is an epoch cap and remains pilot evidence.
+`train_prepared.py` loads only a verified `prepared_cohort.pkl`, reconstructs the existing train/validation loaders from its frozen data and config, and checks that the rebuilt split membership matches the prepared membership. It then calls the declared ablation runner with one candidate and no test loader. The runner records the run as a pilot; it reports validation metrics only and does not score the test partition. The frozen `data.random_seed` continues to define data construction; `--seed` selects the model/training run seed without changing the prepared config or split. `--epochs`, when supplied, is an epoch cap and remains pilot evidence.
 
 Example using the expanded temporal cohort and the full-history candidate:
 

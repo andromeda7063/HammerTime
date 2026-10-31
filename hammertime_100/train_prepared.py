@@ -58,11 +58,6 @@ def train_prepared(artifact_path: Path, config_path: Path, output_dir: Path,
     selected_seed = frozen_seed if seed is None else seed
     if isinstance(selected_seed, bool) or not isinstance(selected_seed, int) or selected_seed < 0:
         raise ValueError("--seed must be a non-negative integer.")
-    if selected_seed != frozen_seed:
-        raise ValueError(
-            f"--seed {selected_seed} differs from the frozen data.random_seed {frozen_seed}; "
-            "prepare a separately frozen cohort to change the split seed."
-        )
     if epochs is not None and (isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1):
         raise ValueError("--epochs must be a positive integer.")
 
