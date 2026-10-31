@@ -24,14 +24,21 @@ from train import train_model
 
 
 ABLATION_CANDIDATES = [
-    {"name": "current_k3", "temporal_kernel": 3, "temporal_mode": "conv", "graph": "current"},
-    {"name": "self_loop_only_k3", "temporal_kernel": 3, "temporal_mode": "conv", "graph": "self_loop_only"},
-    {"name": "temporal_kernel_1", "temporal_kernel": 1, "temporal_mode": "conv", "graph": "current"},
-    {"name": "temporal_kernel_10", "temporal_kernel": 10, "temporal_mode": "conv", "graph": "current"},
+    {"name": "current_k3", "temporal_kernel": 3, "temporal_mode": "conv",
+     "graph": "current", "loss": "mae"},
+    {"name": "self_loop_only_k3", "temporal_kernel": 3, "temporal_mode": "conv",
+     "graph": "self_loop_only", "loss": "mae"},
+    {"name": "temporal_kernel_1", "temporal_kernel": 1, "temporal_mode": "conv",
+     "graph": "current", "loss": "mae"},
+    {"name": "temporal_kernel_10", "temporal_kernel": 10, "temporal_mode": "conv",
+     "graph": "current", "loss": "mae"},
     {"name": "constant_edge_attribute_k3", "temporal_kernel": 3,
-     "temporal_mode": "conv", "graph": "constant_edge_attribute", "constant": 1.0},
+     "temporal_mode": "conv", "graph": "constant_edge_attribute", "constant": 1.0, "loss": "mae"},
     {"name": "gated_dilated_full_history", "temporal_kernel": 3,
-     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4], "graph": "current"},
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4], "graph": "current", "loss": "mae"},
+    {"name": "gated_dilated_mse", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "graph": "current", "loss": "mse"},
 ]
 
 
@@ -459,6 +466,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                     "temporal_dilations", [1, 2, 4]
                 )
                 trial_config["data"]["random_seed"] = int(seed)
+                trial_config["train"]["loss"] = candidate["loss"]
                 trial_dir = study_dir / f"candidate_{candidate_index:02d}" / f"seed_{seed}"
                 trial_dir.mkdir(parents=True, exist_ok=False)
                 trial_config["train"]["checkpoint_path"] = str(trial_dir / "best.pt")
@@ -483,6 +491,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                     raise FloatingPointError("Reloaded best checkpoint does not reproduce its validation MAE.")
                 results["runs"].append({
                     "candidate": candidate["name"], "candidate_index": candidate_index,
+                    "training_loss": candidate["loss"],
                     "seed": int(seed), "validation_metrics": metrics,
                     "best_checkpoint_validation_mae_sec": float(best_val_mae),
                     "epochs": len(history), "parameter_count": parameter_count,
@@ -507,6 +516,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
             candidate_scores.append(float(np.mean(values)))
             candidate_summaries.append({
                 "candidate": candidate["name"],
+                "training_loss": candidate["loss"],
                 "seed_mae_sec": values,
                 "mean_validation_mae_sec": float(np.mean(values)),
                 "std_validation_mae_sec": float(np.std(values, ddof=0)),
