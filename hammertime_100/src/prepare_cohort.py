@@ -334,6 +334,12 @@ def load_prepared_cohort(artifact_path: str | Path, manifest_path: str | Path | 
         raise ValueError("Prepared cohort sample membership hash is invalid.")
     if payload.get("memberships") != manifest.get("split_membership"):
         raise ValueError("Prepared cohort split membership differs from its manifest.")
+    membership_hashes = {
+        name: _sha256_bytes(_canonical_json(rows))
+        for name, rows in payload.get("memberships", {}).items()
+    }
+    if membership_hashes != manifest.get("split_membership_sha256"):
+        raise ValueError("Prepared cohort split-membership hashes do not match their samples.")
     provenance.update({
         "prepared_artifact_path": str(artifact_path),
         "prepared_artifact_sha256": manifest["prepared_artifact_sha256"],
