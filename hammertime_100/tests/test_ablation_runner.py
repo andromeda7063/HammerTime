@@ -123,7 +123,7 @@ class AblationRunnerTests(unittest.TestCase):
             source = source_provenance(Path(temporary))
             with self.assertRaisesRegex(ValueError, "at least three matched seeds"):
                 ablation.run_ablation_study(
-                    self.train_loader, self.val_loader, config(), torch.device("cpu"),
+                    self.train_loader, self.val_loader, config(), "cpu",
                     Path(temporary) / "complete", source, "No test access.",
                     seeds=(42, 43), mode="complete",
                 )
@@ -175,7 +175,7 @@ class AblationRunnerTests(unittest.TestCase):
 
             with patch.object(ablation, "train_model", side_effect=fake_train):
                 prereg, result = ablation.run_ablation_study(
-                    self.train_loader, self.val_loader, config(), torch.device("cpu"),
+                    self.train_loader, self.val_loader, config(), "cpu",
                     study_path, source, exposure, seeds=(42, 43, 44),
                     mode="pilot", max_runs=1, epoch_cap=1, candidate_indices=(5,),
                 )

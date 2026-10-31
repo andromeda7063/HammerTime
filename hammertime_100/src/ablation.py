@@ -333,6 +333,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                        mode="complete", max_runs=None, epoch_cap=None,
                        candidate_indices=None):
     """Run a pre-registered candidate prefix; this API accepts no test loader."""
+    device = torch.device(device)
     if mode not in ("pilot", "complete"):
         raise ValueError("mode must be 'pilot' or 'complete'.")
     if not isinstance(source_provenance, dict) or not source_provenance:
