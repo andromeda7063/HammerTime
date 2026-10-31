@@ -52,10 +52,13 @@ class ContextGraphViewTests(unittest.TestCase):
         self.assertEqual(tuple(outputs[0].x.shape), (2, 9))
         self.assertEqual(tuple(outputs[1].x.shape), (2, 19))
         self.assertEqual(outputs[0].edge_index.tolist(), [[0], [1]])
-        self.assertEqual(outputs[1].edge_attr.tolist(), [[0.4]])
+        self.assertAlmostEqual(outputs[1].edge_attr.item(), 0.4)
         self.assertEqual(outputs[2].edge_index.tolist(), [[1], [0]])
-        self.assertEqual(outputs[2].edge_attr.tolist(), [[0.7]])
-        self.assertEqual(outputs[3].edge_attr.tolist(), [[0.7, 10.0, -2.0, 0.8]])
+        torch.testing.assert_close(outputs[2].edge_attr, torch.tensor([[0.7]], dtype=torch.float32))
+        torch.testing.assert_close(
+            outputs[3].edge_attr,
+            torch.tensor([[0.7, 10.0, -2.0, 0.8]], dtype=torch.float32),
+        )
         self.assertEqual(tuple(outputs[4].edge_index.shape), (2, 0))
 
 
