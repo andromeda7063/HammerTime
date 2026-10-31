@@ -61,3 +61,19 @@ These are provider table counts only. They say nothing about valid laps, aligned
 ## Pending decisions and interpretation
 
 The multi-session preparation runner must demonstrate that each session's `lap_length_m`, cache root, processed output root, and provider identity are actually honored before any results are accepted. Existing temporal concatenation is a development protocol whose chronology and outcome-boundary interpretation require explicit reporting. The race-heldout cohort's new test event is Hungary; any previously exposed Monza result remains exposed and must not be represented as untouched test evidence. Training on additional races may help estimate model parameters, but no R² improvement is guaranteed; report the unchanged metrics and acceptance gates after the preprocessing manifest is frozen.
+
+## Validation-only training entry point
+
+`train_prepared.py` loads only a verified `prepared_cohort.pkl`, reconstructs the existing train/validation loaders from its frozen data and config, and checks that the rebuilt split membership matches the prepared membership. It then calls the declared ablation runner with one candidate and no test loader. The runner records the run as a pilot; it reports validation metrics only and does not score the test partition. `--seed` must match the seed frozen into the prepared config. `--epochs`, when supplied, is an epoch cap and remains pilot evidence.
+
+Example using the expanded temporal cohort and the full-history candidate:
+
+```bash
+uv run --frozen python train_prepared.py \
+  --prepared .local/research-history/2026-10-31/openf1-2023-multi-session-temporal-cohort/prepared_cohort.pkl \
+  --config configs/openf1_2023_multi_session_temporal.yaml \
+  --output .local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-pilot \
+  --candidate gated_dilated_full_history --epochs 25 --seed 42 --device cpu
+```
+
+Run only after `src/prepare_cohort.py` has produced the authentic prepared artifact and manifest. The output directory must be new. Use a separate directory for each candidate or repeat; do not combine results from the temporal and race-heldout configs.
