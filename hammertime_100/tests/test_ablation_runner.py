@@ -153,7 +153,7 @@ class AblationRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside the allowlist"):
                 ablation._validate_source_provenance(source, altered)
 
-    def test_targeted_gated_pilot_preregisters_before_run_and_reloads_best_checkpoint(self):
+    def test_targeted_gated_mse_candidate_sets_objective_and_reloads_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             study_path = directory / "pilot"
@@ -161,6 +161,7 @@ class AblationRunnerTests(unittest.TestCase):
             exposure = "Prior report exposed held-out metrics; this pilot does not access test data."
 
             def fake_train(model, train_loader, val_loader, trial_config, device):
+                self.assertEqual(trial_config["train"]["loss"], "mse")
                 prereg = study_path / "preregistration.json"
                 self.assertTrue(prereg.is_file())
                 self.assertEqual(json.loads(prereg.read_text())["status"], "preregistered")
@@ -177,7 +178,7 @@ class AblationRunnerTests(unittest.TestCase):
                 prereg, result = ablation.run_ablation_study(
                     self.train_loader, self.val_loader, config(), "cpu",
                     study_path, source, exposure, seeds=(7,),
-                    mode="pilot", max_runs=1, epoch_cap=1, candidate_indices=(5,),
+                    mode="pilot", max_runs=1, epoch_cap=1, candidate_indices=(6,),
                 )
 
             self.assertEqual(prereg["max_runs"], 1)
@@ -191,7 +192,8 @@ class AblationRunnerTests(unittest.TestCase):
             self.assertIsNone(result["candidate_selection"])
             self.assertEqual(len(result["runs"]), 1)
             run = result["runs"][0]
-            self.assertEqual(run["candidate"], "gated_dilated_full_history")
+            self.assertEqual(run["candidate"], "gated_dilated_mse")
+            self.assertEqual(run["training_loss"], "mse")
             self.assertEqual(run["seed"], 7)
             self.assertEqual(run["validation_metrics"]["sample_count"], 4)
             self.assertGreater(run["parameter_count"], 0)

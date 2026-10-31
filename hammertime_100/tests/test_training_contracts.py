@@ -13,7 +13,7 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from train import evaluate_val_mae, train_model
+from train import evaluate_val_mae, masked_mse_loss, train_model
 
 
 class TinyLoader(list):
@@ -54,6 +54,12 @@ class TrainingContractTests(unittest.TestCase):
     def config(self, directory):
         return {"train": {"max_epochs": 1,
                           "checkpoint_path": str(Path(directory) / "best.pt")}}
+
+    def test_masked_mse_uses_only_valid_targets(self):
+        predictions = torch.tensor([[1.0, 1_000_000.0]])
+        targets = torch.tensor([[0.0, -1_000_000.0]])
+        mask = torch.tensor([[True, False]])
+        self.assertEqual(masked_mse_loss(predictions, targets, mask).item(), 1.0)
 
     def test_validation_rejects_empty_loader(self):
         with self.assertRaisesRegex(ValueError, "valid target"):
