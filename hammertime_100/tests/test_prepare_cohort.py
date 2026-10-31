@@ -21,13 +21,13 @@ import prepare_cohort
 from graph import remap_cohort_driver_nodes
 
 
-def make_graphs(race_id, drivers, times=20):
+def make_graphs(race_id, drivers, times=20, num_nodes=20):
     local = {driver: index for index, driver in enumerate(drivers)}
     snapshots = []
     for step in range(times):
-        x = torch.zeros((20, 9), dtype=torch.float32)
-        mask = torch.zeros(20, dtype=torch.bool)
-        names = [None] * 20
+        x = torch.zeros((num_nodes, 9), dtype=torch.float32)
+        mask = torch.zeros(num_nodes, dtype=torch.bool)
+        names = [None] * num_nodes
         for driver, index in local.items():
             x[index, 0] = float(ord(driver[0]))
             mask[index] = True
@@ -108,34 +108,34 @@ class PrepareCohortTests(unittest.TestCase):
             )
             self.assertEqual(checked_manifest["prepared_manifest_sha256"],
                              manifest["prepared_manifest_sha256"])
-            self.assertEqual(payload["driver_to_idx"], {"AA": 0, "BB": 1, "CC": 0, "DD": 1})
+            self.assertEqual(payload["driver_to_idx"], {"AA": 0, "BB": 1, "CC": 2, "DD": 3})
             by_race = {snapshot.race_id: snapshot for snapshot in payload["snapshots"]
                        if snapshot.time_sec == 0.0}
-            self.assertEqual(by_race["race-b"].driver_names[:3], ["CC", "BB", None])
-            self.assertEqual(by_race["race-b"].edge_index.tolist(), [[1], [0]])
+            self.assertEqual(by_race["race-b"].driver_names[:4], [None, "BB", "CC", None])
+            self.assertEqual(by_race["race-b"].edge_index.tolist(), [[1], [2]])
             self.assertEqual(payload["provenance"]["prepared_artifact_sha256"],
                              manifest["prepared_artifact_sha256"])
             with self.assertRaises(FileExistsError):
                 prepare_cohort.prepare_cohort(config_path, output_dir)
 
-    def test_substitutes_reuse_slots_for_more_than_twenty_driver_identities(self):
+    def test_distinct_driver_identities_fit_explicit_cohort_capacity(self):
         first = [f"D{index:02d}" for index in range(20)]
         second = [f"D{index:02d}" for index in range(1, 21)]
-        first_graphs, first_map = make_graphs("race-a", first, times=1)
-        second_graphs, second_map = make_graphs("race-b", second, times=1)
+        first_graphs, first_map = make_graphs("race-a", first, times=1, num_nodes=22)
+        second_graphs, second_map = make_graphs("race-b", second, times=1, num_nodes=22)
 
         driver_to_idx = remap_cohort_driver_nodes(
             first_graphs + second_graphs,
-            {"race-a": first_map, "race-b": second_map}, num_nodes=20,
+            {"race-a": first_map, "race-b": second_map}, num_nodes=22,
         )
 
         self.assertEqual(len(driver_to_idx), 21)
-        self.assertLess(max(driver_to_idx.values()), 20)
+        self.assertLess(max(driver_to_idx.values()), 22)
+        self.assertEqual(len(set(driver_to_idx.values())), 21)
         self.assertEqual(len({driver_to_idx[driver] for driver in first}), 20)
         self.assertEqual(len({driver_to_idx[driver] for driver in second}), 20)
-        self.assertEqual(driver_to_idx["D00"], driver_to_idx["D20"])
-        self.assertEqual(len(first_graphs[0].driver_names), 20)
-        self.assertEqual(len(second_graphs[0].driver_names), 20)
+        self.assertEqual(len(first_graphs[0].driver_names), 22)
+        self.assertEqual(len(second_graphs[0].driver_names), 22)
 
 
 if __name__ == "__main__":

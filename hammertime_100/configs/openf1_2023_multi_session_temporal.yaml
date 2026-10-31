@@ -43,7 +43,8 @@ preprocess:
   flag_safety_car: true
   flag_pit_laps: true
 graph:
-  num_nodes: 20
+  # Unique driver numbers across the three sessions include 2023 substitutions.
+  num_nodes: 22
   edge_threshold_sec: 2.0
   rbf_sigma: 1.0
   node_features: [velocity, throttle, tyre_compound, tyre_age, mini_sector_idx]
