@@ -22,7 +22,7 @@ Every parameter tuned or assumed from `claude.md` and `claude_arc.md` is recorde
 
 Values in this ledger describe configuration and label semantics. They do not establish predictive performance or physical validation results. See [`hammertime_100/REPORT.md`](hammertime_100/REPORT.md) for source status and verification limits.
 
-## Overnight audit additions — 2026-10-30
+## Implementation additions — 2026-10-30
 
 The entries above are preserved as historical configuration records.
 
@@ -36,7 +36,7 @@ The entries above are preserved as historical configuration records.
 | A18 | Hyperparameter selection | One configured fit; no explicit study | Optional declared model/optimizer candidates, scored by mean validation MAE across declared seeds; retain the first seed | `hammertime_100/src/tuning.py`, `configs/default.yaml` | Hold splits, scaling, targets, metrics and gates fixed. Test/physics results cannot select a candidate. The search remains unmeasured until authentic telemetry is available. |
 | A19 | Presentation timestamp matching | NumPy default relative tolerance | Fixed absolute tolerance with `rtol=0` | `hammertime_100/run_pipeline.py`, `dashboard/app.py` | A larger session timestamp must not widen the time slice and mix observations from adjacent frames. Existing absolute tolerances are preserved. |
 
-## Continuation additions — 2026-10-30
+## Follow-up additions — 2026-10-30
 
 | ID | Parameter or contract | Previous behavior | Audited behavior | Location | Rationale |
 |---|---|---|---|---|---|

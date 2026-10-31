@@ -76,9 +76,9 @@ Focused contract tests are in `tests/test_dataset_contracts.py` and `tests/test_
 - The dashboard reads files from the default configured output locations. Editing configuration paths may require corresponding dashboard path changes.
 - This report reflects static source review only. Dependency resolution, imports, data contracts under real sessions, training, model scoring, dashboard rendering, and artifact generation have not been executed here.
 
-## Overnight source audit — 2026-10-30
+## Source and behavior updates — 2026-10-30
 
-The historical source-review record above is preserved. The latest audit and exact verification evidence are in [`../MORNING_REPORT.md`](../MORNING_REPORT.md); unresolved scientific questions are in [`../OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md).
+The source-review record above is preserved. The implementation summary and verification limits are in [`../RESEARCH_CHANGELOG.md`](../RESEARCH_CHANGELOG.md); unresolved scientific questions are in [`../OPEN_QUESTIONS.md`](../OPEN_QUESTIONS.md).
 
 The audit removes formula-generated sector durations and stale-data/session fallbacks. Targets now use observed distance boundary crossings, and preprocessing uses shared session time and observed lap origins. Missing metadata remains invalid. These correctness changes invalidate any unproven numerical interpretation of the historical checkpoint or example frontend content.
 

@@ -70,7 +70,7 @@ The optional `tuning` section declares three learning rates and three seeds; nor
 
 Each ordinary run trains the configured model afresh. Existing checkpoints, histories and evaluation reports are copied to `data/processed/artifact_history/` before replacement. A checkpoint merely existing is not proof it belongs to the current experiment.
 
-No tuned winner is claimed by the overnight audit: live FastF1 did not supply usable laps/telemetry. Session-wide clean-air references also make the present labels retrospective calibrations; strict prospective forecasting needs a separately agreed reference-fitting protocol. See [the morning report](MORNING_REPORT.md) and [open questions](OPEN_QUESTIONS.md).
+No tuned winner is claimed: live FastF1 did not supply usable laps/telemetry. Session-wide clean-air references also make the present labels retrospective calibrations; strict prospective forecasting needs a separately agreed reference-fitting protocol. See the [research record](RESEARCH_CHANGELOG.md) and [open questions](OPEN_QUESTIONS.md).
 
 ## Dashboard
 
@@ -112,7 +112,7 @@ Focused contract tests are being added under `hammertime_100/tests/`. To run the
 uv run --frozen python -m unittest discover -s hammertime_100/tests
 ```
 
-The tests use small in-memory fixtures and do not require FastF1 data or network access. They require the declared project dependencies. The overnight audit ran the expanded suite, including dashboard and checkpoint integration contracts; exact commands and results are in [MORNING_REPORT.md](MORNING_REPORT.md).
+The tests use small in-memory fixtures and do not require FastF1 data or network access. They require the declared project dependencies. The recorded offline suite included dashboard and checkpoint integration contracts; verification scope and limitations are in the [research record](RESEARCH_CHANGELOG.md).
 
 ## Project records
 

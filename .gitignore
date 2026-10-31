@@ -83,3 +83,6 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+# Local research execution history and archived run records
+.local/research-history/

@@ -1,4 +1,4 @@
-# Open questions from the overnight audit
+# Open research questions
 
 Recorded 2026-10-30 (Asia/Kolkata). These require scientific or product decisions; the audit does not tune around them.
 
