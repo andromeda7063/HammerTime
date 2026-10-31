@@ -330,7 +330,8 @@ def _write_json(path, value):
 
 def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                        source_provenance, test_exposure, seeds=(42, 43, 44),
-                       mode="complete", max_runs=None, epoch_cap=None):
+                       mode="complete", max_runs=None, epoch_cap=None,
+                       candidate_indices=None):
     """Run a pre-registered candidate prefix; this API accepts no test loader."""
     if mode not in ("pilot", "complete"):
         raise ValueError("mode must be 'pilot' or 'complete'.")
@@ -352,7 +353,18 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
     prepared_manifest = prepared_validation["manifest"]
     if not isinstance(getattr(val_loader, "sampler", None), SequentialSampler):
         raise ValueError("Ablation requires the existing sequential validation loader.")
-    total_runs = len(ABLATION_CANDIDATES) * len(seeds)
+    if candidate_indices is None:
+        registered_candidate_indices = list(range(len(ABLATION_CANDIDATES)))
+    else:
+        if (not isinstance(candidate_indices, (list, tuple)) or not candidate_indices
+                or any(isinstance(index, bool) or not isinstance(index, int)
+                       or not 0 <= index < len(ABLATION_CANDIDATES) for index in candidate_indices)
+                or len(set(candidate_indices)) != len(candidate_indices)):
+            raise ValueError("candidate_indices must be a non-empty sequence of unique valid candidate indexes.")
+        registered_candidate_indices = list(candidate_indices)
+    if mode == "complete" and registered_candidate_indices != list(range(len(ABLATION_CANDIDATES))):
+        raise ValueError("A complete study must include every declared candidate.")
+    total_runs = len(registered_candidate_indices) * len(seeds)
     run_limit = total_runs if max_runs is None else int(max_runs)
     if not 1 <= run_limit <= total_runs:
         raise ValueError(f"max_runs must be in [1, {total_runs}].")
@@ -401,6 +413,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         "validation_zero_prediction_baseline": _zero_prediction_validation_baseline(val_loader),
         "validation_zero_prediction_baseline_role": "context only; not a candidate and not used for selection",
         "candidates": candidates,
+        "registered_candidate_indices": registered_candidate_indices,
         "seeds": list(seeds),
         "run_order": "candidate declaration order, then seed order",
         "max_runs": run_limit,
@@ -435,7 +448,8 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
 
     completed = 0
     try:
-        for candidate_index, candidate in enumerate(candidates):
+        for candidate_index in registered_candidate_indices:
+            candidate = candidates[candidate_index]
             for seed in seeds:
                 if completed >= run_limit:
                     break

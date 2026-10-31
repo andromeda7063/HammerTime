@@ -153,7 +153,7 @@ class AblationRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside the allowlist"):
                 ablation._validate_source_provenance(source, altered)
 
-    def test_pilot_preregisters_before_run_and_reloads_best_checkpoint(self):
+    def test_targeted_gated_pilot_preregisters_before_run_and_reloads_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             study_path = directory / "pilot"
@@ -177,7 +177,7 @@ class AblationRunnerTests(unittest.TestCase):
                 prereg, result = ablation.run_ablation_study(
                     self.train_loader, self.val_loader, config(), torch.device("cpu"),
                     study_path, source, exposure, seeds=(42, 43, 44),
-                    mode="pilot", max_runs=1, epoch_cap=1,
+                    mode="pilot", max_runs=1, epoch_cap=1, candidate_indices=(5,),
                 )
 
             self.assertEqual(prereg["max_runs"], 1)
@@ -191,7 +191,7 @@ class AblationRunnerTests(unittest.TestCase):
             self.assertIsNone(result["candidate_selection"])
             self.assertEqual(len(result["runs"]), 1)
             run = result["runs"][0]
-            self.assertEqual(run["candidate"], "current_k3")
+            self.assertEqual(run["candidate"], "gated_dilated_full_history")
             self.assertEqual(run["validation_metrics"]["sample_count"], 4)
             self.assertGreater(run["parameter_count"], 0)
             self.assertGreaterEqual(run["runtime_seconds"], 0.0)
@@ -199,6 +199,10 @@ class AblationRunnerTests(unittest.TestCase):
                                    run["best_checkpoint_validation_mae_sec"], places=6)
             self.assertIsNotNone(run["validation_metrics"]["r2_score"])
             json.loads((study_path / "results.json").read_text())
+
+    def test_legacy_ablation_candidates_explicitly_keep_conv_mode(self):
+        for candidate in ablation.ABLATION_CANDIDATES[:5]:
+            self.assertEqual(candidate["temporal_mode"], "conv")
 
 
 if __name__ == "__main__":

@@ -41,7 +41,8 @@ Prepared config compatibility allows only `model.temporal_mode`,
 from the source artifact. Data, targets, scaler, split, and training settings
 must match the prepared config.
 
-A capped pilot is always marked incomplete and has no selected candidate. A
+A capped pilot can register a specific candidate index, is always marked
+incomplete, and has no selected candidate. A
 complete study requires every candidate across at least three matched seeds.
 The predeclared selection metric is mean validation MAE, with candidate order
 breaking ties. Complete reports include each seed's validation MAE, mean and
