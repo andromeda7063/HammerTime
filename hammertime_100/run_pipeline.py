@@ -417,7 +417,7 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
     config["train"]["checkpoint_path"] = str(checkpoint_path)
 
     from target import build_targets
-    from graph import build_race_graph_snapshots
+    from graph import build_race_graph_snapshots, remap_cohort_driver_nodes
 
     session_specs = _session_specs(config)
     aligned_tables, label_tables, snapshots = [], [], []
@@ -458,11 +458,14 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
     aligned_all.to_parquet(base_processed_dir / "aligned_telemetry.parquet", index=False)
     labels_all.to_parquet(base_processed_dir / "target_labels.parquet", index=False)
 
-    # The model agent uses per-snapshot driver_names for multi-race node identity.
-    legacy_driver_map = next(iter(driver_maps.values())) if len(driver_maps) == 1 else {}
+    # Each session graph starts with its own local node ordering. Remap all
+    # snapshots before joining sessions so a driver keeps one cohort-wide node.
+    driver_to_idx = remap_cohort_driver_nodes(
+        snapshots, driver_maps, int(config["graph"]["num_nodes"])
+    )
     from dataset import create_dataloaders
     train_loader, val_loader, test_loader, _ = create_dataloaders(
-        snapshots, labels_all, legacy_driver_map, config
+        snapshots, labels_all, driver_to_idx, config
     )
 
     from model import create_model

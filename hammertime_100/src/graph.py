@@ -215,6 +215,51 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
     return snapshots, driver_to_idx
 
 
+def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
+                              num_nodes: int) -> dict:
+    """Apply one stable node index to driver identities across race sessions."""
+    drivers = sorted({str(driver) for mapping in session_driver_maps.values()
+                      for driver in mapping})
+    if len(drivers) > num_nodes:
+        raise ValueError(f"Cohort has {len(drivers)} distinct drivers, exceeding graph.num_nodes={num_nodes}.")
+    canonical = {driver: index for index, driver in enumerate(drivers)}
+    for snapshot in snapshots:
+        race_id = str(getattr(snapshot, "race_id", ""))
+        if race_id not in session_driver_maps:
+            raise ValueError(f"Snapshot has no configured driver map for race {race_id!r}.")
+        local = session_driver_maps[race_id]
+        old_to_new = {old_index: canonical[str(driver)]
+                      for driver, old_index in local.items()}
+        features = snapshot.x.clone()
+        mask = snapshot.mask.clone()
+        names = list(snapshot.driver_names)
+        remapped_features = torch.zeros_like(features)
+        remapped_mask = torch.zeros_like(mask)
+        remapped_names = [None] * num_nodes
+        for old_index, driver in enumerate(names):
+            if driver is None:
+                continue
+            if old_index not in old_to_new:
+                raise ValueError(f"Snapshot driver {driver!r} is absent from its session node map.")
+            new_index = old_to_new[old_index]
+            remapped_features[new_index] = features[old_index]
+            remapped_mask[new_index] = mask[old_index]
+            remapped_names[new_index] = str(driver)
+        edges = snapshot.edge_index.clone()
+        if edges.numel():
+            remapped_edges = []
+            for node in edges.detach().cpu().reshape(-1).tolist():
+                if node not in old_to_new:
+                    raise ValueError(f"Snapshot edge references unmapped node {node} for race {race_id!r}.")
+                remapped_edges.append(old_to_new[node])
+            edges = torch.tensor(remapped_edges, dtype=torch.long, device=edges.device).reshape(2, -1)
+        snapshot.x = remapped_features
+        snapshot.mask = remapped_mask
+        snapshot.driver_names = remapped_names
+        snapshot.edge_index = edges
+    return canonical
+
+
 if __name__ == "__main__":
     cfg = load_config()
     proc_file = Path(cfg["session"]["processed_dir"]) / "aligned_telemetry.parquet"
