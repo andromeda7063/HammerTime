@@ -20,6 +20,7 @@ from context_features import build_node_feature_vector as _build_context_node_fe
 from context_features import feature_names, resolve_feature_schema
 from physical_graph import (
     EDGE_FEATURES_BY_SCHEMA,
+    PhysicalEdgeSet,
     build_physical_circuit_edges,
     is_position_valid,
 )
@@ -228,17 +229,35 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             not pit_by_driver.get(driver, False) for driver in driver_to_idx
         )
         lap_length_m = _row_lap_length(group, lap_lengths_by_race, race_id)
-        physical_edges = build_physical_circuit_edges(
-            distance_by_driver=distance_by_driver,
-            speed_by_driver_kmh=speed_by_driver_kmh,
-            position_valid_by_driver=position_valid_by_driver,
-            node_active_by_driver=node_active_by_driver,
-            driver_to_idx=driver_to_idx,
-            lap_length_m=lap_length_m,
-            max_gap_sec=max_gap,
-            sigma_sec=sigma,
-            expected_on_track_count=expected_on_track,
-        )
+        physical_graph_available = lap_length_m is not None
+        if physical_graph_available:
+            physical_edges = build_physical_circuit_edges(
+                distance_by_driver=distance_by_driver,
+                speed_by_driver_kmh=speed_by_driver_kmh,
+                position_valid_by_driver=position_valid_by_driver,
+                node_active_by_driver=node_active_by_driver,
+                driver_to_idx=driver_to_idx,
+                lap_length_m=lap_length_m,
+                max_gap_sec=max_gap,
+                sigma_sec=sigma,
+                expected_on_track_count=expected_on_track,
+            )
+        elif neighbor_mode == "physical_circuit" or edge_feature_schema == "physical_v1":
+            raise ValueError(
+                f"Physical graph mode requires a configured lap length for race {race_id!r}."
+            )
+        else:
+            # Minimal legacy configs may not contain circuit metadata. Keep
+            # their active race-progress graph intact and report unavailable
+            # physical topology without fabricating a lap length or edges.
+            known_positions = sum(position_valid_by_driver.values())
+            coverage = (known_positions / expected_on_track) if expected_on_track else 0.0
+            physical_edges = PhysicalEdgeSet(
+                edge_index=torch.empty((2, 0), dtype=torch.long),
+                edge_attr=torch.empty((0, 4), dtype=torch.float32),
+                position_coverage=float(coverage),
+                blocked_neighbor_count=0,
+            )
         edge_index_physical_circuit = physical_edges.edge_index
         edge_attr_physical_circuit = physical_edges.edge_attr
         if neighbor_mode == "race_progress":
@@ -269,6 +288,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             position_valid=torch.tensor(position_valid, dtype=torch.bool),
             position_coverage=float(physical_edges.position_coverage),
             blocked_neighbor_count=int(physical_edges.blocked_neighbor_count),
+            physical_graph_available=bool(physical_graph_available),
             time_sec=float(t_sec),
             race_id=race_id,
             driver_names=tuple(driver_names),
@@ -285,8 +305,8 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
 
 def _configured_lap_lengths(config: dict) -> dict[str, float]:
     """Return each configured race's physical circuit length."""
-    base = config["session"]
-    sessions = config.get("sessions") or [base]
+    base = config.get("session", {})
+    sessions = config.get("sessions") or ([base] if base else [])
     lengths = {}
     for item in sessions:
         spec = {**base, **item}
@@ -294,21 +314,24 @@ def _configured_lap_lengths(config: dict) -> dict[str, float]:
             f"{spec.get('year', 'unknown')}-{spec.get('gp', 'unknown')}-"
             f"{spec.get('session_type', 'R')}"
         ))
-        value = spec.get("lap_length_m", config["track"]["lap_length_m"])
-        lengths[race_id] = float(value)
+        value = spec.get("lap_length_m", config.get("track", {}).get("lap_length_m"))
+        try:
+            length = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(length) and length > 0:
+            lengths[race_id] = length
     return lengths
 
 
-def _row_lap_length(group: pd.DataFrame, lengths: dict[str, float], race_id: str) -> float:
+def _row_lap_length(group: pd.DataFrame, lengths: dict[str, float], race_id: str) -> float | None:
     if "lap_length_m" in group.columns:
         values = pd.to_numeric(group["lap_length_m"], errors="coerce").dropna().unique()
         if len(values) == 1 and float(values[0]) > 0:
             return float(values[0])
         if len(values) > 1:
             raise ValueError(f"Race {race_id!r} has conflicting lap_length_m values at one timestamp.")
-    if race_id not in lengths:
-        raise ValueError(f"No configured lap length is available for race {race_id!r}.")
-    return lengths[race_id]
+    return lengths.get(race_id)
 
 
 def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,

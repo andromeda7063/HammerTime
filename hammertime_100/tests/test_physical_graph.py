@@ -48,7 +48,7 @@ class PhysicalGraphTests(unittest.TestCase):
         result = self._build({"near_start": 10.0, "near_finish": 990.0})
         edges = {tuple(edge) for edge in result.edge_index.T.tolist()}
         # Drivers are indexed in insertion order. The 990 m car leads the 10 m car.
-        self.assertIn((1, 0), edges)
+        self.assertIn((0, 1), edges)
         self.assertEqual(result.edge_attr.shape, (1, 4))
         self.assertAlmostEqual(float(result.edge_attr[0, 1]), 20.0)
 
@@ -70,6 +70,19 @@ class PhysicalGraphTests(unittest.TestCase):
         self.assertEqual(blocked.blocked_neighbor_count, 2)
         self.assertEqual(blocked.edge_index.size(1), 0)
 
+    def test_single_position_or_all_inactive_nodes_keep_empty_edge_shapes(self):
+        single = self._build({"only": 100.0}, expected=2)
+        self.assertEqual(tuple(single.edge_index.shape), (2, 0))
+        self.assertEqual(tuple(single.edge_attr.shape), (0, 4))
+        all_inactive = self._build(
+            {"a": 100.0, "b": 150.0},
+            active={"a": False, "b": False}, expected=2,
+        )
+        self.assertEqual(tuple(all_inactive.edge_index.shape), (2, 0))
+        self.assertEqual(tuple(all_inactive.edge_attr.shape), (0, 4))
+        # Only the 50 m forward arc is within the 2 s cutoff at 90 km/h.
+        self.assertEqual(all_inactive.blocked_neighbor_count, 1)
+
     def test_missing_position_reduces_coverage_without_changing_sample(self):
         result = self._build(
             {"known_a": 100.0, "known_b": 150.0},
@@ -77,7 +90,8 @@ class PhysicalGraphTests(unittest.TestCase):
             expected=3,
         )
         self.assertAlmostEqual(result.position_coverage, 2 / 3)
-        self.assertEqual(result.edge_index.size(1), 2)
+        self.assertEqual(result.edge_index.size(1), 1)
+        self.assertIn((1, 0), {tuple(edge) for edge in result.edge_index.T.tolist()})
         self.assertTrue(torch.isfinite(result.edge_attr).all())
 
     def test_scaler_uses_only_requested_training_snapshot_edges_and_preserves_raw(self):
@@ -94,6 +108,13 @@ class PhysicalGraphTests(unittest.TestCase):
         self.assertEqual(scaler.metadata()["n_samples_seen_"], 2)
         restored = PhysicalEdgeFeatureScaler.from_metadata(scaler.metadata())
         self.assertTrue(np.allclose(restored.mean_, scaler.mean_))
+
+    def test_empty_training_edges_use_identity_scaling_and_zero_count(self):
+        empty = SimpleNamespace(edge_attr_physical_circuit=torch.empty((0, 4)))
+        scaler = PhysicalEdgeFeatureScaler().fit([empty], [0])
+        result = scaler.transform(torch.tensor([[0.5, 8.0, -2.0, 0.75]]))
+        self.assertTrue(torch.equal(result, torch.tensor([[0.5, 8.0, -2.0, 0.75]])))
+        self.assertEqual(scaler.metadata()["n_samples_seen_"], 0)
 
     def test_cohort_remap_keeps_both_edge_views_and_position_support_aligned(self):
         snapshot = Data(
