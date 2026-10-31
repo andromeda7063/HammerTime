@@ -1,6 +1,7 @@
 """Pre-registered validation-only runs for the fixed ST-GNN ablation set."""
 
 import copy
+import gc
 import hashlib
 import importlib.metadata
 import json
@@ -39,6 +40,32 @@ ABLATION_CANDIDATES = [
     {"name": "gated_dilated_mse", "temporal_kernel": 3,
      "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
      "graph": "current", "loss": "mse"},
+]
+
+# Five declared, matched views for the circuit-context/edge comparison suite.
+# Every candidate shares the same temporal model and MAE objective so only the
+# input representation and graph view differ.
+CONTEXT_GRAPH_CANDIDATES = [
+    {"name": "legacy_input_legacy_graph", "input_schema": "legacy_v1",
+     "edge_view": "race_progress", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "loss": "mae"},
+    {"name": "circuit_context_legacy_graph", "input_schema": "circuit_context_v1",
+     "edge_view": "race_progress", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "loss": "mae"},
+    {"name": "circuit_context_physical_scalar", "input_schema": "circuit_context_v1",
+     "edge_view": "physical_scalar", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "loss": "mae"},
+    {"name": "circuit_context_physical_v1", "input_schema": "circuit_context_v1",
+     "edge_view": "physical_v1", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "loss": "mae"},
+    {"name": "circuit_context_self_loop_only", "input_schema": "circuit_context_v1",
+     "edge_view": "self_loop_only", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+     "loss": "mae"},
 ]
 
 
@@ -174,11 +201,17 @@ def _git_metadata():
 
 def _environment_metadata(device):
     repo = Path(__file__).resolve().parents[2]
-    module_names = ("ablation.py", "dataset.py", "model.py", "train.py", "evaluate.py")
+    module_names = (
+        "ablation.py", "dataset.py", "model.py", "train.py", "evaluate.py",
+        "graph.py", "physical_graph.py", "context_features.py", "config_validation.py",
+        "prepare_cohort.py", "baselines.py",
+    )
     modules = {}
     for name in module_names:
         path = repo / "hammertime_100" / "src" / name
         modules[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    entry_path = repo / "hammertime_100" / "train_prepared.py"
+    modules["train_prepared.py"] = hashlib.sha256(entry_path.read_bytes()).hexdigest()
     lock_path = repo / "uv.lock"
     package_names = ("numpy", "pandas", "torch", "torch-geometric", "scikit-learn")
     versions = {}
@@ -225,7 +258,15 @@ def _data_hash(train_loader, val_loader):
                 hashed_snapshots.add(snapshot_key)
                 digest.update(_stable_json({"snapshot_race_id": snapshot_key[0],
                                             "snapshot_time_sec": snapshot_key[1]}).encode("utf-8"))
-                for tensor_name in ("x", "edge_index", "edge_attr", "mask"):
+                digest.update(_stable_json({
+                    "position_coverage": getattr(snapshot, "position_coverage", None),
+                    "blocked_neighbor_count": getattr(snapshot, "blocked_neighbor_count", None),
+                }).encode("utf-8"))
+                for tensor_name in (
+                    "x", "edge_index", "edge_attr", "mask", "position_valid",
+                    "edge_index_race_progress", "edge_attr_race_progress",
+                    "edge_index_physical_circuit", "edge_attr_physical_circuit",
+                ):
                     tensor = getattr(snapshot, tensor_name, None)
                     if tensor is None:
                         digest.update(b"<none>")
@@ -250,6 +291,65 @@ def _membership_hash(train_loader, val_loader):
             for sample in loader.dataset.samples
         ]
     return _sha256_json(membership)
+
+
+def _target_mask_hash(samples):
+    digest = hashlib.sha256()
+    for sample in samples:
+        for key in ("target", "mask"):
+            tensor = sample[key].detach().cpu().contiguous()
+            digest.update(key.encode("ascii"))
+            digest.update(str(tensor.dtype).encode("ascii"))
+            digest.update(tensor.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _baseline_report(baselines, config):
+    """Keep validation baseline summaries while grouping the wrapper's rows by circuit/sector."""
+    if not baselines:
+        return {}
+    circuit_by_race = {
+        str(item.get("race_id")): str(item.get("circuit_id", "unknown"))
+        for item in config.get("sessions", [])
+    }
+    report = {}
+    for name, values in baselines.items():
+        if not isinstance(values, dict):
+            continue
+        summary = {key: value for key, value in values.items()
+                   if key not in ("predictions", "targets", "metadata")}
+        predictions = np.asarray(values.get("predictions", []), dtype=float)
+        targets = np.asarray(values.get("targets", []), dtype=float)
+        if len(predictions) == len(targets) and len(targets):
+            summary["prediction_variance"] = float(np.var(predictions))
+            summary["target_variance"] = float(np.var(targets))
+            groups = {}
+            metadata = values.get("metadata", [])
+            for index, (truth, prediction) in enumerate(zip(targets, predictions)):
+                row = metadata[index] if index < len(metadata) else {}
+                race_id = str(row.get("race_id", "unknown"))
+                sector = row.get("mini_sector")
+                try:
+                    sector = int(sector) if sector is not None and np.isfinite(float(sector)) else None
+                except (TypeError, ValueError):
+                    sector = None
+                key = (circuit_by_race.get(race_id, "unknown"), race_id, sector)
+                groups.setdefault(key, [[], []])
+                groups[key][0].append(float(truth))
+                groups[key][1].append(float(prediction))
+            summary["per_circuit_sector"] = []
+            for (circuit, race, sector), (truths, preds) in sorted(groups.items(), key=lambda item: str(item[0])):
+                error = np.asarray(preds) - np.asarray(truths)
+                summary["per_circuit_sector"].append({
+                    "circuit_id": circuit, "race_id": race, "mini_sector": sector,
+                    "sample_count": len(truths), "mae_sec": float(np.mean(np.abs(error))),
+                    "rmse_sec": float(np.sqrt(np.mean(np.square(error)))),
+                    "bias_sec": float(np.mean(error)),
+                    "target_variance": float(np.var(truths)),
+                    "prediction_variance": float(np.var(preds)),
+                })
+        report[name] = summary
+    return report
 
 
 def _zero_prediction_validation_baseline(val_loader):
@@ -279,24 +379,63 @@ def _feature_scaler_metadata(train_loader, val_loader):
     return values
 
 
-def _clone_transformed_samples(samples, graph_mode):
+def _clone_transformed_samples(samples, graph_mode, edge_scaler=None):
+    candidate = graph_mode if isinstance(graph_mode, dict) else None
+    if candidate is not None:
+        graph_mode = candidate["edge_view"]
     transformed = []
     for sample in samples:
         item = dict(sample)
         snapshots = []
         for original in sample["snapshots"]:
             snap = original.clone() if hasattr(original, "clone") else copy.deepcopy(original)
-            if graph_mode == "self_loop_only":
+            if candidate is not None:
+                if candidate["input_schema"] == "legacy_v1":
+                    snap.x = snap.x[:, :9].contiguous()
+                elif candidate["input_schema"] != "circuit_context_v1":
+                    raise ValueError(f"Unknown node feature schema {candidate['input_schema']!r}.")
+                if graph_mode == "race_progress":
+                    snap.edge_index = snap.edge_index_race_progress.clone()
+                    snap.edge_attr = snap.edge_attr_race_progress.clone()
+                elif graph_mode in ("physical_scalar", "physical_v1"):
+                    snap.edge_index = snap.edge_index_physical_circuit.clone()
+                    physical_attr = snap.edge_attr_physical_circuit
+                    if graph_mode == "physical_scalar":
+                        snap.edge_attr = physical_attr[:, :1].clone()
+                    else:
+                        if edge_scaler is None:
+                            raise ValueError("physical_v1 comparison requires a train-fitted edge scaler.")
+                        snap.edge_attr = edge_scaler.transform(physical_attr)
+                elif graph_mode == "self_loop_only":
+                    snap.edge_index = torch.empty((2, 0), dtype=torch.long, device=snap.x.device)
+                    snap.edge_attr = torch.empty((0, 1), dtype=torch.float32, device=snap.x.device)
+                else:
+                    raise ValueError(f"Unknown comparison edge view {graph_mode!r}.")
+            elif graph_mode == "self_loop_only":
+                edge_dim = int(snap.edge_attr.size(1)) if getattr(snap, "edge_attr", None) is not None else 1
                 snap.edge_index = torch.empty((2, 0), dtype=torch.long,
                                               device=snap.x.device)
-                snap.edge_attr = torch.empty((0, 1), dtype=torch.float32,
+                snap.edge_attr = torch.empty((0, edge_dim), dtype=torch.float32,
                                              device=snap.x.device)
             elif graph_mode == "constant_edge_attribute":
                 edge_index = getattr(snap, "edge_index", None)
                 edge_count = int(edge_index.size(1)) if edge_index is not None else 0
-                snap.edge_attr = torch.ones((edge_count, 1), dtype=torch.float32,
-                                            device=snap.x.device)
-            elif graph_mode != "current":
+                edge_dim = int(snap.edge_attr.size(1)) if getattr(snap, "edge_attr", None) is not None else 1
+                if edge_dim == 1:
+                    snap.edge_attr = torch.ones((edge_count, 1), dtype=torch.float32,
+                                                device=snap.x.device)
+                else:
+                    attrs = torch.zeros((edge_count, edge_dim), dtype=torch.float32, device=snap.x.device)
+                    if edge_count:
+                        attrs[:, 0] = 1.0
+                        if edge_dim == 4:
+                            attrs[:, 3] = float(getattr(snap, "position_coverage", 0.0))
+                    snap.edge_attr = attrs
+            elif graph_mode == "current":
+                if (edge_scaler is not None and getattr(snap, "edge_attr", None) is not None
+                        and snap.edge_attr.ndim == 2 and snap.edge_attr.size(1) == 4):
+                    snap.edge_attr = edge_scaler.transform(snap.edge_attr)
+            else:
                 raise ValueError(f"Unknown graph ablation {graph_mode!r}.")
             snapshots.append(snap)
         item["snapshots"] = snapshots
@@ -315,17 +454,73 @@ def _make_loader(source_loader, samples, shuffle, seed=None):
 
 
 @torch.no_grad()
-def _validation_metrics(model, loader, device):
+def _validation_metrics(model, loader, device, config=None):
     if not isinstance(getattr(loader, "sampler", None), SequentialSampler):
         raise ValueError("Ablation scoring requires sequential validation batches.")
     model.eval()
-    targets, predictions = [], []
+    targets, predictions, detail_rows = [], [], []
+    sample_offset = 0
+    circuit_by_race = {
+        str(item.get("race_id")): str(item.get("circuit_id", "unknown"))
+        for item in (config or {}).get("sessions", [])
+    }
+    if not circuit_by_race and (config or {}).get("session", {}).get("race_id"):
+        circuit_by_race[str(config["session"]["race_id"])] = str(
+            (config or {}).get("session", {}).get("circuit_id", "unknown")
+        )
     for windows, target, mask in loader:
         prediction = model(windows)
         valid = mask.to(device=device, dtype=torch.bool)
-        targets.extend(target.to(device).masked_select(valid).detach().cpu().tolist())
-        predictions.extend(prediction.masked_select(valid).detach().cpu().tolist())
-    return compute_metrics(np.asarray(targets, dtype=float), np.asarray(predictions, dtype=float))
+        target_values = target.to(device).detach().cpu().numpy()
+        prediction_values = prediction.detach().cpu().numpy()
+        valid_values = valid.detach().cpu().numpy()
+        for offset in range(len(windows)):
+            sample = loader.dataset.samples[sample_offset + offset]
+            race_id = str(sample.get("race_id", "unknown"))
+            names = sample.get("driver_names") or [None] * len(valid_values[offset])
+            sectors = np.asarray(sample.get("mini_sector", np.full(len(names), np.nan)), dtype=float)
+            for node in np.flatnonzero(valid_values[offset]):
+                y_value = float(target_values[offset, node])
+                p_value = float(prediction_values[offset, node])
+                targets.append(y_value)
+                predictions.append(p_value)
+                sector = float(sectors[node]) if node < len(sectors) and np.isfinite(sectors[node]) else None
+                detail_rows.append({
+                    "race_id": race_id,
+                    "circuit_id": circuit_by_race.get(race_id, "unknown"),
+                    "mini_sector": sector,
+                    "driver": names[node] if node < len(names) else None,
+                    "target": y_value,
+                    "prediction": p_value,
+                })
+        sample_offset += len(windows)
+    y_true = np.asarray(targets, dtype=float)
+    y_pred = np.asarray(predictions, dtype=float)
+    metrics = compute_metrics(y_true, y_pred)
+    metrics["target_variance"] = float(np.var(y_true)) if len(y_true) else None
+    metrics["prediction_variance"] = float(np.var(y_pred)) if len(y_pred) else None
+    metrics["prediction_mean"] = float(np.mean(y_pred)) if len(y_pred) else None
+    groups = {}
+    for row in detail_rows:
+        key = (row["circuit_id"], row["race_id"], row["mini_sector"])
+        groups.setdefault(key, {"target": [], "prediction": []})
+        groups[key]["target"].append(row["target"])
+        groups[key]["prediction"].append(row["prediction"])
+    metrics["per_circuit_sector"] = []
+    for (circuit_id, race_id, sector), values in sorted(groups.items(), key=lambda item: str(item[0])):
+        group_y = np.asarray(values["target"], dtype=float)
+        group_p = np.asarray(values["prediction"], dtype=float)
+        error = group_p - group_y
+        metrics["per_circuit_sector"].append({
+            "circuit_id": circuit_id, "race_id": race_id, "mini_sector": sector,
+            "sample_count": int(len(group_y)),
+            "mae_sec": float(np.mean(np.abs(error))),
+            "rmse_sec": float(np.sqrt(np.mean(np.square(error)))),
+            "bias_sec": float(np.mean(error)),
+            "target_variance": float(np.var(group_y)),
+            "prediction_variance": float(np.var(group_p)),
+        })
+    return metrics
 
 
 def _write_json(path, value):
@@ -338,11 +533,12 @@ def _write_json(path, value):
 def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                        source_provenance, test_exposure, seeds=(42, 43, 44),
                        mode="complete", max_runs=None, epoch_cap=None,
-                       candidate_indices=None):
+                       candidate_indices=None, candidate_registry=None,
+                       comparison_baselines=None):
     """Run a pre-registered candidate prefix; this API accepts no test loader."""
     device = torch.device(device)
-    if mode not in ("pilot", "complete"):
-        raise ValueError("mode must be 'pilot' or 'complete'.")
+    if mode not in ("pilot", "complete", "compare"):
+        raise ValueError("mode must be 'pilot', 'complete', or 'compare'.")
     if not isinstance(source_provenance, dict) or not source_provenance:
         raise ValueError("Authentic source provenance must be supplied before registration.")
     if not isinstance(test_exposure, str) or not test_exposure.strip():
@@ -359,22 +555,36 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
     prepared_manifest = prepared_validation["manifest"]
     if not isinstance(getattr(val_loader, "sampler", None), SequentialSampler):
         raise ValueError("Ablation requires the existing sequential validation loader.")
+    candidates = copy.deepcopy(candidate_registry if candidate_registry is not None else ABLATION_CANDIDATES)
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("candidate_registry must be a non-empty list.")
     if candidate_indices is None:
-        registered_candidate_indices = list(range(len(ABLATION_CANDIDATES)))
+        registered_candidate_indices = list(range(len(candidates)))
     else:
         if (not isinstance(candidate_indices, (list, tuple)) or not candidate_indices
                 or any(isinstance(index, bool) or not isinstance(index, int)
-                       or not 0 <= index < len(ABLATION_CANDIDATES) for index in candidate_indices)
+                       or not 0 <= index < len(candidates) for index in candidate_indices)
                 or len(set(candidate_indices)) != len(candidate_indices)):
             raise ValueError("candidate_indices must be a non-empty sequence of unique valid candidate indexes.")
         registered_candidate_indices = list(candidate_indices)
-    if mode == "complete" and registered_candidate_indices != list(range(len(ABLATION_CANDIDATES))):
+    if mode == "complete" and registered_candidate_indices != list(range(len(candidates))):
         raise ValueError("A complete study must include every declared candidate.")
-    total_runs = len(registered_candidate_indices) * len(seeds)
+    if mode == "compare":
+        if candidate_registry is None or candidates != CONTEXT_GRAPH_CANDIDATES:
+            raise ValueError("compare mode requires the fixed CONTEXT_GRAPH_CANDIDATES registry.")
+        if tuple(seeds) != (42, 43, 44):
+            raise ValueError("The context comparison is preregistered for screen seed 42 and confirmation seeds 43, 44.")
+        if registered_candidate_indices != list(range(len(candidates))):
+            raise ValueError("The context comparison must screen all five declared views.")
+        if not isinstance(comparison_baselines, dict) or "mean_train_constant" not in comparison_baselines:
+            raise ValueError("compare mode requires validation-only training-mean baseline metrics.")
+        total_runs = len(candidates) + 2 * len(seeds[1:])
+    else:
+        total_runs = len(registered_candidate_indices) * len(seeds)
     run_limit = total_runs if max_runs is None else int(max_runs)
     if not 1 <= run_limit <= total_runs:
         raise ValueError(f"max_runs must be in [1, {total_runs}].")
-    if mode == "complete" and run_limit != total_runs:
+    if mode in ("complete", "compare") and run_limit != total_runs:
         raise ValueError("A complete study must run every candidate across every matched seed.")
     if mode == "complete" and len(seeds) < 3:
         raise ValueError("A complete ablation study requires at least three matched seeds.")
@@ -385,7 +595,6 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
 
     study_dir = Path(study_dir)
     study_dir.mkdir(parents=True, exist_ok=False)
-    candidates = copy.deepcopy(ABLATION_CANDIDATES)
     effective_config = copy.deepcopy(config)
     if epoch_cap is not None:
         effective_config["train"]["max_epochs"] = int(epoch_cap)
@@ -394,6 +603,20 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         )
     split_metadata = copy.deepcopy(getattr(train_loader.dataset, "split_metadata", {}))
     feature_scaler = _feature_scaler_metadata(train_loader, val_loader)
+    edge_feature_scaler = getattr(train_loader.dataset, "edge_feature_scaler", None)
+    edge_scaler_metadata = (edge_feature_scaler.metadata()
+                            if hasattr(edge_feature_scaler, "metadata") else None)
+    feature_scalers_by_candidate = {}
+    for candidate in candidates:
+        schema = candidate.get("input_schema")
+        if schema:
+            width = (4 + len(config["graph"]["compound_categories"])) + (10 if schema == "circuit_context_v1" else 0)
+            projected = copy.deepcopy(feature_scaler)
+            projected["mean_"] = projected["mean_"][:width]
+            projected["scale_"] = projected["scale_"][:width]
+            projected["var_"] = projected["var_"][:width]
+            projected["n_features_in_"] = width
+            feature_scalers_by_candidate[candidate["name"]] = projected
     preregistration = {
         "schema_version": 1,
         "status": "preregistered",
@@ -416,17 +639,24 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         "split_metadata_sha256": _sha256_json(split_metadata),
         "feature_scaler": feature_scaler,
         "feature_scaler_sha256": _sha256_json(feature_scaler),
+        "feature_scalers_by_candidate": feature_scalers_by_candidate,
+        "physical_edge_scaler": edge_scaler_metadata,
+        "physical_edge_scaler_sha256": _sha256_json(edge_scaler_metadata) if edge_scaler_metadata is not None else None,
         "validation_zero_prediction_baseline": _zero_prediction_validation_baseline(val_loader),
         "validation_zero_prediction_baseline_role": "context only; not a candidate and not used for selection",
         "candidates": candidates,
+        "comparison_baselines": _baseline_report(comparison_baselines, config),
         "registered_candidate_indices": registered_candidate_indices,
         "seeds": list(seeds),
-        "run_order": "candidate declaration order, then seed order",
+        "run_order": ("seed 42 screen in declaration order; select one eligible non-control candidate by validation R2; confirm it and legacy control on seeds 43, 44" if mode == "compare" else "candidate declaration order, then seed order"),
         "max_runs": run_limit,
         "full_study_run_count": total_runs,
         "max_epochs": int(effective_config["train"].get("max_epochs", 100)),
-        "selection_metric": "mean_validation_mae_sec",
-        "selection_rule": "lowest mean validation MAE; ties resolved by declared candidate order",
+        "selection_metric": ("seed_42_validation_r2_score" if mode == "compare" else "mean_validation_mae_sec"),
+        "selection_rule": (
+            "Screen seed 42 only. Eligible non-control views must have validation R2 greater than the train-mean constant and validation MAE no greater than legacy_input_legacy_graph. Select highest R2; ties follow candidate declaration order. Then train only that view and the legacy control on seeds 43 and 44."
+            if mode == "compare" else "lowest mean validation MAE; ties resolved by declared candidate order"
+        ),
         "reported_validation_metrics": ["mae_sec", "r2_score", "sample_count"],
         "parameter_count": "trainable model parameters",
         "runtime_definition": "training plus best-checkpoint validation scoring; excludes preprocessing and loader construction",
@@ -453,61 +683,164 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
     _write_json(results_path, results)
 
     completed = 0
+    compare_schedule = ([(index, 42) for index in registered_candidate_indices]
+                        if mode == "compare"
+                        else [(index, seed) for index in registered_candidate_indices for seed in seeds])
+    compare_selected = None
     try:
-        for candidate_index in registered_candidate_indices:
+        schedule_index = 0
+        while schedule_index < len(compare_schedule):
+            candidate_index, seed = compare_schedule[schedule_index]
             candidate = candidates[candidate_index]
-            for seed in seeds:
-                if completed >= run_limit:
-                    break
-                trial_config = copy.deepcopy(effective_config)
-                trial_config["model"]["conv1d_kernel"] = int(candidate["temporal_kernel"])
-                trial_config["model"]["temporal_mode"] = candidate["temporal_mode"]
-                trial_config["model"]["temporal_dilations"] = candidate.get(
-                    "temporal_dilations", [1, 2, 4]
+            trial_config = copy.deepcopy(effective_config)
+            trial_config["model"]["conv1d_kernel"] = int(candidate["temporal_kernel"])
+            trial_config["model"]["temporal_mode"] = candidate["temporal_mode"]
+            trial_config["model"]["temporal_dilations"] = candidate.get("temporal_dilations", [1, 2, 4])
+            trial_config["data"]["random_seed"] = int(seed)
+            trial_config["train"]["loss"] = candidate["loss"]
+            if "input_schema" in candidate:
+                trial_config["graph"]["node_feature_schema"] = candidate["input_schema"]
+                compound_count = len(trial_config["graph"]["compound_categories"])
+                trial_config["model"]["in_dim"] = (
+                    4 + compound_count + (10 if candidate["input_schema"] == "circuit_context_v1" else 0)
                 )
-                trial_config["data"]["random_seed"] = int(seed)
-                trial_config["train"]["loss"] = candidate["loss"]
-                trial_dir = study_dir / f"candidate_{candidate_index:02d}" / f"seed_{seed}"
-                trial_dir.mkdir(parents=True, exist_ok=False)
-                trial_config["train"]["checkpoint_path"] = str(trial_dir / "best.pt")
-                trial_config["train"]["history_path"] = str(trial_dir / "training_history.csv")
+                view = candidate["edge_view"]
+                if view == "physical_v1":
+                    trial_config["graph"]["neighbor_mode"] = "physical_circuit"
+                    trial_config["graph"]["edge_feature_schema"] = "physical_v1"
+                    trial_config["model"]["edge_dim"] = 4
+                elif view == "physical_scalar":
+                    trial_config["graph"]["neighbor_mode"] = "physical_circuit"
+                    trial_config["graph"]["edge_feature_schema"] = "scalar_rbf"
+                    trial_config["model"]["edge_dim"] = 1
+                else:
+                    trial_config["graph"]["neighbor_mode"] = "race_progress"
+                    trial_config["graph"]["edge_feature_schema"] = "scalar_rbf"
+                    trial_config["model"]["edge_dim"] = 1
+            trial_dir = study_dir / f"candidate_{candidate_index:02d}" / f"seed_{seed}"
+            trial_dir.mkdir(parents=True, exist_ok=False)
+            trial_config["train"]["checkpoint_path"] = str(trial_dir / "best.pt")
+            trial_config["train"]["history_path"] = str(trial_dir / "training_history.csv")
 
-                train_samples = _clone_transformed_samples(train_loader.dataset.samples, candidate["graph"])
-                val_samples = _clone_transformed_samples(val_loader.dataset.samples, candidate["graph"])
-                trial_train = _make_loader(train_loader, train_samples, shuffle=True, seed=int(seed))
-                trial_val = _make_loader(val_loader, val_samples, shuffle=False)
-                model = create_model(trial_config).to(device)
-                parameter_count = sum(int(parameter.numel()) for parameter in model.parameters()
-                                      if parameter.requires_grad)
-                started = time.perf_counter()
-                best_val_mae, history = train_model(model, trial_train, trial_val, trial_config, device)
-                checkpoint_path = Path(trial_config["train"]["checkpoint_path"])
-                checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-                model.load_state_dict(checkpoint["model_state_dict"])
-                metrics = _validation_metrics(model, trial_val, device)
-                runtime = time.perf_counter() - started
-                if not math.isfinite(float(best_val_mae)) or not math.isclose(
-                        float(best_val_mae), metrics["mae_sec"], rel_tol=1e-5, abs_tol=1e-7):
-                    raise FloatingPointError("Reloaded best checkpoint does not reproduce its validation MAE.")
-                results["runs"].append({
-                    "candidate": candidate["name"], "candidate_index": candidate_index,
-                    "training_loss": candidate["loss"],
-                    "seed": int(seed), "validation_metrics": metrics,
-                    "best_checkpoint_validation_mae_sec": float(best_val_mae),
-                    "epochs": len(history), "parameter_count": parameter_count,
-                    "runtime_seconds": float(runtime), "checkpoint": str(checkpoint_path),
-                })
-                completed += 1
-                results["completed_runs"] = completed
-                _write_json(results_path, results)
-            if completed >= run_limit:
-                break
+            edge_scaler = getattr(train_loader.dataset, "edge_feature_scaler", None)
+            if "input_schema" in candidate:
+                train_samples = _clone_transformed_samples(
+                    train_loader.dataset.samples, candidate, edge_scaler=edge_scaler
+                )
+                val_samples = _clone_transformed_samples(
+                    val_loader.dataset.samples, candidate, edge_scaler=edge_scaler
+                )
+            else:
+                graph_mode = candidate.get("graph", "current")
+                train_samples = _clone_transformed_samples(
+                    train_loader.dataset.samples, graph_mode, edge_scaler=edge_scaler
+                )
+                val_samples = _clone_transformed_samples(
+                    val_loader.dataset.samples, graph_mode, edge_scaler=edge_scaler
+                )
+            train_target_mask_hash = _target_mask_hash(train_loader.dataset.samples)
+            val_target_mask_hash = _target_mask_hash(val_loader.dataset.samples)
+            if (_target_mask_hash(train_samples) != train_target_mask_hash
+                    or _target_mask_hash(val_samples) != val_target_mask_hash):
+                raise ValueError("A candidate view changed frozen train/validation targets or masks.")
+            trial_train = _make_loader(train_loader, train_samples, shuffle=True, seed=int(seed))
+            trial_val = _make_loader(val_loader, val_samples, shuffle=False)
+            model = create_model(trial_config).to(device)
+            parameter_count = sum(int(parameter.numel()) for parameter in model.parameters()
+                                  if parameter.requires_grad)
+            started = time.perf_counter()
+            best_val_mae, history = train_model(model, trial_train, trial_val, trial_config, device)
+            checkpoint_path = Path(trial_config["train"]["checkpoint_path"])
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            metrics = _validation_metrics(model, trial_val, device, trial_config)
+            runtime = time.perf_counter() - started
+            if not math.isfinite(float(best_val_mae)) or not math.isclose(
+                    float(best_val_mae), metrics["mae_sec"], rel_tol=1e-5, abs_tol=1e-7):
+                raise FloatingPointError("Reloaded best checkpoint does not reproduce its validation MAE.")
+            results["runs"].append({
+                "candidate": candidate["name"], "candidate_index": candidate_index,
+                "training_loss": candidate["loss"], "seed": int(seed),
+                "validation_metrics": metrics,
+                "best_checkpoint_validation_mae_sec": float(best_val_mae),
+                "epochs": len(history), "parameter_count": parameter_count,
+                "train_target_mask_sha256": train_target_mask_hash,
+                "validation_target_mask_sha256": val_target_mask_hash,
+                "runtime_seconds": float(runtime), "checkpoint": str(checkpoint_path),
+            })
+            completed += 1
+            results["completed_runs"] = completed
+            _write_json(results_path, results)
+            del trial_train, trial_val, train_samples, val_samples, model, checkpoint
+            gc.collect()
+            schedule_index += 1
+
+            if mode == "compare" and completed == len(candidates):
+                screen_runs = {run["candidate_index"]: run for run in results["runs"] if run["seed"] == 42}
+                control_mae = screen_runs[0]["validation_metrics"]["mae_sec"]
+                mean_r2 = comparison_baselines["mean_train_constant"].get("r2_score")
+                eligible = []
+                if mean_r2 is not None and math.isfinite(float(mean_r2)):
+                    for index in range(1, len(candidates)):
+                        r2_value = screen_runs[index]["validation_metrics"].get("r2_score")
+                        if (r2_value is not None and math.isfinite(float(r2_value))
+                                and float(r2_value) > float(mean_r2)
+                                and screen_runs[index]["validation_metrics"]["mae_sec"] <= control_mae):
+                            eligible.append(index)
+                if eligible:
+                    compare_selected = max(
+                        eligible,
+                        key=lambda index: (screen_runs[index]["validation_metrics"]["r2_score"], -index),
+                    )
+                    compare_schedule.extend((compare_selected, seed) for seed in (43, 44))
+                    compare_schedule.extend((0, seed) for seed in (43, 44))
+                    results["screen_selection"] = {
+                        "eligible_candidate_indices": eligible,
+                        "selected_candidate": candidates[compare_selected]["name"],
+                        "selection_r2_seed_42": screen_runs[compare_selected]["validation_metrics"]["r2_score"],
+                        "legacy_control_mae_seed_42": control_mae,
+                        "train_mean_baseline_r2": mean_r2,
+                        "confirmation_seeds": [43, 44],
+                    }
+                else:
+                    results["screen_selection"] = {
+                        "eligible_candidate_indices": [], "selected_candidate": None,
+                        "reason": "No non-control view beat train-mean validation R2 while matching or improving legacy MAE.",
+                        "legacy_control_mae_seed_42": control_mae,
+                        "train_mean_baseline_r2": mean_r2,
+                        "confirmation_seeds": [],
+                    }
+                    break
     except BaseException as error:
         results.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
         _write_json(results_path, results)
         raise
 
-    if mode == "complete" and completed == total_runs:
+    if mode == "compare":
+        by_candidate = {}
+        for index, candidate in enumerate(candidates):
+            runs = [run for run in results["runs"] if run["candidate_index"] == index]
+            valid_r2 = [float(run["validation_metrics"]["r2_score"]) for run in runs
+                        if run["validation_metrics"].get("r2_score") is not None]
+            by_candidate[candidate["name"]] = {
+                "runs": [{"seed": run["seed"], **run["validation_metrics"]} for run in runs],
+                "mean_validation_mae_sec": (float(np.mean([run["validation_metrics"]["mae_sec"] for run in runs]))
+                                             if runs else None),
+                "mean_validation_r2_score": float(np.mean(valid_r2)) if valid_r2 else None,
+                "parameter_count": runs[0]["parameter_count"] if runs else None,
+                "mean_runtime_seconds": (float(np.mean([run["runtime_seconds"] for run in runs]))
+                                         if runs else None),
+            }
+        results["candidate_summaries"] = by_candidate
+        results["selected_candidate"] = (candidates[compare_selected]["name"]
+                                         if compare_selected is not None else None)
+        results["status"] = ("complete" if compare_selected is not None and completed == total_runs
+                             else "inconclusive")
+        if compare_selected is None:
+            results["note"] = "No candidate met the preregistered validation-only selection rule; no confirmation runs were started."
+        elif completed < total_runs:
+            results["note"] = "Screening selected a view, but confirmation did not complete."
+    elif mode == "complete" and completed == total_runs:
         candidate_scores = []
         candidate_summaries = []
         for index, candidate in enumerate(candidates):

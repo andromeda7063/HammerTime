@@ -108,15 +108,31 @@ def validate_config(config: dict) -> None:
         receptive_field = 1 + 2 * sum(dilations)
         if receptive_field < value("data.window_size"):
             raise ValueError("model.temporal_dilations must provide a receptive field covering data.window_size.")
-    if value("model.edge_dim") != 1:
-        raise ValueError("model.edge_dim must be 1 for the current RBF graph schema.")
+    graph_cfg = value("graph")
+    node_schema = graph_cfg.get("node_feature_schema", "legacy_v1")
+    if node_schema not in ("legacy_v1", "circuit_context_v1"):
+        raise ValueError("graph.node_feature_schema must be 'legacy_v1' or 'circuit_context_v1'.")
+    edge_schema = graph_cfg.get("edge_feature_schema", "scalar_rbf")
+    if edge_schema not in ("scalar_rbf", "physical_v1"):
+        raise ValueError("graph.edge_feature_schema must be 'scalar_rbf' or 'physical_v1'.")
+    neighbor_mode = graph_cfg.get("neighbor_mode", "race_progress")
+    if neighbor_mode not in ("race_progress", "physical_circuit"):
+        raise ValueError("graph.neighbor_mode must be 'race_progress' or 'physical_circuit'.")
+    if edge_schema == "physical_v1" and neighbor_mode != "physical_circuit":
+        raise ValueError("graph.edge_feature_schema='physical_v1' requires neighbor_mode='physical_circuit'.")
+    expected_edge_dim = 1 if edge_schema == "scalar_rbf" else 4
+    if value("model.edge_dim") != expected_edge_dim:
+        raise ValueError(f"model.edge_dim must be {expected_edge_dim} for graph.edge_feature_schema={edge_schema!r}.")
     categories = value("graph.compound_categories")
     if (not isinstance(categories, list) or not categories
             or any(not isinstance(item, str) or not item.strip() for item in categories)
             or len({item.upper() for item in categories}) != len(categories)):
         raise ValueError("graph.compound_categories must contain distinct, non-empty strings.")
-    if value("model.in_dim") != 4 + len(categories):
-        raise ValueError("model.in_dim must equal 4 + len(graph.compound_categories).")
+    expected_node_dim = (4 + len(categories)) + (10 if node_schema == "circuit_context_v1" else 0)
+    if value("model.in_dim") != expected_node_dim:
+        raise ValueError(
+            f"model.in_dim must be {expected_node_dim} for graph.node_feature_schema={node_schema!r}."
+        )
     clip = value("target.clip_delta_sec")
     if (not isinstance(clip, list) or len(clip) != 2
             or any(isinstance(item, bool) or not isinstance(item, (int, float))

@@ -8,6 +8,7 @@ import torch
 import yaml
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
+from physical_graph import PhysicalEdgeFeatureScaler
 
 logger = logging.getLogger("hammertime.dataset")
 
@@ -339,6 +340,7 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     train_indices = [i for i, snap in enumerate(snapshots)
                      if (getattr(snap, "race_id", None), float(snap.time_sec)) in train_keys]
     scaler = fit_and_apply_scaler(snapshots, train_indices)
+    edge_scaler = PhysicalEdgeFeatureScaler().fit(snapshots, train_indices)
     # Windows hold references to snapshots, so the transformation is reflected in all splits.
     batch_size = int(config["train"]["batch_size"])
     num_workers = int(config["train"].get("num_workers", 0))
@@ -358,6 +360,7 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
         dataset = STGraphDataset(rows)
         dataset.driver_to_idx = dict(driver_to_idx)
         dataset.feature_scaler = scaler
+        dataset.edge_feature_scaler = edge_scaler
         dataset.split_metadata = split_metadata
         generator = torch.Generator().manual_seed(seed) if shuffle else None
         return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,

@@ -65,6 +65,26 @@ class ConfigValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_config(config)
 
+    def test_physical_context_schema_requires_matching_dimensions(self):
+        config = copy.deepcopy(self.config)
+        config["graph"].update({
+            "node_feature_schema": "circuit_context_v1",
+            "edge_feature_schema": "physical_v1",
+            "neighbor_mode": "physical_circuit",
+        })
+        config["model"].update({"in_dim": 19, "edge_dim": 4})
+        validate_config(config)
+
+        wrong_width = copy.deepcopy(config)
+        wrong_width["model"]["edge_dim"] = 1
+        with self.assertRaisesRegex(ValueError, "model.edge_dim"):
+            validate_config(wrong_width)
+
+        wrong_neighbors = copy.deepcopy(config)
+        wrong_neighbors["graph"]["neighbor_mode"] = "race_progress"
+        with self.assertRaisesRegex(ValueError, "requires neighbor_mode"):
+            validate_config(wrong_neighbors)
+
 
 if __name__ == "__main__":
     unittest.main()
