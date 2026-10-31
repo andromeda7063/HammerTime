@@ -1,7 +1,7 @@
 """
 Module M6: Model Definition
 Responsibility: Define the dynamic Spatio-Temporal Graph Attention Network (ST-GNN).
-Stages: Linear projection -> GATConv x2 (edge_dim=1, heads=4) -> Conv1d (time) -> MLP head.
+Stages: Linear projection -> GATConv x2 -> causal temporal module -> MLP head.
 Standard: ASD-STE100 Plain English
 """
 
@@ -16,6 +16,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("hammertime.model")
 
 
+class CausalGatedResidualBlock(nn.Module):
+    """Gated dilated temporal convolution with left-only padding and a residual."""
+
+    def __init__(self, channels: int, dilation: int, dropout: float = 0.1):
+        super().__init__()
+        if channels <= 0 or dilation <= 0:
+            raise ValueError("channels and dilation must be positive.")
+        self.dilation = int(dilation)
+        self.kernel_size = 3
+        self.causal_conv = nn.Conv1d(channels, channels * 2, self.kernel_size,
+                                     dilation=self.dilation, padding=0)
+        self.projection = nn.Conv1d(channels, channels, kernel_size=1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, sequence: torch.Tensor) -> torch.Tensor:
+        left_padding = (self.kernel_size - 1) * self.dilation
+        filtered = self.causal_conv(F.pad(sequence, (left_padding, 0)))
+        content, gate = filtered.chunk(2, dim=1)
+        gated = torch.tanh(content) * torch.sigmoid(gate)
+        return sequence + self.dropout(self.projection(gated))
+
+
 def load_config(config_path: str = "configs/default.yaml") -> dict:
     """Load configuration dictionary."""
     with open(config_path, "r", encoding="utf-8") as f:
@@ -27,7 +49,7 @@ class HammerTimeSTGNN(nn.Module):
     Spatio-Temporal Graph Neural Network for F1 Traffic Delay Prediction.
     Stage 1: Input projection (Linear)
     Stage 2: Spatial graph attention (2x GATConv with dynamic RBF edge weights)
-    Stage 3: Temporal convolution across W snapshots (Conv1d)
+    Stage 3: Legacy Conv1d or an optional gated dilated causal residual block stack
     Stage 4: MLP head predicting delta t_sector per car
     """
     def __init__(
@@ -37,13 +59,21 @@ class HammerTimeSTGNN(nn.Module):
         gat_heads: int = 4,
         edge_dim: int = 1,
         conv1d_kernel: int = 3,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        temporal_mode: str = "conv",
+        temporal_dilations: list[int] | tuple[int, ...] = (1, 2, 4),
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
             raise ValueError("hidden_dim must be positive and divisible by gat_heads.")
         if conv1d_kernel <= 0:
             raise ValueError("conv1d_kernel must be positive.")
+        if temporal_mode not in ("conv", "gated_dilated"):
+            raise ValueError("temporal_mode must be 'conv' or 'gated_dilated'.")
+        if (not isinstance(temporal_dilations, (list, tuple)) or not temporal_dilations
+                or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                       for item in temporal_dilations)):
+            raise ValueError("temporal_dilations must contain positive integers.")
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.gat_heads = gat_heads
@@ -71,13 +101,17 @@ class HammerTimeSTGNN(nn.Module):
             add_self_loops=False
         )
 
-        # Stage 3: Temporal Convolution over W-window
-        self.tconv = nn.Conv1d(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim,
-            kernel_size=conv1d_kernel,
-            padding=0
-        )
+        # Stage 3: Legacy convolution stays parameter-identical for old checkpoints.
+        self.temporal_mode = temporal_mode
+        if temporal_mode == "conv":
+            self.tconv = nn.Conv1d(hidden_dim, hidden_dim, kernel_size=conv1d_kernel, padding=0)
+            self.temporal_blocks = nn.ModuleList()
+        else:
+            self.tconv = None
+            self.temporal_blocks = nn.ModuleList(
+                CausalGatedResidualBlock(hidden_dim, dilation, dropout)
+                for dilation in temporal_dilations
+            )
 
         # Stage 4: MLP Regression Head
         self.head = nn.Sequential(
@@ -137,11 +171,13 @@ class HammerTimeSTGNN(nn.Module):
         # Stack over time: [N, hidden_dim, W]
         z = torch.stack(outs, dim=2)
 
-        # Temporal convolution over W window
-        # Pad only on the left so the final output uses the complete recent
-        # history and never depends on future (right-padding) positions.
-        z = F.pad(z, (self.tconv.kernel_size[0] - 1, 0))
-        z = torch.relu(self.tconv(z))
+        if self.temporal_mode == "conv":
+            # Preserve the legacy causal temporal path exactly.
+            z = F.pad(z, (self.tconv.kernel_size[0] - 1, 0))
+            z = torch.relu(self.tconv(z))
+        else:
+            for temporal_block in self.temporal_blocks:
+                z = temporal_block(z)
 
         # Take last time step
         z_last = z[:, :, -1]  # [N, hidden_dim]
@@ -179,7 +215,9 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         gat_heads=m_cfg.get("gat_heads", 4),
         edge_dim=m_cfg.get("edge_dim", 1),
         conv1d_kernel=m_cfg.get("conv1d_kernel", 3),
-        dropout=m_cfg.get("dropout", 0.1)
+        dropout=m_cfg.get("dropout", 0.1),
+        temporal_mode=m_cfg.get("temporal_mode", "conv"),
+        temporal_dilations=m_cfg.get("temporal_dilations", [1, 2, 4]),
     )
 
 

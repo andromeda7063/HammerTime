@@ -15,10 +15,13 @@ The fixed candidate order is:
 2. `self_loop_only_k3`: remove stored inter-car edges; HammerTime inserts one
    self-loop per node before each GAT layer. Both `GATConv` layers have internal
    self-loop insertion disabled.
-3. `temporal_kernel_1`: current graph and kernel 1.
-4. `temporal_kernel_10`: current graph and kernel 10.
-5. `constant_edge_attribute_k3`: preserve edge topology and set each stored
+3. `temporal_kernel_1`: legacy temporal mode, current graph, and kernel 1.
+4. `temporal_kernel_10`: legacy temporal mode, current graph, and kernel 10.
+5. `constant_edge_attribute_k3`: legacy temporal mode; preserve edge topology and set each stored
    edge attribute to 1.0; the model's self-loop attribute is also 1.0.
+6. `gated_dilated_full_history`: replace only the temporal module with three
+   gated residual causal convolutions using dilations 1, 2, and 4. Their
+   receptive field is 15 frames, covering the fixed 10-frame input.
 
 Runs are registered before fitting. The manifest records the effective config,
 Git revision and dirty state, source provenance, hashes of training and
@@ -33,6 +36,11 @@ validation checkpoint before reporting metrics and verifies the saved MAE.
 The zero-prediction baseline uses those same validation labels and is context
 only; it is not a candidate or selection input.
 
+Prepared config compatibility allows only `model.temporal_mode`,
+`model.temporal_dilations`, and isolated cache/output/checkpoint paths to differ
+from the source artifact. Data, targets, scaler, split, and training settings
+must match the prepared config.
+
 A capped pilot is always marked incomplete and has no selected candidate. A
 complete study requires every candidate across at least three matched seeds.
 The predeclared selection metric is mean validation MAE, with candidate order
@@ -44,7 +52,8 @@ Prior project reports expose held-out test outcomes. This runner never receives,
 iterates, or scores that test loader. No test-set performance claim or
 validation-selected checkpoint evaluation is produced by the ablation runner.
 
-No authentic ablation has been run by this implementation note. Before an
-experiment, verify authentic source hashes and prepared-data membership, freeze
-the generated preregistration manifest, and record any incomplete pilot as
+The local record contains a one-epoch, seed-42 CPU `current_k3` throughput pilot
+only. It is incomplete, has no candidate selection, and was scored on validation
+data only; see `.local/research-history/2026-10-31/ablation-pilot.log`. No
+comparative ablation result is established. Record future capped pilots as
 throughput evidence only.

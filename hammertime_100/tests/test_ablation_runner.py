@@ -1,6 +1,7 @@
 """Offline contracts for pre-registered validation-only ablation runs."""
 
 import inspect
+import copy
 import hashlib
 import json
 import sys
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
+import yaml
 from torch_geometric.data import Data
 from torch.utils.data import DataLoader
 from sklearn.preprocessing import StandardScaler
@@ -61,11 +63,15 @@ def source_provenance(directory):
     artifact = directory / "prepared.pt"
     artifact.write_bytes(b"offline unit-test artifact")
     artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    prepared_config = config()
+    config_path = directory / "source_config.yaml"
+    config_path.write_text(yaml.safe_dump(prepared_config), encoding="utf-8")
     split_membership = {"train": ["fixture-train"], "validation": ["fixture-val"]}
     manifest = {
         "provider": "FastF1", "session_identity": "unit-test-only",
         "prepared_artifact_sha256": artifact_hash,
-        "effective_config_sha256": ablation._sha256_json(config()),
+        "effective_config_sha256": ablation._sha256_json(prepared_config),
+        "config_path": str(config_path),
         "source_hashes": {"fixture-cache": "unit-test-only"},
         "coverage": {"fixture": True},
         "split_membership": split_membership,
@@ -132,6 +138,20 @@ class AblationRunnerTests(unittest.TestCase):
                     Path(temporary) / "mixed", source, "No test access.",
                     seeds=(42,), mode="pilot", max_runs=1, epoch_cap=1,
                 )
+
+    def test_source_compatibility_allows_model_only_but_rejects_protocol_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = source_provenance(Path(temporary))
+            gated = config()
+            gated["model"].update(temporal_mode="gated_dilated", temporal_dilations=[1, 2, 4])
+            checked = ablation._validate_source_provenance(source, gated)
+            self.assertEqual(set(checked["approved_config_overrides"]),
+                             {"model.temporal_mode", "model.temporal_dilations"})
+            self.assertEqual(checked["prepared_config_sha256"], source["effective_config_sha256"])
+            altered = copy.deepcopy(gated)
+            altered["data"]["horizon"] = 4
+            with self.assertRaisesRegex(ValueError, "outside the allowlist"):
+                ablation._validate_source_provenance(source, altered)
 
     def test_pilot_preregisters_before_run_and_reloads_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as temporary:

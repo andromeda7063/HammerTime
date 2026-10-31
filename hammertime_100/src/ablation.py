@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, SequentialSampler
+import yaml
 
 from dataset import collate_st_graph_windows
 from evaluate import compute_metrics
@@ -23,12 +24,14 @@ from train import train_model
 
 
 ABLATION_CANDIDATES = [
-    {"name": "current_k3", "temporal_kernel": 3, "graph": "current"},
-    {"name": "self_loop_only_k3", "temporal_kernel": 3, "graph": "self_loop_only"},
-    {"name": "temporal_kernel_1", "temporal_kernel": 1, "graph": "current"},
-    {"name": "temporal_kernel_10", "temporal_kernel": 10, "graph": "current"},
+    {"name": "current_k3", "temporal_kernel": 3, "temporal_mode": "conv", "graph": "current"},
+    {"name": "self_loop_only_k3", "temporal_kernel": 3, "temporal_mode": "conv", "graph": "self_loop_only"},
+    {"name": "temporal_kernel_1", "temporal_kernel": 1, "temporal_mode": "conv", "graph": "current"},
+    {"name": "temporal_kernel_10", "temporal_kernel": 10, "temporal_mode": "conv", "graph": "current"},
     {"name": "constant_edge_attribute_k3", "temporal_kernel": 3,
-     "graph": "constant_edge_attribute", "constant": 1.0},
+     "temporal_mode": "conv", "graph": "constant_edge_attribute", "constant": 1.0},
+    {"name": "gated_dilated_full_history", "temporal_kernel": 3,
+     "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4], "graph": "current"},
 ]
 
 
@@ -46,6 +49,17 @@ def _sha256_file(path):
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _flatten_mapping(value, prefix=""):
+    flattened = {}
+    for key, item in value.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(item, dict):
+            flattened.update(_flatten_mapping(item, path))
+        else:
+            flattened[path] = item
+    return flattened
 
 
 def _validate_source_provenance(source_provenance, config):
@@ -87,8 +101,14 @@ def _validate_source_provenance(source_provenance, config):
     artifact_hash = manifest.get("artifact", {}).get("sha256", manifest.get("prepared_artifact_sha256"))
     if artifact_hash != source_provenance["prepared_artifact_sha256"]:
         raise ValueError("Prepared artifact hash disagrees with the manifest payload.")
-    if manifest.get("effective_config_sha256") != _sha256_json(config):
-        raise ValueError("Effective config does not match the authentic prepared artifact manifest.")
+    prepared_config_path = manifest.get("config_path")
+    if not prepared_config_path or not Path(prepared_config_path).is_file():
+        raise ValueError("Prepared artifact manifest does not reference its effective config file.")
+    with Path(prepared_config_path).open("r", encoding="utf-8") as source:
+        prepared_config = yaml.safe_load(source)
+    prepared_config_hash = _sha256_json(prepared_config)
+    if manifest.get("effective_config_sha256") != prepared_config_hash:
+        raise ValueError("Prepared artifact effective config hash is invalid.")
     source_hashes = manifest.get("source_hashes") or manifest.get("imported_cache_hashes")
     if not isinstance(source_hashes, dict) or not source_hashes:
         raise ValueError("Authentic artifact manifest has no source cache hashes.")
@@ -105,9 +125,32 @@ def _validate_source_provenance(source_provenance, config):
         valid_membership = membership_hashes == _sha256_json(membership)
     if not valid_membership:
         raise ValueError("Split membership hash in prepared artifact manifest is invalid.")
-    if source_provenance["effective_config_sha256"] != _sha256_json(config):
-        raise ValueError("Provided effective config hash does not match the runner config.")
-    return manifest
+    if source_provenance["effective_config_sha256"] != prepared_config_hash:
+        raise ValueError("Provided effective config hash does not match the prepared config.")
+    approved_overrides = {
+        "model.temporal_mode", "model.temporal_dilations", "session.cache_dir",
+        "session.processed_dir", "train.checkpoint_path", "train.history_path",
+    }
+    prepared_flat = _flatten_mapping(prepared_config)
+    current_flat = _flatten_mapping(config)
+    differences = {
+        key: {"prepared": prepared_flat.get(key, "<absent>"),
+              "current": current_flat.get(key, "<absent>")}
+        for key in set(prepared_flat) | set(current_flat)
+        if _stable_json(prepared_flat.get(key, "<absent>")) !=
+           _stable_json(current_flat.get(key, "<absent>"))
+    }
+    forbidden = set(differences).difference(approved_overrides)
+    if forbidden:
+        raise ValueError(f"Runner config changes data/training protocol keys outside the allowlist: {sorted(forbidden)}")
+    return {
+        "manifest": manifest,
+        "prepared_config_sha256": prepared_config_hash,
+        "data_protocol_config_sha256": _sha256_json({
+            key: value for key, value in prepared_flat.items() if key not in approved_overrides
+        }),
+        "approved_config_overrides": differences,
+    }
 
 
 def _git_metadata():
@@ -305,7 +348,8 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
             int(config["data"]["horizon"]) != 5 or
             int(config["model"]["conv1d_kernel"]) != 3):
         raise ValueError("Ablations require the configured W=10, K=5, kernel=3 reference protocol.")
-    prepared_manifest = _validate_source_provenance(source_provenance, config)
+    prepared_validation = _validate_source_provenance(source_provenance, config)
+    prepared_manifest = prepared_validation["manifest"]
     if not isinstance(getattr(val_loader, "sampler", None), SequentialSampler):
         raise ValueError("Ablation requires the existing sequential validation loader.")
     total_runs = len(ABLATION_CANDIDATES) * len(seeds)
@@ -341,6 +385,9 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         "environment": _environment_metadata(device),
         "configuration": effective_config,
         "configuration_sha256": _sha256_json(effective_config),
+        "prepared_data_config_sha256": prepared_validation["prepared_config_sha256"],
+        "data_protocol_config_sha256": prepared_validation["data_protocol_config_sha256"],
+        "approved_config_overrides": prepared_validation["approved_config_overrides"],
         "source_provenance": source_provenance,
         "source_provenance_sha256": _sha256_json(source_provenance),
         "prepared_manifest_coverage": prepared_manifest.get("coverage", {}),
@@ -394,6 +441,10 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                     break
                 trial_config = copy.deepcopy(effective_config)
                 trial_config["model"]["conv1d_kernel"] = int(candidate["temporal_kernel"])
+                trial_config["model"]["temporal_mode"] = candidate["temporal_mode"]
+                trial_config["model"]["temporal_dilations"] = candidate.get(
+                    "temporal_dilations", [1, 2, 4]
+                )
                 trial_config["data"]["random_seed"] = int(seed)
                 trial_dir = study_dir / f"candidate_{candidate_index:02d}" / f"seed_{seed}"
                 trial_dir.mkdir(parents=True, exist_ok=False)

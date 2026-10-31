@@ -95,6 +95,17 @@ def validate_config(config: dict) -> None:
         raise ValueError("data.min_valid_targets_per_sample cannot exceed graph.num_nodes.")
     if value("model.hidden_dim") % value("model.gat_heads"):
         raise ValueError("model.hidden_dim must be divisible by model.gat_heads.")
+    temporal_mode = config["model"].get("temporal_mode", "conv")
+    if temporal_mode not in ("conv", "gated_dilated"):
+        raise ValueError("model.temporal_mode must be 'conv' or 'gated_dilated'.")
+    dilations = config["model"].get("temporal_dilations", [1, 2, 4])
+    if (not isinstance(dilations, list) or not dilations
+            or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in dilations)):
+        raise ValueError("model.temporal_dilations must be a non-empty list of positive integers.")
+    if temporal_mode == "gated_dilated":
+        receptive_field = 1 + 2 * sum(dilations)
+        if receptive_field < value("data.window_size"):
+            raise ValueError("model.temporal_dilations must provide a receptive field covering data.window_size.")
     if value("model.edge_dim") != 1:
         raise ValueError("model.edge_dim must be 1 for the current RBF graph schema.")
     categories = value("graph.compound_categories")
