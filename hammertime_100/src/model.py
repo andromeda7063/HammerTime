@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GATConv
 import yaml
+from physical_graph import EDGE_FEATURES_BY_SCHEMA
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hammertime.model")
@@ -63,6 +64,7 @@ class HammerTimeSTGNN(nn.Module):
         dropout: float = 0.1,
         temporal_mode: str = "conv",
         temporal_dilations: list[int] | tuple[int, ...] = (1, 2, 4),
+        edge_feature_schema: str = "scalar_rbf",
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
@@ -75,9 +77,15 @@ class HammerTimeSTGNN(nn.Module):
                 or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0
                        for item in temporal_dilations)):
             raise ValueError("temporal_dilations must contain positive integers.")
+        if edge_feature_schema not in EDGE_FEATURES_BY_SCHEMA:
+            raise ValueError("edge_feature_schema must be scalar_rbf or physical_v1.")
+        if edge_dim != len(EDGE_FEATURES_BY_SCHEMA[edge_feature_schema]):
+            raise ValueError("edge_dim does not match edge_feature_schema width.")
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.gat_heads = gat_heads
+        self.edge_dim = edge_dim
+        self.edge_feature_schema = edge_feature_schema
         head_dim = hidden_dim // gat_heads
 
         # Stage 1: Linear Input Projection
@@ -122,21 +130,39 @@ class HammerTimeSTGNN(nn.Module):
             nn.Linear(hidden_dim, 1)
         )
 
-    def _ensure_self_loops(self, num_nodes: int, edge_index: torch.Tensor, edge_attr: torch.Tensor, device):
+    def _ensure_self_loops(self, num_nodes: int, edge_index: torch.Tensor,
+                           edge_attr: torch.Tensor, device, position_coverage=1.0):
         """
         Adds self-loops to guaranteed graph connectivity even when active edges are 0.
         Self-loop weight is 1.0 (zero gap to self).
         """
         loop_index = torch.arange(num_nodes, dtype=torch.long, device=device).unsqueeze(0).repeat(2, 1)
-        loop_attr = torch.ones((num_nodes, 1), dtype=torch.float, device=device)
+        if self.edge_feature_schema == "scalar_rbf":
+            loop_attr = torch.ones((num_nodes, 1), dtype=torch.float, device=device)
+        else:
+            coverage = torch.as_tensor(position_coverage, dtype=torch.float, device=device).reshape(-1)
+            if coverage.numel() == 0:
+                coverage = torch.zeros(1, dtype=torch.float, device=device)
+            if coverage.numel() != 1:
+                raise ValueError("position_coverage must be a scalar per snapshot.")
+            loop_attr = torch.zeros((num_nodes, 4), dtype=torch.float, device=device)
+            loop_attr[:, 0] = 1.0
+            loop_attr[:, 3] = coverage[0]
 
         if edge_index is None or edge_index.size(1) == 0:
             return loop_index, loop_attr
         edge_index = edge_index.to(device)
         if edge_attr is None:
-            edge_attr = torch.ones((edge_index.size(1), 1), dtype=torch.float, device=device)
+            if self.edge_feature_schema == "scalar_rbf":
+                edge_attr = torch.ones((edge_index.size(1), 1), dtype=torch.float, device=device)
+            else:
+                edge_attr = torch.zeros((edge_index.size(1), 4), dtype=torch.float, device=device)
+                edge_attr[:, 0] = 1.0
+                edge_attr[:, 3] = coverage[0]
         else:
             edge_attr = edge_attr.to(device)
+        if edge_attr.ndim != 2 or edge_attr.size(1) != self.edge_dim:
+            raise ValueError(f"Expected edge_attr shape [E, {self.edge_dim}].")
 
         combined_index = torch.cat([edge_index, loop_index], dim=1)
         combined_attr = torch.cat([edge_attr, loop_attr], dim=0)
@@ -159,7 +185,8 @@ class HammerTimeSTGNN(nn.Module):
 
             # 2. Add self-loops for robust message passing
             edge_idx, edge_attr = self._ensure_self_loops(
-                N, getattr(g, "edge_index", None), getattr(g, "edge_attr", None), device
+                N, getattr(g, "edge_index", None), getattr(g, "edge_attr", None), device,
+                getattr(g, "position_coverage", 1.0),
             )
             edge_idx = edge_idx.to(device)
             edge_attr = edge_attr.to(device=device, dtype=h.dtype)
@@ -207,7 +234,8 @@ class HammerTimeSTGNN(nn.Module):
                 x = snapshot.x.to(device=device, dtype=dtype)
                 edge_index, edge_attr = self._ensure_self_loops(
                     num_nodes, getattr(snapshot, "edge_index", None),
-                    getattr(snapshot, "edge_attr", None), device
+                    getattr(snapshot, "edge_attr", None), device,
+                    getattr(snapshot, "position_coverage", 1.0),
                 )
                 graphs.append(Data(x=x, edge_index=edge_index,
                                    edge_attr=edge_attr.to(device=device, dtype=dtype)))
@@ -258,6 +286,7 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         dropout=m_cfg.get("dropout", 0.1),
         temporal_mode=m_cfg.get("temporal_mode", "conv"),
         temporal_dilations=m_cfg.get("temporal_dilations", [1, 2, 4]),
+        edge_feature_schema=config.get("graph", {}).get("edge_feature_schema", "scalar_rbf"),
     )
 
 
