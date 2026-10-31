@@ -1,0 +1,121 @@
+# OpenF1-only three-event cohort. Race order determines the existing race split:
+# Monza=train (its old test result was exposed), Silverstone=validation,
+# Budapest/Hungary=test (new race). Do not combine with FastF1 artifacts.
+session:
+  year: 2023
+  gp: Monza
+  session_type: R
+  session_key: 9157
+  race_id: 2023-Monza-R
+  source: openf1
+  cache_dir: data/cache/openf1_2023_race_cohort
+  processed_dir: data/processed/openf1_2023_race_holdout
+sessions:
+  - year: 2023
+    gp: Monza
+    session_type: R
+    session_key: 9157
+    race_id: 2023-Monza-R
+    source: openf1
+    lap_length_m: 5793.0 # https://www.formula1.com/en/racing/2023/italy
+  - year: 2023
+    gp: Silverstone
+    session_type: R
+    session_key: 9126
+    race_id: 2023-Silverstone-R
+    source: openf1
+    lap_length_m: 5891.0 # https://www.formula1.com/en/racing/2023/great-britain
+  - year: 2023
+    gp: Budapest # OpenF1's session.location value for session_key 9133
+    session_type: R
+    session_key: 9133
+    race_id: 2023-Hungary-R
+    source: openf1
+    lap_length_m: 4381.0 # https://www.formula1.com/en/racing/2023/hungary
+track:
+  mini_sectors: 20
+  lap_length_m: 5793.0
+preprocess:
+  sample_hz: 4.0
+  max_interpolate_sec: 1.0
+  flag_safety_car: true
+  flag_pit_laps: true
+graph:
+  num_nodes: 20
+  edge_threshold_sec: 2.0
+  rbf_sigma: 1.0
+  node_features: [velocity, throttle, tyre_compound, tyre_age, mini_sector_idx]
+  compound_categories: [SOFT, MEDIUM, HARD, INTERMEDIATE, WET]
+target:
+  clean_air_gap_sec: 3.0
+  min_clean_samples: 3
+  clip_delta_sec: [-2.0, 10.0]
+data:
+  window_size: 10
+  horizon: 5
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  split_method: race
+  timestamp_tolerance_sec: 0.1275
+  continuity_tolerance_sec: 0.05
+  min_valid_targets_per_sample: 1
+  random_seed: 42
+model:
+  name: HammerTime_STGNN
+  in_dim: 9
+  hidden_dim: 64
+  gat_heads: 4
+  edge_dim: 1
+  conv1d_kernel: 3
+  temporal_mode: gated_dilated
+  temporal_dilations: [1, 2, 4]
+  dropout: 0.1
+train:
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0001
+  max_epochs: 25
+  early_stopping_patience: 6
+  checkpoint_path: data/processed/openf1_2023_race_holdout/best.pt
+  num_workers: 0
+tuning:
+  enabled: false
+  seeds: [42, 43, 44]
+  candidates:
+    - train.lr: 0.001
+    - train.lr: 0.0003
+    - train.lr: 0.003
+baselines:
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+  lstm:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+    lr: 0.001
+    epochs: 40
+    batch_size: 64
+physics_tests:
+  clean_air_max_mae: 0.05
+  drs_train_min_lap_loss: 0.1
+  drs_train_max_lap_loss: 0.8
+  drs_max_gap_sec: 0.8
+presentation:
+  palette:
+    carbon_dark: '#15151E'
+    f1_red: '#E10600'
+    pure_white: '#FFFFFF'
+    accent_silver: '#A0A0A5'
+    drs_green: '#00D2BE'
+  font_family: Titillium Web, sans-serif
+openf1:
+  base_url: https://api.openf1.org/v1
+  timeout_sec: 30
+  max_attempts: 3
+  chunk_seconds: 7200
+  request_interval_sec: 2.1
+  fetch_location: true
