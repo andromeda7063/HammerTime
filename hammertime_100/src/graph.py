@@ -111,6 +111,12 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
       - mask: [20] boolean mask (True = active car on track)
       - time_sec: timestamp
     """
+    # Pandas copies DataFrame.attrs into every row Series returned by iterrows.
+    # Coverage/provenance attrs can be large, so create a no-copy local frame
+    # without metadata rather than paying that deepcopy once per telemetry row.
+    # The caller's DataFrame and its attrs remain untouched.
+    if aligned_df.attrs:
+        aligned_df = pd.DataFrame(aligned_df, copy=False)
     max_gap = config["graph"]["edge_threshold_sec"]
     sigma = config["graph"]["rbf_sigma"]
     num_nodes = config["graph"]["num_nodes"]
@@ -141,14 +147,12 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
     idx_to_driver = {idx: drv for drv, idx in driver_to_idx.items()}
 
     snapshots = []
-    timestamps = sorted(aligned_df["TimeSec"].unique())
-    logger.info(f"Building graph snapshots across {len(timestamps)} time steps for {len(unique_drivers)} drivers...")
+    # GroupBy iteration is sorted by timestamp and yields the same source rows
+    # as get_group(), without a separate timestamp list and repeated lookups.
+    grouped = aligned_df.groupby("TimeSec", sort=True)
+    logger.info(f"Building graph snapshots across {len(grouped)} time steps for {len(unique_drivers)} drivers...")
 
-    # Group by timestamp for efficient vectorization
-    grouped = aligned_df.groupby("TimeSec")
-
-    for t_sec in timestamps:
-        group = grouped.get_group(t_sec)
+    for t_sec, group in grouped:
         x_mat = np.zeros((num_nodes, node_dim), dtype=np.float32)
         mask = np.zeros(num_nodes, dtype=bool)
         driver_names = [None] * num_nodes
