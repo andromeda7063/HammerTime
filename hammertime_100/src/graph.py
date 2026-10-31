@@ -221,12 +221,29 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
 
 def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
                               num_nodes: int) -> dict:
-    """Apply one stable node index to driver identities across race sessions."""
+    """Assign stable slots, reusing a slot only for drivers from disjoint races."""
     drivers = sorted({str(driver) for mapping in session_driver_maps.values()
                       for driver in mapping})
-    if len(drivers) > num_nodes:
-        raise ValueError(f"Cohort has {len(drivers)} distinct drivers, exceeding graph.num_nodes={num_nodes}.")
-    canonical = {driver: index for index, driver in enumerate(drivers)}
+    driver_races = {driver: set() for driver in drivers}
+    for race_id, mapping in session_driver_maps.items():
+        for driver in mapping:
+            driver_races[str(driver)].add(str(race_id))
+
+    # Driver identifiers from different sessions may differ because of a
+    # substitution. Reuse a fixed 20-car slot only when two identifiers never
+    # coexist in any configured race; every race still has unique node slots.
+    slot_occupants: list[list[str]] = [[] for _ in range(num_nodes)]
+    canonical = {}
+    for driver in drivers:
+        for slot, occupants in enumerate(slot_occupants):
+            if all(not (driver_races[driver] & driver_races[other]) for other in occupants):
+                canonical[driver] = slot
+                occupants.append(driver)
+                break
+        else:
+            raise ValueError(
+                f"Cohort requires more than graph.num_nodes={num_nodes} simultaneous driver slots."
+            )
     for snapshot in snapshots:
         race_id = str(getattr(snapshot, "race_id", ""))
         if race_id not in session_driver_maps:
@@ -234,6 +251,8 @@ def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
         local = session_driver_maps[race_id]
         old_to_new = {old_index: canonical[str(driver)]
                       for driver, old_index in local.items()}
+        if len(set(old_to_new.values())) != len(old_to_new):
+            raise ValueError(f"Driver node slots collide within race {race_id!r}.")
         features = snapshot.x.clone()
         mask = snapshot.mask.clone()
         names = list(snapshot.driver_names)

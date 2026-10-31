@@ -108,20 +108,34 @@ class PrepareCohortTests(unittest.TestCase):
             )
             self.assertEqual(checked_manifest["prepared_manifest_sha256"],
                              manifest["prepared_manifest_sha256"])
-            self.assertEqual(payload["driver_to_idx"], {"AA": 0, "BB": 1, "CC": 2, "DD": 3})
+            self.assertEqual(payload["driver_to_idx"], {"AA": 0, "BB": 1, "CC": 0, "DD": 1})
             by_race = {snapshot.race_id: snapshot for snapshot in payload["snapshots"]
                        if snapshot.time_sec == 0.0}
-            self.assertEqual(by_race["race-b"].driver_names[:4], [None, "BB", "CC", None])
-            self.assertEqual(by_race["race-b"].edge_index.tolist(), [[1], [2]])
+            self.assertEqual(by_race["race-b"].driver_names[:3], ["CC", "BB", None])
+            self.assertEqual(by_race["race-b"].edge_index.tolist(), [[1], [0]])
             self.assertEqual(payload["provenance"]["prepared_artifact_sha256"],
                              manifest["prepared_artifact_sha256"])
             with self.assertRaises(FileExistsError):
                 prepare_cohort.prepare_cohort(config_path, output_dir)
 
-    def test_global_mapping_rejects_cohorts_exceeding_node_capacity(self):
-        snapshots, local = make_graphs("race-a", ["AA", "BB"])
-        with self.assertRaisesRegex(ValueError, "exceeding graph.num_nodes"):
-            remap_cohort_driver_nodes(snapshots, {"race-a": local}, num_nodes=1)
+    def test_substitutes_reuse_slots_for_more_than_twenty_driver_identities(self):
+        first = [f"D{index:02d}" for index in range(20)]
+        second = [f"D{index:02d}" for index in range(1, 21)]
+        first_graphs, first_map = make_graphs("race-a", first, times=1)
+        second_graphs, second_map = make_graphs("race-b", second, times=1)
+
+        driver_to_idx = remap_cohort_driver_nodes(
+            first_graphs + second_graphs,
+            {"race-a": first_map, "race-b": second_map}, num_nodes=20,
+        )
+
+        self.assertEqual(len(driver_to_idx), 21)
+        self.assertLess(max(driver_to_idx.values()), 20)
+        self.assertEqual(len({driver_to_idx[driver] for driver in first}), 20)
+        self.assertEqual(len({driver_to_idx[driver] for driver in second}), 20)
+        self.assertEqual(driver_to_idx["D00"], driver_to_idx["D20"])
+        self.assertEqual(len(first_graphs[0].driver_names), 20)
+        self.assertEqual(len(second_graphs[0].driver_names), 20)
 
 
 if __name__ == "__main__":
