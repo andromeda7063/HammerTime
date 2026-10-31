@@ -35,6 +35,7 @@ class TargetMeasurementTests(unittest.TestCase):
         crossing = 0.7 + (50.0 - 30.0) / 30.0 * 0.7
         np.testing.assert_allclose(result["Duration"], [crossing, 2.8 - crossing])
         np.testing.assert_allclose(result["TimeSec"], [0.0, crossing])
+        np.testing.assert_allclose(result["SectorExitTimeSec"], [crossing, 2.8])
         self.assertAlmostEqual(result["Duration"].sum(), 2.8)
 
     def test_original_call_measures_elapsed_time_instead_of_wake_formula(self):

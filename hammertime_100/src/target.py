@@ -90,6 +90,7 @@ def calculate_mini_sector_durations(
                     "MiniSector": sector, "Compound": compounds[0],
                     "Duration": duration, "AvgGap": float(sector_rows["DeltaT"].mean()) if "DeltaT" in rows else np.nan,
                     "TimeSec": float(entry),
+                    "SectorExitTimeSec": float(exit_time),
                 }
                 if "Team" in rows:
                     teams = sector_rows["Team"].dropna().astype(str)
@@ -202,6 +203,7 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
         labels.append({
             "Driver": drv,
             "TimeSec": row["TimeSec"],
+            "SectorExitTimeSec": row["SectorExitTimeSec"],
             "LapNumber": row["LapNumber"],
             "MiniSector": sec,
             "Duration": actual_dur,

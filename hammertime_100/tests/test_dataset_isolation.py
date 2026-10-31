@@ -45,6 +45,10 @@ class DatasetIsolationTests(unittest.TestCase):
         self.assertEqual(scaler.n_samples_seen_, 10)
         self.assertIs(validation.dataset.feature_scaler, scaler)
         self.assertIs(test.dataset.feature_scaler, scaler)
+        diagnostic = test.dataset.split_metadata["outcome_boundary_diagnostics"]["train_to_validation"]
+        self.assertEqual(diagnostic["status"], "unavailable")
+        self.assertIn("separate sessions", diagnostic["reason"])
+        self.assertIsNone(diagnostic["crossing_count"])
 
     def test_missing_frame_breaks_full_forecast_span(self):
         frames = [snapshot(time) for time in (0.0, 0.25, 0.75, 1.0, 1.25)]

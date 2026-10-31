@@ -131,6 +131,7 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
         gaps = np.full(n_nodes, np.nan, dtype=np.float32)
         laps = np.full(n_nodes, np.nan, dtype=np.float32)
         sectors = np.full(n_nodes, np.nan, dtype=np.float32)
+        outcome_exits = np.full(n_nodes, np.nan, dtype=np.float64)
         driver_names = getattr(ordered[target_idx], "driver_names", None)
         for row in target_rows.itertuples(index=False):
             driver = getattr(row, "Driver")
@@ -153,6 +154,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                     laps[node] = float(getattr(row, "LapNumber"))
                 if hasattr(row, "MiniSector") and pd.notna(getattr(row, "MiniSector")):
                     sectors[node] = float(getattr(row, "MiniSector"))
+                if hasattr(row, "SectorExitTimeSec") and pd.notna(getattr(row, "SectorExitTimeSec")):
+                    outcome_exits[node] = float(getattr(row, "SectorExitTimeSec"))
         valid &= _as_bool_mask(ordered[target_idx])
         if valid.sum() < min_valid_targets:
             continue
@@ -162,6 +165,7 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                         "gap_sec": gaps,
                         "lap_number": laps,
                         "mini_sector": sectors,
+                        "outcome_exit_time_sec": outcome_exits,
                         "time_sec": float(times[target_idx]),
                         "input_start_time": float(times[start]),
                         "target_time": float(times[target_idx]),
@@ -231,6 +235,51 @@ def _partition_races(samples, train_ratio, val_ratio):
     return groups if all(groups) else None
 
 
+def _outcome_boundary_diagnostic(left_samples, right_samples):
+    """Count labeled outcomes from one split ending after the next split starts."""
+    if not right_samples:
+        return {"status": "unavailable", "reason": "next partition is empty",
+                "boundary_input_start_time_sec": None, "valid_outcome_count": 0,
+                "metadata_missing_count": 0, "crossing_count": None, "crossing_fraction": None}
+    race_ids = {sample.get("race_id") for sample in [*left_samples, *right_samples]}
+    if len(race_ids) != 1 or None in race_ids:
+        return _unavailable_outcome_boundary_diagnostic(
+            "partition samples span multiple race sessions; session-relative timestamps are incomparable"
+        )
+    boundary = float(right_samples[0]["input_start_time"])
+    valid_count = 0
+    missing_count = 0
+    crossing_count = 0
+    for sample in left_samples:
+        valid = sample["mask"].detach().cpu().numpy().astype(bool)
+        exits = np.asarray(sample.get("outcome_exit_time_sec", []), dtype=float)
+        valid_count += int(valid.sum())
+        if len(exits) != len(valid):
+            missing_count += int(valid.sum())
+            continue
+        known = np.isfinite(exits) & valid
+        missing_count += int((valid & ~np.isfinite(exits)).sum())
+        crossing_count += int((known & (exits > boundary)).sum())
+    complete = missing_count == 0
+    return {
+        "status": "available" if complete else "unavailable",
+        "reason": None if complete else "outcome exit metadata is missing for one or more valid labels",
+        "boundary_definition": "first input_start_time_sec in the next partition",
+        "boundary_input_start_time_sec": boundary,
+        "valid_outcome_count": valid_count,
+        "metadata_missing_count": missing_count,
+        "crossing_count": crossing_count if complete else None,
+        "crossing_fraction": (crossing_count / valid_count if valid_count else None) if complete else None,
+    }
+
+
+def _unavailable_outcome_boundary_diagnostic(reason):
+    return {"status": "unavailable", "reason": reason,
+            "boundary_definition": "first input_start_time_sec in the next partition",
+            "boundary_input_start_time_sec": None, "valid_outcome_count": 0,
+            "metadata_missing_count": 0, "crossing_count": None, "crossing_fraction": None}
+
+
 def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: dict, config: dict):
     """Create chronological loaders and fit the scaler on training input frames only."""
     data_cfg = config["data"]
@@ -271,6 +320,20 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
         split = _partition_samples(samples, train_ratio, val_ratio, W + K)
     train_samples, val_samples, test_samples = split
 
+    if method == "temporal":
+        outcome_boundary_diagnostics = {
+            "train_to_validation": _outcome_boundary_diagnostic(train_samples, val_samples),
+            "validation_to_test": _outcome_boundary_diagnostic(val_samples, test_samples),
+        }
+    else:
+        unavailable = _unavailable_outcome_boundary_diagnostic(
+            "race partitions are separate sessions; their timestamps are not comparable"
+        )
+        outcome_boundary_diagnostics = {
+            "train_to_validation": unavailable.copy(),
+            "validation_to_test": unavailable.copy(),
+        }
+
     train_keys = {(sample.get("race_id"), float(s.time_sec))
                   for sample in train_samples for s in sample["snapshots"]}
     train_indices = [i for i, snap in enumerate(snapshots)
@@ -289,6 +352,7 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
                        "first_target_time": val_samples[0].get("target_time"), "last_target_time": val_samples[-1].get("target_time")},
         "test": {"sample_count": len(test_samples), "race_ids": sorted({str(s["race_id"]) for s in test_samples if s.get("race_id") is not None}),
                  "first_target_time": test_samples[0].get("target_time"), "last_target_time": test_samples[-1].get("target_time")},
+        "outcome_boundary_diagnostics": outcome_boundary_diagnostics,
     }
     def loader(rows, shuffle):
         dataset = STGraphDataset(rows)

@@ -1,5 +1,6 @@
 """Focused regression tests for M5 alignment, isolation, and leakage controls."""
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -38,7 +39,7 @@ class DatasetContractTests(unittest.TestCase):
         frames = [snapshot(i * 0.25, driver_names=("AA", "BB")) for i in range(5)]
         labels = pd.DataFrame([{
             "RaceId": "race-a", "Driver": "AA", "TimeSec": 0.51,
-            "DeltaT_Sector": 1.25,
+            "DeltaT_Sector": 1.25, "SectorExitTimeSec": 1.75,
         }])
 
         samples = build_windowed_samples(
@@ -51,6 +52,7 @@ class DatasetContractTests(unittest.TestCase):
         self.assertEqual(sample["target_time"], 0.5)
         self.assertTrue(sample["mask"].tolist() == [True, False])
         self.assertAlmostEqual(float(sample["target"][0]), 1.25)
+        self.assertAlmostEqual(sample["outcome_exit_time_sec"][0], 1.75)
 
     def test_windows_are_isolated_by_race_when_timestamps_repeat(self):
         frames = [snapshot(t, race_id=race) for race in ("race-a", "race-b")
@@ -90,7 +92,7 @@ class DatasetContractTests(unittest.TestCase):
         frames = [snapshot(i * 0.25, value=float(i)) for i in range(100)]
         labels = pd.DataFrame([
             {"RaceId": "race-a", "Driver": driver, "TimeSec": i * 0.25,
-             "DeltaT_Sector": float(i % 7)}
+             "DeltaT_Sector": float(i % 7), "SectorExitTimeSec": i * 0.25 + 0.1}
             for i in range(100) for driver in ("AA", "BB")
         ])
         config = {
@@ -115,6 +117,11 @@ class DatasetContractTests(unittest.TestCase):
         # the fitted first-feature mean at the average of those frame indices.
         self.assertAlmostEqual(float(scaler.mean_[0]), 27.5)
         self.assertIs(test.dataset.feature_scaler, scaler)
+        diagnostics = test.dataset.split_metadata["outcome_boundary_diagnostics"]
+        self.assertEqual(diagnostics["train_to_validation"]["status"], "available")
+        self.assertEqual(diagnostics["validation_to_test"]["status"], "available")
+        self.assertGreaterEqual(diagnostics["train_to_validation"]["crossing_count"], 0)
+        json.dumps(test.dataset.split_metadata, allow_nan=False)
 
     def test_invalid_split_ratios_raise(self):
         """Invalid split ratios not summing to 1.0 must raise ValueError."""
