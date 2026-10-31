@@ -9,6 +9,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GATConv
 import yaml
 
@@ -186,6 +187,48 @@ class HammerTimeSTGNN(nn.Module):
         out = self.head(z_last).squeeze(-1)
         return out
 
+    def _forward_batched_windows(self, batch_windows):
+        """Run spatial message passing over one disjoint union of all B*W graphs."""
+        batch_size = len(batch_windows)
+        window_size = len(batch_windows[0])
+        if window_size == 0 or any(len(window) != window_size for window in batch_windows):
+            raise ValueError("Batched windows must have the same non-zero temporal length.")
+        first_x = batch_windows[0][0].x
+        num_nodes = int(first_x.size(0))
+        if num_nodes <= 0 or any(int(snapshot.x.size(0)) != num_nodes
+                                 for window in batch_windows for snapshot in window):
+            raise ValueError("Batched windows require the same positive node count in every snapshot.")
+
+        device = self.proj.weight.device
+        dtype = self.proj.weight.dtype
+        graphs = []
+        for window in batch_windows:
+            for snapshot in window:
+                x = snapshot.x.to(device=device, dtype=dtype)
+                edge_index, edge_attr = self._ensure_self_loops(
+                    num_nodes, getattr(snapshot, "edge_index", None),
+                    getattr(snapshot, "edge_attr", None), device
+                )
+                graphs.append(Data(x=x, edge_index=edge_index,
+                                   edge_attr=edge_attr.to(device=device, dtype=dtype)))
+
+        disjoint = Batch.from_data_list(graphs).to(device)
+        h = torch.relu(self.proj(disjoint.x))
+        h = torch.relu(self.gat1(h, disjoint.edge_index, disjoint.edge_attr))
+        h = torch.relu(self.gat2(h, disjoint.edge_index, disjoint.edge_attr))
+        h = h.reshape(batch_size, window_size, num_nodes, self.hidden_dim)
+        z = h.permute(0, 2, 3, 1).contiguous()
+        z = z.reshape(batch_size * num_nodes, self.hidden_dim, window_size)
+
+        if self.temporal_mode == "conv":
+            z = F.pad(z, (self.tconv.kernel_size[0] - 1, 0))
+            z = torch.relu(self.tconv(z))
+        else:
+            for temporal_block in self.temporal_blocks:
+                z = temporal_block(z)
+        z_last = z[:, :, -1].reshape(batch_size, num_nodes, self.hidden_dim)
+        return self.head(z_last).squeeze(-1)
+
     def forward(self, batch_windows):
         """
         Accepts either:
@@ -194,12 +237,9 @@ class HammerTimeSTGNN(nn.Module):
         """
         if not batch_windows:
             raise ValueError("Model input must contain at least one graph window.")
-        if isinstance(batch_windows[0], list):
-            # Batched execution
-            preds = [self.forward_window(win) for win in batch_windows]
-            return torch.stack(preds, dim=0)
-        else:
-            return self.forward_window(batch_windows)
+        if isinstance(batch_windows[0], (list, tuple)):
+            return self._forward_batched_windows(batch_windows)
+        return self.forward_window(batch_windows)
 
 
 def create_model(config: dict) -> HammerTimeSTGNN:

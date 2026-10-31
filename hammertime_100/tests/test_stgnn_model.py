@@ -79,16 +79,43 @@ class STGNNModelTests(unittest.TestCase):
             [
                 Data(
                     x=torch.randn(20, 9),
-                    edge_index=torch.empty((2, 0), dtype=torch.long),
-                    edge_attr=torch.empty((0, 1), dtype=torch.float32),
+                    edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+                    edge_attr=torch.tensor([[0.7], [0.3]], dtype=torch.float32),
+                    mask=torch.arange(20) % 3 != 0,
                 )
                 for _ in range(10)
             ]
             for _ in range(3)
         ]
-        out = self.model(batch_windows)
+        self.model.eval()
+        with torch.no_grad():
+            reference = torch.stack([self.model.forward_window(window) for window in batch_windows])
+            out = self.model(batch_windows)
         self.assertEqual(out.shape, torch.Size([3, 20]))
         self.assertTrue(torch.isfinite(out).all())
+        torch.testing.assert_close(out, reference, rtol=1e-5, atol=1e-6)
+
+    def test_vectorized_batch_gradient_flow_is_finite(self):
+        windows = [[
+            Data(x=torch.randn(4, 9),
+                 edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+                 edge_attr=torch.tensor([[0.7], [0.4]]),
+                 mask=torch.tensor([True, True, False, True]))
+            for _ in range(10)
+        ] for _ in range(2)]
+        self.model.train()
+        self.model(windows).sum().backward()
+        for name, parameter in self.model.named_parameters():
+            if parameter.grad is not None:
+                self.assertTrue(torch.isfinite(parameter.grad).all(), f"NaN grad in {name}")
+
+    def test_vectorized_batch_rejects_variable_node_counts(self):
+        windows = [[Data(x=torch.randn(3, 9), edge_index=torch.empty((2, 0), dtype=torch.long))
+                    for _ in range(10)],
+                   [Data(x=torch.randn(4, 9), edge_index=torch.empty((2, 0), dtype=torch.long))
+                    for _ in range(10)]]
+        with self.assertRaisesRegex(ValueError, "same positive node count"):
+            self.model(windows)
 
     def test_gradient_flow_and_finite_gradients(self):
         """Verify backpropagation produces finite gradients across all weights."""

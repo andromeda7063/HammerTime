@@ -176,7 +176,7 @@ class AblationRunnerTests(unittest.TestCase):
             with patch.object(ablation, "train_model", side_effect=fake_train):
                 prereg, result = ablation.run_ablation_study(
                     self.train_loader, self.val_loader, config(), "cpu",
-                    study_path, source, exposure, seeds=(42, 43, 44),
+                    study_path, source, exposure, seeds=(7,),
                     mode="pilot", max_runs=1, epoch_cap=1, candidate_indices=(5,),
                 )
 
@@ -192,6 +192,7 @@ class AblationRunnerTests(unittest.TestCase):
             self.assertEqual(len(result["runs"]), 1)
             run = result["runs"][0]
             self.assertEqual(run["candidate"], "gated_dilated_full_history")
+            self.assertEqual(run["seed"], 7)
             self.assertEqual(run["validation_metrics"]["sample_count"], 4)
             self.assertGreater(run["parameter_count"], 0)
             self.assertGreaterEqual(run["runtime_seconds"], 0.0)

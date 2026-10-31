@@ -44,7 +44,14 @@ must match the prepared config.
 A capped pilot can register a specific candidate index, is always marked
 incomplete, and has no selected candidate. A
 complete study requires every candidate across at least three matched seeds.
-The predeclared selection metric is mean validation MAE, with candidate order
+The loader split and training-fitted scaler are prepared once from the frozen
+configuration. Run seeds control model and optimizer RNG after loader creation;
+they may differ from `data.random_seed` without changing the split. Batched
+forward passes use one disjoint PyG graph batch for all windows and frames,
+with no cross-graph edges; evaluation outputs match the per-window reference.
+Batching changes dropout RNG draw order during training, so it does not preserve
+the exact old stochastic training trajectory or imply a predictive gain. The
+predeclared selection metric is mean validation MAE, with candidate order
 breaking ties. Complete reports include each seed's validation MAE, mean and
 spread, runtime, and parameter count; seed repetitions are not independent race
 replications.

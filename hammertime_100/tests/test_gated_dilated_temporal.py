@@ -73,6 +73,25 @@ class GatedDilatedTemporalTests(unittest.TestCase):
             output = model(snapshots)
         self.assertEqual(tuple(output.shape), (2,))
 
+    def test_vectorized_gated_batch_matches_per_window_reference(self):
+        config = {"data": {"random_seed": 42}, "model": {
+            "in_dim": 9, "hidden_dim": 8, "gat_heads": 2,
+            "edge_dim": 1, "conv1d_kernel": 3, "dropout": 0.0,
+            "temporal_mode": "gated_dilated", "temporal_dilations": [1, 2, 4],
+        }}
+        model = create_model(config).eval()
+        windows = [[Data(
+            x=torch.randn(4, 9),
+            edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            edge_attr=torch.tensor([[0.6], [0.2]]),
+            mask=torch.tensor([True, False, True, True]),
+        ) for _ in range(10)] for _ in range(2)]
+        with torch.no_grad():
+            reference = torch.stack([model.forward_window(window) for window in windows])
+            actual = model(windows)
+        self.assertEqual(tuple(actual.shape), (2, 4))
+        torch.testing.assert_close(actual, reference, rtol=1e-5, atol=1e-6)
+
     def test_active_gated_config_validates_full_history_receptive_field(self):
         with (CONFIG_DIR / "supplied_fastf1_monza_2023_gated.yaml").open(encoding="utf-8") as source:
             config = yaml.safe_load(source)

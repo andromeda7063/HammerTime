@@ -344,8 +344,6 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         raise ValueError("seeds must be a non-empty sequence of unique integers.")
     if any(isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 for seed in seeds):
         raise ValueError("seeds must be non-negative integers.")
-    if int(seeds[0]) != int(config["data"]["random_seed"]):
-        raise ValueError("The first seed must match data.random_seed.")
     if (int(config["data"]["window_size"]) != 10 or
             int(config["data"]["horizon"]) != 5 or
             int(config["model"]["conv1d_kernel"]) != 3):
