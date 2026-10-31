@@ -205,9 +205,10 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path) -> dict:
 
             aligned_all = pd.concat(aligned_tables, ignore_index=True)
             labels_all = pd.concat(label_tables, ignore_index=True)
-            driver_to_idx = remap_cohort_driver_nodes(
-                snapshots, driver_maps, int(config["graph"]["num_nodes"])
-            )
+            driver_to_idx = (next(iter(driver_maps.values())) if len(driver_maps) == 1 else
+                             remap_cohort_driver_nodes(
+                                 snapshots, driver_maps, int(config["graph"]["num_nodes"])
+                             ))
 
             # Split/scaler construction uses a deep copy because it transforms graph features in place.
             split_snapshots = copy.deepcopy(snapshots)

@@ -460,9 +460,10 @@ def run_100_percent_pipeline(config_path: str | Path | None = None, tune: bool =
 
     # Each session graph starts with its own local node ordering. Remap all
     # snapshots before joining sessions so a driver keeps one cohort-wide node.
-    driver_to_idx = remap_cohort_driver_nodes(
-        snapshots, driver_maps, int(config["graph"]["num_nodes"])
-    )
+    driver_to_idx = (next(iter(driver_maps.values())) if len(driver_maps) == 1 else
+                     remap_cohort_driver_nodes(
+                         snapshots, driver_maps, int(config["graph"]["num_nodes"])
+                     ))
     from dataset import create_dataloaders
     train_loader, val_loader, test_loader, _ = create_dataloaders(
         snapshots, labels_all, driver_to_idx, config
