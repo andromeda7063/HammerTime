@@ -76,7 +76,8 @@ def _control_windows(frame: pd.DataFrame, origin: pd.Timestamp) -> list[tuple[fl
         if not _is_safety_message(message):
             continue
         deployed = any(token in message for token in ("deployed", "deploiement"))
-        ongoing = "in this lap" in message or "ending" in message
+        ongoing = ("in this lap" in message or "ending" in message
+                   or bool(re.search(r"\bwill stay out for \d+ laps?\b", message)))
         if deployed:
             if active_start is None:
                 active_start = stamp

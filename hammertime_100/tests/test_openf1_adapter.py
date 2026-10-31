@@ -164,6 +164,33 @@ class OpenF1NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Ambiguous.*safety-car"):
             normalize_openf1_tables(bundle(race_control=control), config())
 
+    def test_safety_car_will_stay_out_notice_preserves_open_active_window(self):
+        origin = pd.Timestamp("2024-09-01T12:00:00Z")
+        control = [
+            {"date": origin + pd.Timedelta(0.5, unit="s"), "message": "VSC deployed"},
+            {"date": origin + pd.Timedelta(2.5, unit="s"),
+             "message": "THE SAFETY CAR WILL STAY OUT FOR 2 LAPS"},
+        ]
+        aligned = normalize_openf1_tables(bundle(race_control=control), config())
+        self.assertTrue(aligned.loc[aligned["TimeSec"] >= 0.5, "IsSafetyCar"].all())
+
+    def test_safety_car_will_stay_out_without_deployment_fails_closed(self):
+        origin = pd.Timestamp("2024-09-01T12:00:00Z")
+        control = [{"date": origin + pd.Timedelta(0.5, unit="s"),
+                    "message": "THE SAFETY CAR WILL STAY OUT FOR 2 LAPS"}]
+        with self.assertRaisesRegex(ValueError, "deployment"):
+            normalize_openf1_tables(bundle(race_control=control), config())
+
+    def test_safety_car_will_enter_pits_notice_remains_unresolved_without_clearance(self):
+        origin = pd.Timestamp("2024-09-01T12:00:00Z")
+        control = [
+            {"date": origin, "message": "VSC deployed"},
+            {"date": origin + pd.Timedelta(1, unit="s"),
+             "message": "SAFETY CAR WILL ENTER PITS: ROLLING START PROCEDURE"},
+        ]
+        with self.assertRaisesRegex(ValueError, "Ambiguous.*safety-car"):
+            normalize_openf1_tables(bundle(race_control=control), config())
+
     def test_local_green_flag_does_not_clear_global_safety_car(self):
         origin = pd.Timestamp("2024-09-01T12:00:00Z")
         control = [
