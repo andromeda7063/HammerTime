@@ -77,3 +77,9 @@ uv run --frozen python train_prepared.py \
 ```
 
 Run only after `src/prepare_cohort.py` has produced the authentic prepared artifact and manifest. The output directory must be new. Use a separate directory for each candidate or repeat; do not combine results from the temporal and race-heldout configs.
+
+## Optional squared-error training candidate
+
+Training now accepts `train.loss: mae` (the default) or `train.loss: mse`. The new `gated_dilated_mse` candidate changes only the training objective relative to `gated_dilated_full_history`: it minimizes mean squared error over active target nodes, with masked nodes excluded. Every previously declared candidate explicitly retains MAE. Validation checkpoint selection and early stopping continue to use validation MAE, and R², other reported metrics, and all existing gates remain unchanged. MSE emphasizes large residuals and can worsen MAE; choosing a squared-error objective does not guarantee a higher R². Compare the named candidates on the same frozen prepared cohort and seeds, and report the existing metrics without changing thresholds.
+
+To make a targeted pilot run, use `--candidate gated_dilated_mse` in the example command above. This candidate is not automatically selected, and its validation result is not a test result.

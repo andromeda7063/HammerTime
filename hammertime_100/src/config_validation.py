@@ -56,6 +56,8 @@ def validate_config(config: dict) -> None:
                  "train.checkpoint_path"):
         if not isinstance(value(path), str) or not value(path).strip():
             raise ValueError(f"{path} must be a non-empty string.")
+    if config.get("train", {}).get("loss", "mae") not in ("mae", "mse"):
+        raise ValueError("train.loss must be 'mae' or 'mse'.")
     number("session.year", minimum=1, integer=True)
     validate_session_source(config["session"], config.get("openf1"))
     for path in ("track.mini_sectors", "graph.num_nodes", "data.window_size", "train.batch_size",

@@ -21,7 +21,11 @@ The fixed candidate order is:
    edge attribute to 1.0; the model's self-loop attribute is also 1.0.
 6. `gated_dilated_full_history`: replace only the temporal module with three
    gated residual causal convolutions using dilations 1, 2, and 4. Their
-   receptive field is 15 frames, covering the fixed 10-frame input.
+   receptive field is 15 frames, covering the fixed 10-frame input. Train with
+   the default masked MAE objective.
+7. `gated_dilated_mse`: keep the same full-history model and graph as candidate
+   6, but train with masked mean squared error. Candidates 1–6 explicitly use
+   masked MAE.
 
 Runs are registered before fitting. The manifest records the effective config,
 Git revision and dirty state, source provenance, hashes of training and
@@ -33,6 +37,11 @@ Python objects. It also records and hashes the shared training-fitted feature
 scaler. The runner records existing validation MAE and R², trainable
 parameter count, runtime, epochs, and checkpoint path. It reloads the best
 validation checkpoint before reporting metrics and verifies the saved MAE.
+The `train.loss` setting accepts `mae` (the default) or `mse`; the MSE option
+emphasizes large residuals and can worsen MAE. Checkpoint selection and early
+stopping remain based on validation MAE for both objectives. R² remains a
+reported metric, not an objective gate, so MSE training does not guarantee a
+higher R².
 The zero-prediction baseline uses those same validation labels and is context
 only; it is not a candidate or selection input.
 

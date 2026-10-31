@@ -1,7 +1,7 @@
 """
 Module M7: Training
 Responsibility: Train HammerTime ST-GNN with Adam optimizer (weight decay 1e-4),
-L1 loss over active masked nodes, early stopping (patience 10), and NaN guard.
+masked MAE or MSE over active nodes, MAE-based early stopping, and NaN guard.
 Saves checkpoint to best.pt.
 Standard: ASD-STE100 Plain English
 """
@@ -29,8 +29,7 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
 
 def masked_l1_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     """
-    Computes L1 loss strictly over active, unmasked nodes:
-    L = (1 / N_active) * sum |y_hat - y|
+    Compute mean absolute error strictly over active, unmasked nodes.
     """
     if preds.shape != targets.shape or masks.shape != targets.shape:
         raise ValueError("Predictions, targets, and masks must have the same shape.")
@@ -38,6 +37,16 @@ def masked_l1_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tens
     if not valid.any():
         raise ValueError("Cannot train a batch with no valid target nodes.")
     return torch.abs(preds[valid] - targets[valid]).mean()
+
+
+def masked_mse_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+    """Compute mean squared error over active target nodes only."""
+    if preds.shape != targets.shape or masks.shape != targets.shape:
+        raise ValueError("Predictions, targets, and masks must have the same shape.")
+    valid = masks.bool()
+    if not valid.any():
+        raise ValueError("Cannot train a batch with no valid target nodes.")
+    return torch.square(preds[valid] - targets[valid]).mean()
 
 
 @torch.no_grad()
@@ -67,9 +76,14 @@ def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> floa
 
 def train_model(model: nn.Module, train_loader, val_loader, config: dict, device: torch.device):
     """
-    Executes training loop with early stopping, L1 loss, Adam weight decay, and NaN detection.
+    Train with the configured masked MAE or MSE objective; select checkpoints by validation MAE.
     """
     t_cfg = config["train"]
+    loss_name = str(t_cfg.get("loss", "mae")).casefold()
+    loss_functions = {"mae": masked_l1_loss, "mse": masked_mse_loss}
+    if loss_name not in loss_functions:
+        raise ValueError("train.loss must be 'mae' or 'mse'.")
+    loss_function = loss_functions[loss_name]
     lr = float(t_cfg.get("lr", 0.001))
     wd = float(t_cfg.get("weight_decay", 0.0001))
     max_epochs = int(t_cfg.get("max_epochs", 100))
@@ -106,7 +120,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             optimizer.zero_grad()
             preds = model(batch_snaps)
 
-            loss = masked_l1_loss(preds, targets, masks)
+            loss = loss_function(preds, targets, masks)
 
             # Immutable Law 9 / Failure Case: NaN Guard
             if not torch.isfinite(loss):
@@ -134,7 +148,9 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             "val_mae": val_mae
         })
 
-        logger.info(f"Epoch {epoch:03d} | Train L1: {avg_train_loss:.4f} s | Val MAE: {val_mae:.4f} s")
+        train_unit = "s" if loss_name == "mae" else "s²"
+        train_label = "L1" if loss_name == "mae" else "MSE"
+        logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit} | Val MAE: {val_mae:.4f} s")
 
         # Early stopping and checkpointing
         if val_mae < best_val_mae:
