@@ -33,3 +33,5 @@ Added sector-exit timestamps and diagnostic counts for observed outcomes crossin
 ## Validation-only ablation runner — 2026-10-31
 
 Added `hammertime_100/src/ablation.py` for the five unique current, self-loop-only, temporal-kernel, and constant-edge-attribute candidates. It freezes source/artifact, config, environment, tensor, and split-membership hashes before training; validates the provider manifest; reports existing validation MAE/R², the zero-prediction validation reference, parameter count, and runtime; reloads the best checkpoint before scoring; and has no test-loader argument. Capped pilots are incomplete and cannot select a candidate. At implementation review, no authentic model run had been made.
+
+The runner follow-up verifies prepared artifact bytes, canonical manifest and exact-byte sidecar hashes, declared single-provider cohort, session identity, effective config, source-cache hashes, and each recorded partition-membership hash. It also locks the shared training-fitted scaler in the preregistration. A fresh local validation confirmed these checks against the prepared FastF1 Monza 2023 artifact. No model was trained by this verification.

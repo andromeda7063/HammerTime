@@ -12,6 +12,7 @@ from unittest.mock import patch
 import torch
 from torch_geometric.data import Data
 from torch.utils.data import DataLoader
+from sklearn.preprocessing import StandardScaler
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -90,6 +91,9 @@ class AblationRunnerTests(unittest.TestCase):
     def setUp(self):
         self.train_loader = loader([sample(0, 0.0), sample(1, 1.0)], True)
         self.val_loader = loader([sample(2, 2.0), sample(3, 3.0)], False)
+        scaler = StandardScaler().fit([[0.0] * 9, [1.0] * 9])
+        self.train_loader.dataset.feature_scaler = scaler
+        self.val_loader.dataset.feature_scaler = scaler
 
     def test_graph_transforms_preserve_source_and_labels(self):
         samples = [sample(0, 0.0)]
@@ -158,6 +162,7 @@ class AblationRunnerTests(unittest.TestCase):
 
             self.assertEqual(prereg["max_runs"], 1)
             self.assertEqual(len(prereg["train_validation_membership_sha256"]), 64)
+            self.assertEqual(len(prereg["feature_scaler_sha256"]), 64)
             self.assertFalse(prereg["test_handling"]["test_loader_passed_to_runner"])
             self.assertEqual(prereg["validation_zero_prediction_baseline"]["sample_count"], 4)
             self.assertEqual(prereg["validation_zero_prediction_baseline_role"],

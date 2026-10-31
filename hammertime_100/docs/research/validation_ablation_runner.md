@@ -26,7 +26,8 @@ validation tensor contents, a separate train/validation membership hash, split m
 relevant source modules, package versions, device, seeds, candidate order,
 epoch/run limits, test exposure, and metric/selection definitions. The tensor
 hash is computed from dtype and contiguous tensor bytes rather than serialized
-Python objects. The runner records existing validation MAE and R², trainable
+Python objects. It also records and hashes the shared training-fitted feature
+scaler. The runner records existing validation MAE and R², trainable
 parameter count, runtime, epochs, and checkpoint path. It reloads the best
 validation checkpoint before reporting metrics and verifies the saved MAE.
 The zero-prediction baseline uses those same validation labels and is context

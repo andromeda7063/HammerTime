@@ -142,6 +142,10 @@ def _environment_metadata(device):
         "platform": platform.platform(),
         "device": str(device),
         "cuda_available": bool(torch.cuda.is_available()),
+        "torch_cpu_threads": int(torch.get_num_threads()),
+        "torch_interop_threads": int(torch.get_num_interop_threads()),
+        "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+        "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
         "packages": versions,
         "uv_lock_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
         "module_source_sha256": modules,
@@ -206,6 +210,23 @@ def _zero_prediction_validation_baseline(val_loader):
         targets.extend(target[valid].tolist())
     y_true = np.asarray(targets, dtype=float)
     return compute_metrics(y_true, np.zeros_like(y_true))
+
+
+def _feature_scaler_metadata(train_loader, val_loader):
+    train_scaler = getattr(train_loader.dataset, "feature_scaler", None)
+    val_scaler = getattr(val_loader.dataset, "feature_scaler", None)
+    if train_scaler is None or val_scaler is None:
+        raise ValueError("Training and validation loaders must share the training-fitted scaler.")
+    fields = ("mean_", "scale_", "var_")
+    if any(not hasattr(train_scaler, field) or not hasattr(val_scaler, field) for field in fields):
+        raise ValueError("Ablation requires a fitted feature scaler with mean, scale, and variance.")
+    values = {field: np.asarray(getattr(train_scaler, field)).tolist() for field in fields}
+    if any(not np.array_equal(np.asarray(getattr(train_scaler, field)),
+                              np.asarray(getattr(val_scaler, field))) for field in fields):
+        raise ValueError("Training and validation features do not share identical scaler parameters.")
+    values["n_samples_seen_"] = np.asarray(getattr(train_scaler, "n_samples_seen_", [])).tolist()
+    values["n_features_in_"] = int(train_scaler.n_features_in_)
+    return values
 
 
 def _clone_transformed_samples(samples, graph_mode):
@@ -310,6 +331,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
             int(effective_config["train"].get("early_stopping_patience", epoch_cap)), int(epoch_cap)
         )
     split_metadata = copy.deepcopy(getattr(train_loader.dataset, "split_metadata", {}))
+    feature_scaler = _feature_scaler_metadata(train_loader, val_loader)
     preregistration = {
         "schema_version": 1,
         "status": "preregistered",
@@ -327,6 +349,8 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         "train_validation_membership_sha256": _membership_hash(train_loader, val_loader),
         "split_metadata": split_metadata,
         "split_metadata_sha256": _sha256_json(split_metadata),
+        "feature_scaler": feature_scaler,
+        "feature_scaler_sha256": _sha256_json(feature_scaler),
         "validation_zero_prediction_baseline": _zero_prediction_validation_baseline(val_loader),
         "validation_zero_prediction_baseline_role": "context only; not a candidate and not used for selection",
         "candidates": candidates,
