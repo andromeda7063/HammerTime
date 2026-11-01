@@ -1,7 +1,7 @@
 """Authenticate to FastF1, acquire 2023 Grand Prix races, and train HammerTime.
 
 From the repository root (FastF1 3.9.0 is supplied as a runtime overlay):
-    uv run --frozen --with fastf1==3.9.0 python hammertime_100/run_2023_fastf1_season.py
+    uv run --frozen --with fastf1==3.9.0 python hammertime_100/run_2023_fastf1_season.py --processing-workers 8 --workers 2 --torch-threads 8
 
 The script reads F1_USERNAME and F1_PASSWORD from the process environment or
 the repository-root .env file. It never writes credentials to run artifacts.
@@ -12,11 +12,12 @@ gates are applied unchanged by the HammerTime preparation and training code.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import copy
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import pickle
 import shutil
@@ -28,7 +29,6 @@ import uuid
 
 import numpy as np
 import pandas as pd
-import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,16 +36,6 @@ HERE = Path(__file__).resolve().parent
 SRC = HERE / "src"
 sys.path.insert(0, str(SRC))
 sys.path.insert(0, str(HERE))
-
-from dataset import create_dataloaders  # noqa: E402
-from evaluate import (  # noqa: E402
-    compute_metrics, predict_test_set, validate_clean_air_physics,
-    validate_drs_train_physics,
-)
-from model import create_model  # noqa: E402
-from prepare_cohort import prepare_cohort, load_prepared_cohort  # noqa: E402
-from target import build_targets  # noqa: E402
-from train import train_model  # noqa: E402
 
 LOG = logging.getLogger("hammertime.fastf1_season2023")
 ACTIVE_OUTPUT: Path | None = None
@@ -89,6 +79,7 @@ def _dotenv_value(raw: str) -> str:
 
 def load_credentials() -> tuple[str, str]:
     """Load only the two expected variables, without displaying or persisting them."""
+    dotenv_values = {}
     env_path = ROOT / ".env"
     if env_path.is_file():
         for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -99,8 +90,9 @@ def load_credentials() -> tuple[str, str]:
                 stripped = stripped[7:].lstrip()
             key, sep, raw = stripped.partition("=")
             if sep and key.strip() in {"F1_USERNAME", "F1_PASSWORD"}:
-                os.environ.setdefault(key.strip(), _dotenv_value(raw))
-    username, password = os.environ.get("F1_USERNAME", ""), os.environ.get("F1_PASSWORD", "")
+                dotenv_values[key.strip()] = _dotenv_value(raw)
+    username = os.environ.get("F1_USERNAME") or dotenv_values.get("F1_USERNAME", "")
+    password = os.environ.get("F1_PASSWORD") or dotenv_values.get("F1_PASSWORD", "")
     if not username or not password:
         raise RuntimeError("Set F1_USERNAME and F1_PASSWORD in the process environment or repository-root .env.")
     return username, password
@@ -184,8 +176,34 @@ def _race_fingerprint(event: dict, config: dict, fastf1_version: str) -> str:
     })
 
 
+def _raw_fingerprint(event: dict, fastf1_version: str) -> str:
+    return canonical_hash({"year": event["year"], "gp": event["gp"], "session_type": event["session_type"],
+                           "fastf1_version": fastf1_version, "ingest_code": sha256(HERE / "src/ingest.py")})
+
+
 def _valid_race_stage(stage: Path, expected_fingerprint: str) -> dict | None:
     marker = stage / "stage_manifest.json"
+    if not marker.is_file():
+        return None
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        if record.get("fingerprint") != expected_fingerprint:
+            return None
+        for name, expected in record["files"].items():
+            path = stage / name
+            if not path.is_file() or path.stat().st_size != expected["bytes"] or sha256(path) != expected["sha256"]:
+                return None
+        for name, expected in record.get("source_files", {}).items():
+            path = Path(name)
+            if not path.is_file() or path.stat().st_size != expected["bytes"] or sha256(path) != expected["sha256"]:
+                return None
+        return record
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _valid_raw_stage(stage: Path, expected_fingerprint: str) -> dict | None:
+    marker = stage / "raw_manifest.json"
     if not marker.is_file():
         return None
     try:
@@ -201,53 +219,148 @@ def _valid_race_stage(stage: Path, expected_fingerprint: str) -> dict | None:
         return None
 
 
-def ensure_race_stage(event: dict, cache_root: Path, stage_root: Path,
-                     config: dict, fastf1_version: str) -> tuple[dict | None, str | None]:
-    """Load/preprocess one race once and commit all reusable files atomically."""
+def ensure_raw_stage(event: dict, cache_root: Path, raw_root: Path,
+                     fastf1_version: str, credentials: tuple[str, str]) -> tuple[dict | None, str | None]:
+    """Serialize FastF1 access in the parent and atomically persist raw session tables."""
     from ingest import export_raw_tables, load_race
-    from preprocess import process_race
 
-    stage_root.mkdir(parents=True, exist_ok=True)
-    stage = stage_root / _safe_id(event["race_id"])
-    fingerprint = _race_fingerprint(event, config, fastf1_version)
-    prior = _valid_race_stage(stage, fingerprint)
+    raw_root.mkdir(parents=True, exist_ok=True)
+    stage = raw_root / _safe_id(event["race_id"])
+    fingerprint = _raw_fingerprint(event, fastf1_version)
+    prior = _valid_raw_stage(stage, fingerprint)
     if prior is not None:
         return {**event, **prior["event"]}, None
-
-    # Incomplete staging directories are ignored; this invocation builds its
-    # own uniquely named staging directory and never overwrites another run.
-    staging = stage_root / f".{stage.name}.staging-{uuid.uuid4().hex}"
+    staging = raw_root / f".{stage.name}.staging-{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=False)
     try:
-        session = load_race(2023, event["gp"], "R", str(cache_root / event["race_id"]))
-        cfg = copy.deepcopy(config)
-        cfg["session"].update(event)
-        cfg["track"]["lap_length_m"] = float(event["lap_length_m"])
-        raw_laps, raw_telemetry = export_raw_tables(session, str(staging / "raw"))
-        aligned = process_race(session, cfg)
-        labels = build_targets(aligned, cfg)
+        os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = credentials
+        os.environ["FASTF1_AUTH_METHOD"] = "password"
+        try:
+            session = load_race(2023, event["gp"], "R", str(cache_root / event["race_id"]))
+        finally:
+            os.environ.pop("F1_USERNAME", None)
+            os.environ.pop("F1_PASSWORD", None)
+            os.environ.pop("FASTF1_AUTH_METHOD", None)
+        raw_laps, raw_telemetry = export_raw_tables(session, str(staging))
+        circuit_key = str(session.event.get("CircuitKey", event.get("circuit_id", "")))
+        final_event = {**event, "circuit_id": circuit_key}
+        raw_files = [Path(raw_laps)] + ([Path(raw_telemetry)] if raw_telemetry is not None else [])
+        files = {path.relative_to(staging).as_posix(): {"bytes": path.stat().st_size, "sha256": sha256(path)}
+                 for path in raw_files}
+        source_metadata = {"provider": "fastf1", "session": {"circuit_key": circuit_key}}
+        record = {"fingerprint": fingerprint, "event": final_event, "files": files,
+                  "source_metadata": source_metadata,
+                  "drivers": [str(driver) for driver in session.drivers],
+                  "coverage": {"raw_lap_rows": int(len(session.laps))}}
+        atomic_json(staging / "raw_manifest.json", record)
+        if stage.exists():
+            backup = raw_root / f".{stage.name}.stale-{uuid.uuid4().hex}"
+            os.replace(stage, backup)
+        os.replace(staging, stage)
+        return final_event, None
+    except Exception as exc:
+        os.environ.pop("F1_USERNAME", None)
+        os.environ.pop("F1_PASSWORD", None)
+        os.environ.pop("FASTF1_AUTH_METHOD", None)
+        shutil.rmtree(staging, ignore_errors=True)
+        return None, type(exc).__name__
+
+
+def _driver_key(value) -> str:
+    text = str(value).strip()
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    except ValueError:
+        pass
+    return text
+
+
+def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
+    """CPU-only normalization worker; consumes persisted tables, never FastF1/auth."""
+    from preprocess import _time_seconds, align_driver_telemetry, compute_time_gaps
+    from target import build_targets
+
+    event = task["event"]
+    config = task["config"]
+    stage = Path(task["stage"])
+    raw_laps_path, raw_telemetry_path = Path(task["raw_laps"]), Path(task["raw_telemetry"])
+    staging = stage.parent / f".{stage.name}.staging-{uuid.uuid4().hex}"
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        laps = pd.read_parquet(raw_laps_path)
+        telemetry = pd.read_parquet(raw_telemetry_path)
+        if "Driver" not in telemetry or "DriverNumber" not in laps:
+            raise ValueError("raw FastF1 tables do not contain driver identity columns")
+        drivers = task["drivers"]
+        raw_drivers = []
+        for driver in drivers:
+            key = _driver_key(driver)
+            drv_laps = laps.loc[laps["DriverNumber"].map(_driver_key) == key].copy()
+            if drv_laps.empty:
+                continue
+            drv_tel = telemetry.loc[telemetry["Driver"].map(_driver_key) == key].copy()
+            if drv_tel.empty:
+                continue
+            time_column = next((column for column in ("TimeSec", "SessionTime", "Time")
+                                if column in drv_tel.columns), None)
+            if time_column is None:
+                continue
+            drv_tel["TimeSec"] = _time_seconds(drv_tel[time_column])
+            drv_tel = drv_tel.dropna(subset=["TimeSec"])
+            if not drv_tel.empty:
+                raw_drivers.append((key, drv_tel, drv_laps))
+        if not raw_drivers:
+            raise ValueError("no usable per-driver telemetry in the persisted FastF1 tables")
+        sample_hz = float(config["preprocess"]["sample_hz"])
+        interval = 1.0 / sample_hz
+        t_start = min(frame["TimeSec"].min() for _, frame, _ in raw_drivers)
+        t_end = max(frame["TimeSec"].max() for _, frame, _ in raw_drivers)
+        time_grid = np.arange(t_start, t_end + interval * 1e-6, interval)
+        all_driver_dfs = []
+        for driver, drv_tel, drv_laps in raw_drivers:
+            try:
+                aligned = align_driver_telemetry(
+                    driver, drv_tel, drv_laps, sample_hz=sample_hz,
+                    max_interpolate_sec=float(config["preprocess"]["max_interpolate_sec"]),
+                    mini_sectors=int(config["track"]["mini_sectors"]),
+                    lap_length_m=float(event["lap_length_m"]), time_grid=time_grid,
+                    flag_safety_car=bool(config["preprocess"].get("flag_safety_car", True)),
+                    flag_pit_laps=bool(config["preprocess"].get("flag_pit_laps", True)))
+                if not aligned.empty:
+                    all_driver_dfs.append(aligned)
+            except Exception:
+                continue
+        if not all_driver_dfs:
+            raise ValueError("no driver telemetry could be aligned")
+        combined = pd.concat(all_driver_dfs, ignore_index=True)
+        combined["RaceId"] = str(event["race_id"])
+        aligned = compute_time_gaps(combined, sample_hz=sample_hz,
+                                    lap_length_m=float(event["lap_length_m"]))
+        target_config = copy.deepcopy(config)
+        target_config["session"].update(event)
+        target_config["track"]["lap_length_m"] = float(event["lap_length_m"])
+        labels = build_targets(aligned, target_config)
         if labels.empty:
             raise ValueError("existing target builder produced no labels")
         if int(aligned.get("IsValid", pd.Series(dtype=bool)).fillna(False).sum()) == 0:
             raise ValueError("existing aligned telemetry validity gate rejected all rows")
         aligned.to_parquet(staging / "aligned_telemetry.parquet", index=False)
         labels.to_parquet(staging / "target_labels.parquet", index=False)
-        circuit_key = str(session.event.get("CircuitKey", event.get("circuit_id", "")))
-        final_event = {**event, "circuit_id": circuit_key, "validated_target_rows": int(len(labels))}
-        raw_files = [Path(raw_laps)] + ([Path(raw_telemetry)] if raw_telemetry is not None else [])
-        artifact_paths = [staging / "aligned_telemetry.parquet", staging / "target_labels.parquet", *raw_files]
-        files = {path.relative_to(staging).as_posix(): {"bytes": path.stat().st_size, "sha256": sha256(path)}
-                 for path in artifact_paths}
-        source_metadata = {"provider": "fastf1", "session": {"circuit_key": circuit_key}}
-        record = {"fingerprint": fingerprint, "event": final_event, "files": files,
-                  "source_metadata": source_metadata,
+        outputs = [staging / "aligned_telemetry.parquet", staging / "target_labels.parquet"]
+        files = {path.name: {"bytes": path.stat().st_size, "sha256": sha256(path)} for path in outputs}
+        source_files = {str(Path(name).resolve()): expected for name, expected in task["raw_files"].items()}
+        record = {"fingerprint": task["fingerprint"], "event": {**event, "validated_target_rows": int(len(labels))},
+                  "files": files, "source_files": source_files,
+                  "source_metadata": task["source_metadata"],
                   "coverage": {"aligned_rows": int(len(aligned)), "target_rows": int(len(labels))}}
         atomic_json(staging / "stage_manifest.json", record)
         if stage.exists():
-            backup = stage_root / f".{stage.name}.stale-{uuid.uuid4().hex}"
+            backup = stage.parent / f".{stage.name}.stale-{uuid.uuid4().hex}"
             os.replace(stage, backup)
         os.replace(staging, stage)
-        return final_event, None
+        return record["event"], None
     except Exception as exc:
         shutil.rmtree(staging, ignore_errors=True)
         return None, type(exc).__name__
@@ -264,8 +377,10 @@ def write_normalized_source(stage_root: Path, source_root: Path,
         stage = stage_root / _safe_id(race_id)
         stage_meta = json.loads((stage / "stage_manifest.json").read_text(encoding="utf-8"))
         source_files = []
-        for name, info in stage_meta["files"].items():
-            path = stage / name
+        artifacts = {str((stage / name).resolve()): info for name, info in stage_meta["files"].items()}
+        artifacts.update(stage_meta.get("source_files", {}))
+        for filename, info in artifacts.items():
+            path = Path(filename)
             try:
                 rel = str(path.resolve().relative_to(source_root.resolve()))
             except ValueError:
@@ -288,6 +403,87 @@ def write_normalized_source(stage_root: Path, source_root: Path,
     atomic_bytes(source_root / "normalized_source_manifest.json.sha256",
                  f"{hashlib.sha256(raw).hexdigest()}  normalized_source_manifest.json\n".encode())
     return hashlib.sha256(raw).hexdigest()
+
+
+def _worker_memory_limit(requested: int) -> int:
+    """Cap concurrent dataframe workers against available RAM, keeping 2 GiB free."""
+    available = None
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                available = int(line.split()[1]) * 1024
+                break
+    except (OSError, ValueError):
+        pass
+    if available is None:
+        return requested
+    reserve = 2 * 1024**3
+    estimate_per_worker = 700 * 1024**2
+    safe_count = max(1, (available - reserve) // estimate_per_worker)
+    return min(requested, int(safe_count))
+
+
+def _worker_warmup() -> int:
+    """Start process workers while auth variables are absent from the environment."""
+    for name in ("F1_USERNAME", "F1_PASSWORD", "FASTF1_AUTH_METHOD"):
+        os.environ.pop(name, None)
+    import time
+    time.sleep(0.1)
+    return os.getpid()
+
+
+def _normalization_fingerprint(event: dict, raw_manifest: dict, config: dict,
+                              fastf1_version: str) -> str:
+    return canonical_hash({"processing": _race_fingerprint(event, config, fastf1_version),
+                           "raw_source_sha256": raw_manifest["files"]})
+
+
+def _normalization_task(event: dict, raw_stage: Path, raw_manifest: dict,
+                        config: dict, fastf1_version: str, normalized_root: Path) -> dict:
+    fingerprint = _normalization_fingerprint(event, raw_manifest, config, fastf1_version)
+    raw_files = {str((raw_stage / name).resolve()): info for name, info in raw_manifest["files"].items()}
+    return {"event": event, "config": config,
+            "stage": str(normalized_root / _safe_id(event["race_id"])),
+            "raw_laps": str(raw_stage / "raw_laps.parquet"),
+            "raw_telemetry": str(raw_stage / "raw_telemetry.parquet"),
+            "drivers": raw_manifest["drivers"], "raw_files": raw_files,
+            "fingerprint": fingerprint, "source_metadata": raw_manifest["source_metadata"]}
+
+
+def _start_worker_pool(workers: int) -> tuple[ProcessPoolExecutor, set[int]]:
+    """Spawn the complete bounded pool while parent F1 credential env is clear."""
+    for name in ("F1_USERNAME", "F1_PASSWORD", "FASTF1_AUTH_METHOD"):
+        os.environ.pop(name, None)
+    pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        pids: set[int] = set()
+        for _ in range(4):
+            futures = [pool.submit(_worker_warmup) for _ in range(workers)]
+            pids.update(future.result() for future in futures)
+            if len(pids) == workers:
+                break
+        if len(pids) < workers:
+            raise RuntimeError("Could not start the requested number of normalization worker processes.")
+        return pool, pids
+    except Exception:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+
+
+def _collect_normalization_futures(future_to_id: dict) -> tuple[dict[str, dict], dict[str, str]]:
+    """Collect in completion order while keying results/errors by session ID."""
+    results, failures = {}, {}
+    for future in as_completed(future_to_id):
+        race_id = future_to_id[future]
+        try:
+            result, failure_type = future.result()
+        except Exception as exc:
+            result, failure_type = None, type(exc).__name__
+        if result is None:
+            failures[race_id] = failure_type or "NormalizationFailed"
+        else:
+            results[race_id] = result
+    return results, failures
 
 
 def _cohort_cached(cohort_dir: Path, config: dict, source_hash: str):
@@ -388,6 +584,8 @@ def _record_output(path: Path, fingerprint: str) -> None:
 
 
 def aggregate(frame: pd.DataFrame, group: str) -> list[dict]:
+    from evaluate import compute_metrics
+
     rows = []
     for key, part in frame.groupby(group, dropna=False):
         y, p = part.y_true.to_numpy(float), part.y_pred.to_numpy(float)
@@ -398,9 +596,10 @@ def aggregate(frame: pd.DataFrame, group: str) -> list[dict]:
 
 def run(args: argparse.Namespace) -> Path:
     secrets = load_credentials()
-    # These are the documented FastF1 3.9+ password-flow environment names.
-    os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = secrets
-    os.environ["FASTF1_AUTH_METHOD"] = "password"
+    # Never leave account credentials in the environment when spawned workers
+    # are created. ensure_raw_stage exposes them briefly around serialized loads.
+    for name in ("F1_USERNAME", "F1_PASSWORD", "FASTF1_AUTH_METHOD"):
+        os.environ.pop(name, None)
     import fastf1
     from packaging.version import Version
     if Version(fastf1.__version__) < Version("3.9.0"):
@@ -409,7 +608,7 @@ def run(args: argparse.Namespace) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     global ACTIVE_OUTPUT
     ACTIVE_OUTPUT = out
-    for name in ("race_cache/sessions", "cohorts", "training"):
+    for name in ("race_cache/sessions", "race_cache/raw_sessions", "cohorts", "training"):
         (out / name).mkdir(parents=True, exist_ok=True)
     log_path = out / "run.log"
     logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
@@ -427,29 +626,105 @@ def run(args: argparse.Namespace) -> Path:
         base["data"]["random_seed"] = args.seed
         base["train"]["max_epochs"] = args.epochs
         base["tuning"]["enabled"] = False
-        events, skips = discover(fastf1, out)
+        os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = secrets
+        os.environ["FASTF1_AUTH_METHOD"] = "password"
+        try:
+            events, skips = discover(fastf1, out)
+        finally:
+            os.environ.pop("F1_USERNAME", None)
+            os.environ.pop("F1_PASSWORD", None)
+            os.environ.pop("FASTF1_AUTH_METHOD", None)
         stages_root = out / "race_cache/sessions"
-        fingerprints = {event["race_id"]: _race_fingerprint(event, base, fastf1.__version__) for event in events}
-        # Only validation/hashing is parallel. FastF1 uses global auth/cache state,
-        # so incomplete races are always downloaded and normalized serially below.
+        raw_root = out / "race_cache/raw_sessions"
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            stage_results = list(pool.map(
-                lambda event: _valid_race_stage(stages_root / _safe_id(event["race_id"]),
-                                                fingerprints[event["race_id"]]), events))
+            raw_cached = list(pool.map(
+                lambda event: _valid_raw_stage(raw_root / _safe_id(event["race_id"]),
+                                               _raw_fingerprint(event, fastf1.__version__)), events))
+
         failures: list[dict] = list(skips)
-        good = []
-        for event, prior in zip(events, stage_results):
-            if prior is not None:
-                good.append({**event, **prior["event"]})
+        normalized_by_id: dict[str, dict] = {}
+        future_to_id = {}
+        process_pool = None
+        pool_start_failure = None
+        process_workers = _worker_memory_limit(args.processing_workers)
+        try:
+            for event, raw_manifest in zip(events, raw_cached):
+                race_id = str(event["race_id"])
+                if raw_manifest is None:
+                    raw_event, failure_type = ensure_raw_stage(event, cache_root, raw_root,
+                                                               fastf1.__version__, secrets)
+                    if raw_event is None:
+                        failures.append({"race_id": race_id, "exception_type": failure_type})
+                        LOG.warning("FastF1 source acquisition failed for %s (%s)", race_id, failure_type)
+                        continue
+                    event = raw_event
+                    raw_stage = raw_root / _safe_id(race_id)
+                    raw_manifest = json.loads((raw_stage / "raw_manifest.json").read_text(encoding="utf-8"))
+                else:
+                    event = {**event, **raw_manifest["event"]}
+                    raw_stage = raw_root / _safe_id(race_id)
+
+                fingerprint = _normalization_fingerprint(event, raw_manifest, base, fastf1.__version__)
+                normalized_stage = stages_root / _safe_id(race_id)
+                cached = _valid_race_stage(normalized_stage, fingerprint)
+                if cached is not None:
+                    normalized_by_id[race_id] = {**event, **cached["event"]}
+                    continue
+
+                # Start all requested, memory-safe workers before more parent
+                # FastF1 calls. Workers inherit no F1 account variables.
+                if process_pool is None:
+                    if pool_start_failure is not None:
+                        failures.append({"race_id": race_id, "exception_type": pool_start_failure})
+                        continue
+                    LOG.info("Starting %d CPU normalization workers (requested %d; memory-capped)",
+                             process_workers, args.processing_workers)
+                    try:
+                        process_pool, worker_pids = _start_worker_pool(process_workers)
+                    except Exception as exc:
+                        pool_start_failure = type(exc).__name__
+                        failures.append({"race_id": race_id, "exception_type": pool_start_failure})
+                        LOG.warning("Could not start normalization workers (%s)", pool_start_failure)
+                        continue
+                    LOG.info("CPU normalization worker processes started: %d", len(worker_pids))
+                task = _normalization_task(event, raw_stage, raw_manifest, base,
+                                           fastf1.__version__, stages_root)
+                try:
+                    future_to_id[process_pool.submit(normalize_race_worker, task)] = race_id
+                except Exception as exc:
+                    failures.append({"race_id": race_id, "exception_type": type(exc).__name__})
+
+            if process_pool is not None:
+                completed, normalization_failures = _collect_normalization_futures(future_to_id)
+                normalized_by_id.update(completed)
+                failures.extend({"race_id": race_id, "exception_type": reason}
+                                 for race_id, reason in normalization_failures.items())
+                for race_id, reason in normalization_failures.items():
+                    LOG.warning("CPU normalization failed for %s (%s)", race_id, reason)
+                for race_id in completed:
+                    LOG.info("Completed normalized session %s", race_id)
+        finally:
+            if process_pool is not None:
+                process_pool.shutdown(wait=True, cancel_futures=False)
+
+        # A worker can commit its stage and die before returning its result.
+        # Revalidate all expected fingerprints so those completed calculations
+        # survive a broken pool and failures remain isolated per session.
+        for event in events:
+            race_id = str(event["race_id"])
+            try:
+                raw_manifest = json.loads((raw_root / _safe_id(race_id) / "raw_manifest.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError, KeyError):
                 continue
-            result, failure_type = ensure_race_stage(event, cache_root, stages_root, base, fastf1.__version__)
-            if result is None:
-                failures.append({"race_id": event["race_id"], "exception_type": failure_type})
-                LOG.warning("Session %s failed ingestion or existing data gates (%s)",
-                            event["race_id"], failure_type)
-            else:
-                good.append(result)
-                LOG.info("Accepted authentic FastF1 session %s", event["race_id"])
+            event = {**event, **raw_manifest["event"]}
+            fingerprint = _normalization_fingerprint(event, raw_manifest, base, fastf1.__version__)
+            stage_result = _valid_race_stage(stages_root / _safe_id(race_id), fingerprint)
+            if stage_result is not None:
+                normalized_by_id[race_id] = {**event, **stage_result["event"]}
+        good = [normalized_by_id[event["race_id"]] for event in events
+                if event["race_id"] in normalized_by_id]
+        good_ids = set(normalized_by_id)
+        failures = [failure for failure in failures if failure.get("race_id") not in good_ids]
         atomic_json(out / "failed_sessions.json", failures)
         atomic_json(out / "usable_sessions.json", good)
         if len(good) < 3:
@@ -489,6 +764,7 @@ def run(args: argparse.Namespace) -> Path:
                 while (out / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}").exists():
                     suffix += 1
                 cohort_dir = out / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}"
+            from prepare_cohort import prepare_cohort
             prepare_cohort(config_path, cohort_dir, normalized_source_dir=source_root)
             cached = _cohort_cached(cohort_dir, base, source_hash)
             if cached is None:
@@ -496,6 +772,13 @@ def run(args: argparse.Namespace) -> Path:
         payload, manifest = cached
         if manifest["provider"] != "fastf1" or len(manifest["sessions"]) < 3:
             raise ValueError("Prepared cohort provider/session-count invariant failed")
+        import torch
+        from dataset import create_dataloaders
+        from evaluate import (compute_metrics, predict_test_set, validate_clean_air_physics,
+                              validate_drs_train_physics)
+        from model import create_model
+        from train import train_model
+
         cfg = copy.deepcopy(payload["config"])
         cfg["train"]["checkpoint_path"] = str(out / "training" / "_path_placeholder" / "best.pt")
         cfg["train"]["history_path"] = str(out / "training" / "_path_placeholder" / "training_history.csv")
@@ -658,11 +941,14 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--workers", type=int, default=2, help="Bounded I/O validation/export workers (1-8); downloads stay serialized.")
+    parser.add_argument("--processing-workers", type=int, default=4,
+                        help="Independent CPU-only race normalization processes (1-8), memory-capped.")
     parser.add_argument("--torch-threads", "--threads", dest="threads", type=int, default=1,
                         help="PyTorch intra-op CPU threads.")
     args = parser.parse_args()
-    if args.epochs < 1 or args.seed < 0 or not 1 <= args.workers <= 8 or args.threads < 1:
-        parser.error("--epochs and --threads must be positive, --seed non-negative, and --workers between 1 and 8")
+    if (args.epochs < 1 or args.seed < 0 or not 1 <= args.workers <= 8
+            or not 1 <= args.processing_workers <= 8 or args.threads < 1):
+        parser.error("--epochs and --threads must be positive, --seed non-negative, and both worker counts between 1 and 8")
     try:
         print(run(args))
     except Exception as exc:

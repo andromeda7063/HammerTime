@@ -5,11 +5,9 @@ import hashlib
 import json
 import pickle
 from pathlib import Path
-import sys
 import tempfile
-import types
+import time
 import unittest
-from unittest.mock import Mock, patch
 
 import pandas as pd
 import yaml
@@ -17,69 +15,76 @@ import yaml
 from hammertime_100 import run_2023_fastf1_season as runner
 
 
+def _offline_process_task(task):
+    """Small process-pool fixture, not Formula 1 data."""
+    time.sleep(task["delay"])
+    if task.get("fail"):
+        return None, "FixtureFailure"
+    return {"race_id": task["race_id"], "pid": __import__("os").getpid()}, None
+
+
 class FastF1SeasonResumeTests(unittest.TestCase):
-    def test_completed_race_stage_is_reused_without_loading_session(self):
+    def test_completed_normalized_stage_is_reused_and_partial_cache_rejected(self):
         event = {"year": 2023, "gp": "Fixture Grand Prix", "session_type": "R",
                  "race_id": "2023-Fixture-R", "source": "fastf1", "circuit_id": "fixture",
                  "lap_length_m": 1000.0}
         config = {"preprocess": {}, "target": {}, "track": {"lap_length_m": 1000.0}}
         with tempfile.TemporaryDirectory() as tmp:
+            raw_root = Path(tmp) / "raw_sessions"
+            raw_stage = raw_root / event["race_id"]
+            raw_stage.mkdir(parents=True)
+            raw_files = {}
+            for name, data in (("raw_laps.parquet", b"source laps fixture"),
+                               ("raw_telemetry.parquet", b"source telemetry fixture")):
+                path = raw_stage / name
+                path.write_bytes(data)
+                raw_files[name] = {"bytes": path.stat().st_size,
+                                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            raw_manifest = {"files": raw_files}
+            event_fingerprint = runner._normalization_fingerprint(event, raw_manifest, config, "3.9.0")
             stage_root = Path(tmp) / "sessions"
             stage = stage_root / event["race_id"]
             stage.mkdir(parents=True)
             for name, data in (("aligned_telemetry.parquet", b"aligned fixture"),
-                               ("target_labels.parquet", b"label fixture"),
-                               ("raw_laps.parquet", b"authentic-source-export fixture")):
+                               ("target_labels.parquet", b"labels fixture")):
                 (stage / name).write_bytes(data)
             files = {path.name: {"bytes": path.stat().st_size,
-                                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                      for path in stage.iterdir()}
+            source_files = {str((raw_stage / name).resolve()): info for name, info in raw_files.items()}
             final_event = {**event, "validated_target_rows": 1}
-            manifest = {"fingerprint": runner._race_fingerprint(event, config, "3.9.0"),
-                        "event": final_event, "files": files,
+            manifest = {"fingerprint": event_fingerprint, "event": final_event,
+                        "files": files, "source_files": source_files,
                         "source_metadata": {"provider": "fastf1", "session": {"circuit_key": "fixture"}},
                         "coverage": {"aligned_rows": 1, "target_rows": 1}}
             (stage / "stage_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            fake_ingest = types.ModuleType("ingest")
-            fake_ingest.load_race = Mock(side_effect=AssertionError("cached session must not be loaded"))
-            fake_ingest.export_raw_tables = Mock(side_effect=AssertionError("cached raw tables must not be exported"))
-            fake_preprocess = types.ModuleType("preprocess")
-            fake_preprocess.process_race = Mock(side_effect=AssertionError("cached telemetry must not be normalized"))
-            fake_target = types.ModuleType("target")
-            fake_target.build_targets = Mock(side_effect=AssertionError("cached targets must not be rebuilt"))
-            with patch.dict(sys.modules, {"ingest": fake_ingest, "preprocess": fake_preprocess,
-                                          "target": fake_target}):
-                result, error = runner.ensure_race_stage(event, Path(tmp) / "fastf1-cache", stage_root,
-                                                         config, "3.9.0")
-            self.assertIsNone(error)
-            self.assertEqual(result["validated_target_rows"], 1)
+            self.assertIsNotNone(runner._valid_race_stage(stage, event_fingerprint))
+            (stage / "aligned_telemetry.parquet").write_bytes(b"partial replacement")
+            self.assertIsNone(runner._valid_race_stage(stage, event_fingerprint))
 
-    def test_partial_race_staging_is_ignored_and_prediction_cache_skips_inference(self):
-        event = {"year": 2023, "gp": "Fixture Grand Prix", "session_type": "R",
-                 "race_id": "2023-Fixture-R", "source": "fastf1", "circuit_id": "fixture",
-                 "lap_length_m": 1000.0}
-        config = {"preprocess": {}, "target": {}, "track": {"lap_length_m": 1000.0}}
+    def test_spawned_cpu_queue_uses_distinct_processes_and_isolates_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
-            stage_root = Path(tmp) / "sessions"
-            stage_root.mkdir()
-            incomplete = stage_root / ".2023-Fixture-R.staging-interrupted"
-            incomplete.mkdir()
-            (incomplete / "aligned_telemetry.parquet").write_bytes(b"partial")
-            fake_ingest = types.ModuleType("ingest")
-            fake_ingest.load_race = Mock(side_effect=RuntimeError("offline fixture; no network call"))
-            fake_ingest.export_raw_tables = Mock()
-            fake_preprocess = types.ModuleType("preprocess")
-            fake_preprocess.process_race = Mock()
-            fake_target = types.ModuleType("target")
-            fake_target.build_targets = Mock()
-            with patch.dict(sys.modules, {"ingest": fake_ingest, "preprocess": fake_preprocess,
-                                          "target": fake_target}):
-                result, error = runner.ensure_race_stage(event, Path(tmp) / "fastf1-cache", stage_root,
-                                                         config, "3.9.0")
-            self.assertIsNone(result)
-            self.assertEqual(error, "RuntimeError")
-            self.assertTrue(incomplete.exists())
+            pool, pids = runner._start_worker_pool(2)
+            try:
+                tasks = [
+                    {"race_id": "round-1", "delay": 0.04},
+                    {"race_id": "round-2", "delay": 0.01, "fail": True},
+                    {"race_id": "round-3", "delay": 0.02},
+                    {"race_id": "round-4", "delay": 0.00},
+                ]
+                futures = {pool.submit(_offline_process_task, task): task["race_id"] for task in tasks}
+                results, failures = runner._collect_normalization_futures(futures)
+            finally:
+                pool.shutdown(wait=True)
+            self.assertEqual(len(pids), 2)
+            self.assertGreaterEqual(len({value["pid"] for value in results.values()}), 2)
+            self.assertEqual(failures, {"round-2": "FixtureFailure"})
+            calendar_results = [results[task["race_id"]]["race_id"] for task in tasks
+                                if task["race_id"] in results]
+            self.assertEqual(calendar_results, ["round-1", "round-3", "round-4"])
 
+    def test_atomic_prediction_cache_skips_inference_on_export_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp) / "predictions.pkl"
             calls = []
             first = runner.load_or_compute_predictions(
@@ -141,18 +146,23 @@ class FastF1SeasonResumeTests(unittest.TestCase):
             source_root = Path(tmp) / "normalized"
             stage_root = source_root / "sessions"
             stage = stage_root / event["race_id"]
-            (stage / "raw").mkdir(parents=True)
+            stage.mkdir(parents=True)
+            raw_stage = source_root / "raw_sessions" / event["race_id"]
+            raw_stage.mkdir(parents=True)
             config_path = Path(tmp) / "source.yaml"
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             aligned_path, labels_path = stage / "aligned_telemetry.parquet", stage / "target_labels.parquet"
             pd.DataFrame({"RaceId": [event["race_id"]], "value": [1.0]}).to_parquet(aligned_path, index=False)
             pd.DataFrame({"RaceId": [event["race_id"]], "target": [0.2]}).to_parquet(labels_path, index=False)
-            raw_path = stage / "raw" / "raw_laps.parquet"
+            raw_path = raw_stage / "raw_laps.parquet"
             raw_path.write_bytes(b"authentic export fixture")
             files = {path.relative_to(stage).as_posix(): {"bytes": path.stat().st_size,
                                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-                     for path in (aligned_path, labels_path, raw_path)}
+                     for path in (aligned_path, labels_path)}
+            source_files = {str(raw_path.resolve()): {"bytes": raw_path.stat().st_size,
+                                                       "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest()}}
             record = {"fingerprint": "fixture", "event": event, "files": files,
+                      "source_files": source_files,
                       "source_metadata": {"provider": "fastf1", "session": {"circuit_key": "fixture"}},
                       "coverage": {"aligned_rows": 1, "target_rows": 1}}
             (stage / "stage_manifest.json").write_text(json.dumps(record), encoding="utf-8")
