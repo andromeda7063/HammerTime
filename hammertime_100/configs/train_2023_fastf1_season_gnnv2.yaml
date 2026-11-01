@@ -1,0 +1,125 @@
+# ═══════════════════════════════════════════════════════════════
+# HAMMERTIME GNNv2: 2023 FASTF1 SEASON CONFIGURATION
+# Typed physical-edge messages with auxiliary future-speed supervision.
+# ═══════════════════════════════════════════════════════════════
+
+session:
+  year: 2023
+  gp: "Monza"
+  session_type: "R"
+  cache_dir: "data/cache/fastf1_2023_season"
+  processed_dir: "data/processed/fastf1_2023_season_gnnv2"
+
+sessions: []
+
+track:
+  mini_sectors: 20
+  lap_length_m: 5793.0
+
+preprocess:
+  sample_hz: 4.0
+  max_interpolate_sec: 1.0
+  flag_safety_car: true
+  flag_pit_laps: true
+
+graph:
+  num_nodes: 20
+  edge_threshold_sec: 2.0
+  rbf_sigma: 1.0
+  node_feature_schema: "circuit_context_v2"
+  edge_feature_schema: "physical_v2"
+  neighbor_mode: "physical_circuit"
+  compound_categories:
+    - "SOFT"
+    - "MEDIUM"
+    - "HARD"
+    - "INTERMEDIATE"
+    - "WET"
+
+target:
+  clean_air_gap_sec: 3.0
+  min_clean_samples: 3
+  clip_delta_sec: [-2.0, 10.0]
+
+data:
+  window_size: 10
+  horizon: 5
+  window_stride: 2
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  split_method: "race"
+  timestamp_tolerance_sec: 0.1275
+  continuity_tolerance_sec: 0.05
+  min_valid_targets_per_sample: 1
+  random_seed: 42
+
+model:
+  name: "HammerTime_STGNN"
+  in_dim: 20
+  hidden_dim: 64
+  gat_heads: 4
+  edge_dim: 5
+  conv1d_kernel: 3
+  temporal_mode: "gated_dilated"
+  temporal_dilations: [1, 2, 4]
+  gat_type: "gatv2"
+  use_graph_norm: true
+  drop_edge_rate: 0.15
+  residual: true
+  dropout: 0.20
+  mask_inactive_nodes: true
+  typed_edge_values: true
+  predict_future_speed: true
+  future_speed_horizon_steps: 5
+
+train:
+  batch_size: 256
+  lr: 0.0005
+  weight_decay: 0.0005
+  max_epochs: 30
+  early_stopping_patience: 10
+  loss: "smooth_l1"
+  lr_scheduler: "plateau"
+  lr_scheduler_patience: 3
+  lr_scheduler_factor: 0.5
+  checkpoint_path: "data/processed/fastf1_2023_season_gnnv2/best.pt"
+  num_workers: 0
+
+auxiliary:
+  future_speed_enabled: true
+  future_speed_weight: 0.05
+  future_speed_scale_kph: 100.0
+  future_speed_smooth_l1_beta: 1.0
+
+tuning:
+  enabled: false
+
+baselines:
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+  lstm:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+    lr: 0.001
+    epochs: 40
+    batch_size: 64
+
+physics_tests:
+  clean_air_max_mae: 0.05
+  drs_train_min_lap_loss: 0.10
+  drs_train_max_lap_loss: 0.80
+  drs_max_gap_sec: 0.8
+
+presentation:
+  palette:
+    carbon_dark: "#15151E"
+    f1_red: "#E10600"
+    pure_white: "#FFFFFF"
+    accent_silver: "#A0A0A5"
+    drs_green: "#00D2BE"
+  font_family: "Titillium Web, sans-serif"

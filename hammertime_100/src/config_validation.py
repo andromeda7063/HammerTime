@@ -105,6 +105,32 @@ def validate_config(config: dict) -> None:
     gat_type = config.get("model", {}).get("gat_type", "gat")
     if gat_type not in ("gat", "gatv2"):
         raise ValueError("model.gat_type must be 'gat' or 'gatv2'.")
+    if "typed_edge_values" in config.get("model", {}) and not isinstance(
+            config["model"]["typed_edge_values"], bool):
+        raise ValueError("model.typed_edge_values must be a boolean.")
+    typed_edge_schema = config.get("graph", {}).get("edge_feature_schema", "scalar_rbf")
+    if config.get("model", {}).get("typed_edge_values", False) and typed_edge_schema != "physical_v2":
+        raise ValueError("model.typed_edge_values requires graph.edge_feature_schema='physical_v2'.")
+    if "mask_inactive_nodes" in config.get("model", {}) and not isinstance(
+            config["model"]["mask_inactive_nodes"], bool):
+        raise ValueError("model.mask_inactive_nodes must be a boolean.")
+    if config.get("model", {}).get("typed_edge_values", False) and not config.get("model", {}).get(
+            "mask_inactive_nodes", False):
+        raise ValueError("model.typed_edge_values requires model.mask_inactive_nodes=true.")
+    if "predict_future_speed" in config.get("model", {}) and not isinstance(
+            config["model"]["predict_future_speed"], bool):
+        raise ValueError("model.predict_future_speed must be a boolean.")
+    if config.get("model", {}).get("predict_future_speed", False):
+        horizon = config.get("model", {}).get("future_speed_horizon_steps")
+        if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon != value("data.horizon"):
+            raise ValueError("model.future_speed_horizon_steps must equal data.horizon when future-speed prediction is enabled.")
+        auxiliary = config.get("auxiliary", {})
+        if auxiliary.get("future_speed_enabled") is not True:
+            raise ValueError("model.predict_future_speed requires auxiliary.future_speed_enabled=true.")
+        number("auxiliary.future_speed_weight", strict=True)
+        number("auxiliary.future_speed_scale_kph", strict=True)
+    elif config.get("auxiliary", {}).get("future_speed_enabled", False):
+        raise ValueError("auxiliary.future_speed_enabled requires model.predict_future_speed=true.")
     temporal_mode = config["model"].get("temporal_mode", "conv")
     if temporal_mode not in ("conv", "gated_dilated"):
         raise ValueError("model.temporal_mode must be 'conv' or 'gated_dilated'.")

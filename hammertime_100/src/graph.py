@@ -167,6 +167,10 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
         x_mat = np.zeros((num_nodes, node_dim), dtype=np.float32)
         mask = np.zeros(num_nodes, dtype=bool)
         position_valid = np.zeros(num_nodes, dtype=bool)
+        # Retain aligned, unscaled speed only as future-speed supervision
+        # metadata. It is never included in the node feature tensor.
+        aligned_speed_kph = np.full(num_nodes, np.nan, dtype=np.float32)
+        aligned_speed_valid = np.zeros(num_nodes, dtype=bool)
         driver_names = [None] * num_nodes
 
         ahead_map = {}
@@ -187,6 +191,12 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                 is_pit = bool(row.get("IsPitLap", False)) if pd.notna(row.get("IsPitLap", False)) else False
                 is_active = is_valid and not is_pit
                 mask[idx] = is_active
+                try:
+                    speed_kph = float(row.get("Speed"))
+                except (TypeError, ValueError):
+                    speed_kph = np.nan
+                aligned_speed_kph[idx] = speed_kph
+                aligned_speed_valid[idx] = bool(is_active and np.isfinite(speed_kph))
                 position_ok = is_position_valid(
                     row.get("Distance"), row.get("Speed"), row.get("LapNumber"), is_pit
                 )
@@ -288,6 +298,8 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             edge_attr_physical_circuit=edge_attr_physical_circuit,
             mask=torch.tensor(mask, dtype=torch.bool),
             position_valid=torch.tensor(position_valid, dtype=torch.bool),
+            aligned_speed_kph=torch.tensor(aligned_speed_kph, dtype=torch.float32),
+            aligned_speed_valid=torch.tensor(aligned_speed_valid, dtype=torch.bool),
             position_coverage=float(physical_edges.position_coverage),
             blocked_neighbor_count=int(physical_edges.blocked_neighbor_count),
             physical_graph_available=bool(physical_graph_available),
@@ -358,11 +370,21 @@ def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
         position_valid = getattr(snapshot, "position_valid", None)
         if position_valid is not None:
             position_valid = position_valid.clone()
+        aligned_speed_kph = getattr(snapshot, "aligned_speed_kph", None)
+        aligned_speed_valid = getattr(snapshot, "aligned_speed_valid", None)
+        if aligned_speed_kph is not None:
+            aligned_speed_kph = aligned_speed_kph.clone()
+        if aligned_speed_valid is not None:
+            aligned_speed_valid = aligned_speed_valid.clone()
         names = list(snapshot.driver_names)
         remapped_features = torch.zeros_like(features)
         remapped_mask = torch.zeros_like(mask)
         remapped_position_valid = (torch.zeros(num_nodes, dtype=torch.bool, device=mask.device)
                                    if position_valid is not None else None)
+        remapped_speed = (torch.full((num_nodes,), float("nan"), dtype=torch.float32,
+                                     device=mask.device) if aligned_speed_kph is not None else None)
+        remapped_speed_valid = (torch.zeros(num_nodes, dtype=torch.bool, device=mask.device)
+                                if aligned_speed_valid is not None else None)
         remapped_names = [None] * num_nodes
         for old_index, driver in enumerate(names):
             if driver is None:
@@ -374,6 +396,10 @@ def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
             remapped_mask[new_index] = mask[old_index]
             if remapped_position_valid is not None:
                 remapped_position_valid[new_index] = position_valid[old_index]
+            if remapped_speed is not None:
+                remapped_speed[new_index] = aligned_speed_kph[old_index]
+            if remapped_speed_valid is not None:
+                remapped_speed_valid[new_index] = aligned_speed_valid[old_index]
             remapped_names[new_index] = str(driver)
 
         def remap_edges(edge_index):
@@ -391,6 +417,10 @@ def remap_cohort_driver_nodes(snapshots: list, session_driver_maps: dict,
         snapshot.mask = remapped_mask
         if remapped_position_valid is not None:
             snapshot.position_valid = remapped_position_valid
+        if remapped_speed is not None:
+            snapshot.aligned_speed_kph = remapped_speed
+        if remapped_speed_valid is not None:
+            snapshot.aligned_speed_valid = remapped_speed_valid
         snapshot.driver_names = remapped_names
         for field in ("edge_index", "edge_index_race_progress", "edge_index_physical_circuit"):
             if hasattr(snapshot, field):

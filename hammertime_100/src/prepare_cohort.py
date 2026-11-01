@@ -103,14 +103,20 @@ def _training_input_frame_keys(loader) -> list[dict]:
 def _target_signature(loader) -> str:
     rows = []
     for sample in loader.dataset.samples:
-        rows.append({
+        row = {
             "race_id": sample.get("race_id"),
             "input_start_time": float(sample["input_start_time"]),
             "target_time": float(sample["target_time"]),
             "driver_names": sample.get("driver_names"),
             "target": sample["target"].detach().cpu().numpy().astype(float).tolist(),
             "mask": sample["mask"].detach().cpu().numpy().astype(bool).tolist(),
-        })
+        }
+        if "aux_speed_target" in sample or "aux_speed_mask" in sample:
+            if "aux_speed_target" not in sample or "aux_speed_mask" not in sample:
+                raise ValueError("Prepared auxiliary target signature requires both speed targets and masks.")
+            row["aux_speed_target"] = sample["aux_speed_target"].detach().cpu().numpy().astype(float).tolist()
+            row["aux_speed_mask"] = sample["aux_speed_mask"].detach().cpu().numpy().astype(bool).tolist()
+        rows.append(row)
     return _sha256_bytes(_canonical_json(rows))
 
 
@@ -658,6 +664,54 @@ def load_prepared_cohort(artifact_path: str | Path, manifest_path: str | Path | 
         payload = pickle.load(source)
     if not isinstance(payload, dict) or payload.get("schema_version") not in (1, 2):
         raise ValueError("Unsupported prepared cohort artifact schema.")
+    prepared_config = payload.get("config")
+    if not isinstance(prepared_config, dict):
+        raise ValueError("Prepared cohort config must be a mapping.")
+    prepared_model = prepared_config.get("model", {})
+    prepared_auxiliary = prepared_config.get("auxiliary", {})
+    prepared_data = prepared_config.get("data", {})
+    if (not isinstance(prepared_model, dict) or not isinstance(prepared_auxiliary, dict)
+            or not isinstance(prepared_data, dict)):
+        raise ValueError("Prepared cohort model, data, and auxiliary settings must be mappings.")
+    predicts_future_speed = bool(prepared_model.get("predict_future_speed", False))
+    auxiliary_enabled = bool(prepared_auxiliary.get("future_speed_enabled", False))
+    if predicts_future_speed != auxiliary_enabled:
+        raise ValueError("Prepared cohort future-speed model and auxiliary flags must agree; rebuild the cache.")
+    if predicts_future_speed:
+        horizon = prepared_data.get("horizon")
+        if prepared_model.get("future_speed_horizon_steps") != horizon:
+            raise ValueError("Prepared cohort future-speed horizon disagrees with data.horizon; rebuild the cache.")
+        # Future-speed supervision depends on input-frame metadata that older
+        # prepared artifacts do not contain. Fail closed instead of silently
+        # training an auxiliary head with incomplete cached labels.
+        snapshots = payload.get("snapshots")
+        if not isinstance(snapshots, list) or not snapshots:
+            raise ValueError("Future-speed supervision requires prepared graph snapshots; rebuild the cache.")
+        for index, snapshot in enumerate(snapshots):
+            speed = getattr(snapshot, "aligned_speed_kph", None)
+            valid = getattr(snapshot, "aligned_speed_valid", None)
+            node_mask = getattr(snapshot, "mask", None)
+            if (not isinstance(speed, torch.Tensor) or not isinstance(valid, torch.Tensor)
+                    or not isinstance(node_mask, torch.Tensor)
+                    or speed.shape != (snapshot.x.size(0),)
+                    or valid.shape != speed.shape or node_mask.shape != speed.shape):
+                raise ValueError(
+                    "Future-speed supervision requires aligned_speed_kph and aligned_speed_valid "
+                    f"on every prepared snapshot; rebuild the cache (snapshot {index})."
+                )
+            if (valid.dtype != torch.bool or bool((valid & ~node_mask.bool()).any())
+                    or bool((valid & ~torch.isfinite(speed)).any())):
+                raise ValueError(
+                    "Prepared future-speed metadata violates its active finite-speed validity mask "
+                    f"(snapshot {index})."
+                )
+    if bool(prepared_model.get("typed_edge_values", False)):
+        edge_scaler = manifest.get("edge_feature_scaler")
+        if not isinstance(edge_scaler, dict) or edge_scaler.get("schema") != "physical_v2":
+            raise ValueError(
+                "Typed-edge prepared cohort requires physical_v2 train-only edge-scaler metadata; "
+                "rebuild the cache."
+            )
     provenance = payload.get("provenance", {})
     for key in ("provider", "session_identity", "effective_config_sha256", "split_membership_sha256"):
         if provenance.get(key) != manifest.get(key):

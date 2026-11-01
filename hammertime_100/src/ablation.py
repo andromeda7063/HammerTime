@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader, SequentialSampler
 import yaml
 
 from dataset import collate_st_graph_windows
-from evaluate import compute_metrics
+from evaluate import compute_metrics, validate_checkpoint_edge_scaler
 from model import create_model
 from train import train_model
 
@@ -405,7 +405,7 @@ def _clone_transformed_samples(samples, graph_mode, edge_scaler=None):
                     else:
                         if edge_scaler is None:
                             raise ValueError("physical_v1 comparison requires a train-fitted edge scaler.")
-                        snap.edge_attr = edge_scaler.transform(physical_attr)
+                        snap.edge_attr = edge_scaler.transform(physical_attr)[:, :4].contiguous()
                 elif graph_mode == "self_loop_only":
                     snap.edge_index = torch.empty((2, 0), dtype=torch.long, device=snap.x.device)
                     snap.edge_attr = torch.empty((0, 1), dtype=torch.float32, device=snap.x.device)
@@ -468,7 +468,10 @@ def _validation_metrics(model, loader, device, config=None):
         circuit_by_race[str(config["session"]["race_id"])] = str(
             (config or {}).get("session", {}).get("circuit_id", "unknown")
         )
-    for windows, target, mask in loader:
+    for batch in loader:
+        # Ablation scores remain on the primary residual task when optional
+        # auxiliary labels are present in the same loader.
+        windows, target, mask = batch[:3]
         prediction = model(windows)
         valid = mask.to(device=device, dtype=torch.bool)
         target_values = target.to(device).detach().cpu().numpy()
@@ -662,6 +665,11 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
         "runtime_definition": "training plus best-checkpoint validation scoring; excludes preprocessing and loader construction",
         "constant_edge_attribute": 1.0,
         "self_loop_edge_attribute": 1.0,
+        "edge_operator_comparison_note": (
+            "Typed edge-conditioned values require the physical_v2 five-channel schema. "
+            "When a candidate narrows the edge schema, the runner disables typed_edge_values; "
+            "that result changes both schema and operator and is not an isolated edge-feature ablation."
+        ),
         "gat_edge_loop_behavior": (
             "HammerTime inserts one self-loop per node in _ensure_self_loops; "
             "both GATConv layers have add_self_loops=False. Self-loop-only removes "
@@ -717,6 +725,11 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
                     trial_config["graph"]["neighbor_mode"] = "race_progress"
                     trial_config["graph"]["edge_feature_schema"] = "scalar_rbf"
                     trial_config["model"]["edge_dim"] = 1
+            # The typed value operator is defined over the five physical-v2
+            # channels. Candidate views with narrower schemas keep their
+            # declared edge representation and disable this operator.
+            if trial_config["graph"].get("edge_feature_schema") != "physical_v2":
+                trial_config["model"]["typed_edge_values"] = False
             trial_dir = study_dir / f"candidate_{candidate_index:02d}" / f"seed_{seed}"
             trial_dir.mkdir(parents=True, exist_ok=False)
             trial_config["train"]["checkpoint_path"] = str(trial_dir / "best.pt")
@@ -753,6 +766,7 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
             checkpoint_path = Path(trial_config["train"]["checkpoint_path"])
             checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
             model.load_state_dict(checkpoint["model_state_dict"])
+            validate_checkpoint_edge_scaler(checkpoint, model, trial_val)
             metrics = _validation_metrics(model, trial_val, device, trial_config)
             runtime = time.perf_counter() - started
             if not math.isfinite(float(best_val_mae)) or not math.isclose(
@@ -761,6 +775,12 @@ def run_ablation_study(train_loader, val_loader, config, device, study_dir,
             results["runs"].append({
                 "candidate": candidate["name"], "candidate_index": candidate_index,
                 "training_loss": candidate["loss"], "seed": int(seed),
+                "effective_model_options": {
+                    "edge_feature_schema": trial_config["graph"].get("edge_feature_schema", "scalar_rbf"),
+                    "edge_dim": int(trial_config["model"].get("edge_dim", 1)),
+                    "typed_edge_values": bool(trial_config["model"].get("typed_edge_values", False)),
+                    "mask_inactive_nodes": bool(trial_config["model"].get("mask_inactive_nodes", False)),
+                },
                 "validation_metrics": metrics,
                 "best_checkpoint_validation_mae_sec": float(best_val_mae),
                 "epochs": len(history), "parameter_count": parameter_count,

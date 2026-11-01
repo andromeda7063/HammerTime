@@ -33,7 +33,10 @@ def predict_test_set(model: nn.Module, test_loader, device: torch.device):
     samples = getattr(test_loader.dataset, "samples", [])
     inverse_drivers = {idx: driver for driver, idx in getattr(test_loader.dataset, "driver_to_idx", {}).items()}
     sample_index = 0
-    for batch_windows, targets, masks in test_loader:
+    for batch in test_loader:
+        # Auxiliary runs append speed targets/masks, but held-out scoring
+        # continues to use only the primary sector-residual target.
+        batch_windows, targets, masks = batch[:3]
         targets = targets.to(device)
         masks = masks.to(device).bool()
         preds = model(batch_windows)
@@ -64,6 +67,23 @@ def predict_test_set(model: nn.Module, test_loader, device: torch.device):
                     "y_pred": pred,
                 })
     return np.asarray(all_targets, dtype=float), np.asarray(all_preds, dtype=float), records
+
+
+def validate_checkpoint_edge_scaler(checkpoint: dict, model: nn.Module, loader) -> None:
+    """Require matching train-fitted physical-edge scaling for typed messages."""
+    if not bool(getattr(model, "typed_edge_values", False)):
+        return
+    saved = checkpoint.get("edge_feature_scaler") if isinstance(checkpoint, dict) else None
+    active_scaler = getattr(getattr(loader, "dataset", None), "edge_feature_scaler", None)
+    if active_scaler is None or not hasattr(active_scaler, "metadata"):
+        raise ValueError("Typed-edge evaluation requires the train-fitted physical edge scaler.")
+    active = active_scaler.metadata()
+    if (not isinstance(saved, dict) or saved.get("schema") != "physical_v2"
+            or saved != active or active.get("schema") != "physical_v2"):
+        raise ValueError(
+            "Typed-edge checkpoint is missing compatible physical_v2 edge-scaler metadata; "
+            "rebuild the prepared cohort and checkpoint with matching train-only scaling."
+        )
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -124,6 +144,7 @@ def run_full_evaluation(model_weights_path: str, test_loader, config: dict, base
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     model.load_state_dict(state)
+    validate_checkpoint_edge_scaler(checkpoint, model, test_loader)
 
     saved_scaler = checkpoint.get("feature_scaler") if isinstance(checkpoint, dict) else None
     active_scaler = getattr(test_loader.dataset, "feature_scaler", None)

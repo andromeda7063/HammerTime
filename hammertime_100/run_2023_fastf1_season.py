@@ -843,8 +843,8 @@ def run(args: argparse.Namespace) -> Path:
             raise ValueError("Prepared cohort provider/session-count invariant failed")
         import torch
         from dataset import create_dataloaders
-        from evaluate import (compute_metrics, predict_test_set, validate_clean_air_physics,
-                              validate_drs_train_physics)
+        from evaluate import (compute_metrics, predict_test_set, validate_checkpoint_edge_scaler,
+                              validate_clean_air_physics, validate_drs_train_physics)
         from model import create_model
         from prepare_cohort import clone_snapshots
         from train import train_model
@@ -942,6 +942,7 @@ def run(args: argparse.Namespace) -> Path:
                 _, _, test_loader, scaler = loaders
             model = create_model(cfg).to(device)
             model.load_state_dict(checkpoint["model_state_dict"])
+            validate_checkpoint_edge_scaler(checkpoint, model, test_loader)
             saved = checkpoint.get("feature_scaler") or {}
             if not np.allclose(scaler.mean_, saved.get("mean_", [])) or not np.allclose(scaler.scale_, saved.get("scale_", [])):
                 raise ValueError("Best checkpoint scaler does not match train-only prepared-cohort scaler")

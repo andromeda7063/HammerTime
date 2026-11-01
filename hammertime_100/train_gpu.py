@@ -33,7 +33,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from dataset import create_dataloaders
-from evaluate import compute_metrics, predict_test_set, validate_clean_air_physics
+from evaluate import (compute_metrics, predict_test_set, validate_checkpoint_edge_scaler,
+                      validate_clean_air_physics)
 from model import create_model
 from prepare_cohort import load_prepared_cohort
 from train import train_model
@@ -107,6 +108,7 @@ def run_gpu_training(cohort_path: Path, config_path: Path, output_dir: Path,
     LOG.info("Evaluating best model on held-out test partition (%d samples)...", len(test_loader.dataset))
     best_ckpt = torch.load(output_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(best_ckpt["model_state_dict"])
+    validate_checkpoint_edge_scaler(best_ckpt, model, test_loader)
 
     test_preds, test_actuals, test_weights = predict_test_set(model, test_loader, device)
     test_metrics = compute_metrics(test_actuals, test_preds, test_weights)

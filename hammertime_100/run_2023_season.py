@@ -33,7 +33,7 @@ sys.path.insert(0, str(HERE))
 
 from acquire_openf1 import acquire  # noqa: E402
 from dataset import create_dataloaders  # noqa: E402
-from evaluate import compute_metrics, predict_test_set  # noqa: E402
+from evaluate import (compute_metrics, predict_test_set, validate_checkpoint_edge_scaler)  # noqa: E402
 from model import create_model  # noqa: E402
 from openf1_client import _OpenF1Client, load_openf1_tables  # noqa: E402
 from openf1_adapter import normalize_openf1_tables  # noqa: E402
@@ -261,6 +261,7 @@ def run(args: argparse.Namespace) -> Path:
         hist.to_csv(out / "training/training_history.csv", index=False)
         checkpoint = torch.load(out / "training/best.pt", map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
+        validate_checkpoint_edge_scaler(checkpoint, model, test_loader)
         saved = checkpoint.get("feature_scaler") or {}
         if not np.allclose(scaler.mean_, saved.get("mean_", [])) or not np.allclose(scaler.scale_, saved.get("scale_", [])):
             raise ValueError("Best checkpoint scaler does not match train-only prepared-cohort scaler")

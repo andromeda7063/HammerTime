@@ -29,10 +29,17 @@ class STGraphDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.samples[idx]
-        return item["snapshots"], item["target"], item["mask"]
+        base = (item["snapshots"], item["target"], item["mask"])
+        if "aux_speed_target" in item:
+            return (*base, item["aux_speed_target"], item["aux_speed_mask"])
+        return base
 
 
 def collate_st_graph_windows(batch):
+    if batch and len(batch[0]) == 5:
+        windows, targets, masks, aux_targets, aux_masks = zip(*batch)
+        return (list(windows), torch.stack(targets), torch.stack(masks),
+                torch.stack(aux_targets), torch.stack(aux_masks))
     windows, targets, masks = zip(*batch)
     return list(windows), torch.stack(targets), torch.stack(masks)
 
@@ -70,7 +77,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                                      timestamp_tolerance_sec: float | None = None,
                                      continuity_tolerance_sec: float | None = None,
                                      min_valid_targets: int = 1,
-                                     stride: int = 1):
+                                     stride: int = 1,
+                                     future_speed_enabled: bool = False):
     """Build chronological W-frame inputs with labels exactly K frames after the input."""
     required = {"Driver", "TimeSec", "DeltaT_Sector"}
     missing = required.difference(labels_df.columns)
@@ -174,6 +182,28 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                         "target_time": float(times[target_idx]),
                         "race_id": getattr(ordered[target_idx], "race_id", None),
                         "driver_names": list(driver_names) if driver_names is not None else None})
+        if future_speed_enabled:
+            future_snaps = ordered[start + W:stop]
+            if len(future_snaps) != K:
+                raise ValueError("Future-speed supervision requires exactly K future graph snapshots.")
+            n_nodes = ordered[target_idx].x.size(0)
+            aux_speed = np.zeros((n_nodes, K), dtype=np.float32)
+            aux_valid = np.zeros((n_nodes, K), dtype=bool)
+            # Supervise only cars represented as active at the final encoder frame.
+            input_active = _as_bool_mask(ordered[start + W - 1])
+            for horizon, future_snap in enumerate(future_snaps):
+                if not hasattr(future_snap, "aligned_speed_kph") or not hasattr(future_snap, "aligned_speed_valid"):
+                    raise ValueError("Future-speed supervision requires aligned_speed_kph and aligned_speed_valid in graph snapshots; rebuild old caches.")
+                speed = np.asarray(future_snap.aligned_speed_kph, dtype=np.float32)
+                speed_valid = np.asarray(future_snap.aligned_speed_valid, dtype=bool)
+                if speed.shape != (n_nodes,) or speed_valid.shape != (n_nodes,):
+                    raise ValueError("Aligned future speed metadata must have one value and validity flag per graph node.")
+                active = _as_bool_mask(future_snap)
+                valid_speed = speed_valid & active & input_active & np.isfinite(speed)
+                aux_speed[valid_speed, horizon] = speed[valid_speed]
+                aux_valid[:, horizon] = valid_speed
+            samples[-1]["aux_speed_target"] = torch.tensor(aux_speed, dtype=torch.float32)
+            samples[-1]["aux_speed_mask"] = torch.tensor(aux_valid, dtype=torch.bool)
     return samples
 
 
@@ -182,7 +212,8 @@ def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_i
                            timestamp_tolerance_sec: float | None = None,
                            continuity_tolerance_sec: float | None = None,
                            min_valid_targets: int = 1,
-                           stride: int = 1):
+                           stride: int = 1,
+                           future_speed_enabled: bool = False):
     """Build windows independently per race when race IDs are available."""
     stride = max(1, int(stride))
     race_ids = [getattr(snap, "race_id", None) for snap in snapshots]
@@ -194,13 +225,13 @@ def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_i
             samples.extend(_build_windowed_samples_one_race(
                 race_snaps, race_labels, driver_to_idx, W, K, sample_period_sec,
                 timestamp_tolerance_sec, continuity_tolerance_sec, min_valid_targets,
-                stride=stride,
+                stride=stride, future_speed_enabled=future_speed_enabled,
             ))
         return samples
     return _build_windowed_samples_one_race(snapshots, labels_df, driver_to_idx, W, K,
                                             sample_period_sec, timestamp_tolerance_sec,
                                             continuity_tolerance_sec, min_valid_targets,
-                                            stride=stride)
+                                            stride=stride, future_speed_enabled=future_speed_enabled)
 
 
 def _partition_samples(samples, train_ratio, val_ratio, purge_steps):
@@ -291,6 +322,18 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     """Create chronological loaders and fit the scaler on training input frames only."""
     data_cfg = config["data"]
     W, K = int(data_cfg["window_size"]), int(data_cfg["horizon"])
+    auxiliary_cfg = config.get("auxiliary", {})
+    future_speed_enabled = bool(auxiliary_cfg.get("future_speed_enabled", False))
+    model_cfg = config.get("model", {})
+    model_future_speed_enabled = bool(model_cfg.get("predict_future_speed", False))
+    if future_speed_enabled != model_future_speed_enabled:
+        raise ValueError("auxiliary.future_speed_enabled and model.predict_future_speed must agree.")
+    if future_speed_enabled and K < 1:
+        raise ValueError("Future-speed supervision requires data.horizon >= 1.")
+    if future_speed_enabled:
+        model_horizon = int(model_cfg.get("future_speed_horizon_steps", 5))
+        if model_horizon != K:
+            raise ValueError("model.future_speed_horizon_steps must equal data.horizon for future-speed supervision.")
     method = data_cfg.get("split_method", "temporal")
     if method not in ("temporal", "race"):
         raise ValueError(f"Unsupported split_method {method!r}; use 'temporal' or 'race'.")
@@ -313,6 +356,7 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
         float(data_cfg["continuity_tolerance_sec"]),
         int(data_cfg["min_valid_targets_per_sample"]),
         stride=stride,
+        future_speed_enabled=future_speed_enabled,
     )
     if not samples:
         raise ValueError("No valid graph windows matched target labels on the configured time grid.")
@@ -349,6 +393,28 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
                      if (getattr(snap, "race_id", None), float(snap.time_sec)) in train_keys]
     scaler = fit_and_apply_scaler(snapshots, train_indices)
     edge_scaler = PhysicalEdgeFeatureScaler().fit(snapshots, train_indices)
+    if bool(model_cfg.get("typed_edge_values", False)):
+        if config.get("graph", {}).get("edge_feature_schema") != "physical_v2":
+            raise ValueError("Typed edge-value training requires graph.edge_feature_schema='physical_v2'.")
+        # Preserve the configured schema in scaler metadata even when no
+        # training snapshot happens to contain a physical edge.
+        edge_scaler.schema_ = "physical_v2"
+        # The scaler is fit only on unique training-input snapshots above.
+        # Always start from the preserved raw physical attrs so repeated loader
+        # construction cannot transform already-scaled values a second time.
+        for snapshot in snapshots:
+            raw_attrs = getattr(snapshot, "edge_attr_physical_circuit", None)
+            physical_index = getattr(snapshot, "edge_index_physical_circuit", None)
+            active_index = getattr(snapshot, "edge_index", None)
+            if (not isinstance(raw_attrs, torch.Tensor) or raw_attrs.ndim != 2
+                    or raw_attrs.size(1) != 5 or not isinstance(physical_index, torch.Tensor)
+                    or not isinstance(active_index, torch.Tensor)
+                    or raw_attrs.size(0) != physical_index.size(1)
+                    or not torch.equal(active_index, physical_index)):
+                raise ValueError(
+                    "Typed edge-value training requires active edge_index/edge_attr from the stored physical_v2 graph."
+                )
+            snapshot.edge_attr = edge_scaler.transform(raw_attrs)
     # Windows hold references to snapshots, so the transformation is reflected in all splits.
     batch_size = int(config["train"]["batch_size"])
     num_workers = int(config["train"].get("num_workers", 0))

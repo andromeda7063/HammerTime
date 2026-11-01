@@ -69,6 +69,10 @@ class HammerTimeSTGNN(nn.Module):
         use_graph_norm: bool = False,
         drop_edge_rate: float = 0.0,
         residual: bool = False,
+        typed_edge_values: bool = False,
+        mask_inactive_nodes: bool = False,
+        predict_future_speed: bool = False,
+        future_speed_horizon_steps: int = 5,
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
@@ -96,6 +100,16 @@ class HammerTimeSTGNN(nn.Module):
         self.use_graph_norm = bool(use_graph_norm)
         self.drop_edge_rate = float(drop_edge_rate)
         self.residual = bool(residual)
+        self.typed_edge_values = bool(typed_edge_values)
+        self.mask_inactive_nodes = bool(mask_inactive_nodes)
+        self.predict_future_speed = bool(predict_future_speed)
+        if isinstance(future_speed_horizon_steps, bool) or int(future_speed_horizon_steps) <= 0:
+            raise ValueError("future_speed_horizon_steps must be a positive integer.")
+        self.future_speed_horizon_steps = int(future_speed_horizon_steps)
+        if self.typed_edge_values and edge_feature_schema != "physical_v2":
+            raise ValueError("typed_edge_values requires graph.edge_feature_schema=physical_v2.")
+        if self.typed_edge_values and not self.mask_inactive_nodes:
+            raise ValueError("typed_edge_values requires mask_inactive_nodes=True.")
         head_dim = hidden_dim // gat_heads
 
         # Stage 1: Linear Input Projection
@@ -119,6 +133,21 @@ class HammerTimeSTGNN(nn.Module):
             dropout=dropout,
             add_self_loops=False
         )
+
+        # Optional edge-conditioned value propagation. Each physical leader ->
+        # follower pair produces two directed relation streams. Edge attributes
+        # are retained verbatim for the reverse stream because relative speed
+        # is already train-scaled and cannot safely be negated after scaling.
+        if self.typed_edge_values:
+            self.typed_value = nn.ModuleList(nn.Linear(hidden_dim, hidden_dim, bias=False)
+                                             for _ in range(2))
+            self.typed_edge_value = nn.ModuleList(nn.Linear(edge_dim, hidden_dim, bias=False)
+                                                  for _ in range(2))
+            self.typed_gate = nn.ModuleList(nn.Linear(hidden_dim * 2, hidden_dim)
+                                            for _ in range(2))
+            self.typed_norm = nn.LayerNorm(hidden_dim)
+        else:
+            self.typed_value = None
 
         if self.use_graph_norm:
             from torch_geometric.nn.norm import GraphNorm
@@ -147,6 +176,59 @@ class HammerTimeSTGNN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1)
         )
+        self.future_speed_head = (nn.Linear(hidden_dim, self.future_speed_horizon_steps)
+                                   if self.predict_future_speed else None)
+
+    def _mask_graph(self, g, device):
+        if not self.mask_inactive_nodes:
+            return torch.ones(g.x.size(0), dtype=torch.bool, device=device)
+        mask = getattr(g, "mask", None)
+        if mask is None:
+            return torch.ones(g.x.size(0), dtype=torch.bool, device=device)
+        return mask.to(device=device, dtype=torch.bool)
+
+    def _typed_messages(self, h, edge_index, edge_attr, active):
+        """Aggregate typed, edge-conditioned values over physical pairs."""
+        if not self.typed_edge_values:
+            return h
+        src, dst = edge_index
+        # Only real physical pairs enter this operator: self loops are added
+        # separately by the legacy attention path and never become relations.
+        keep = active[src] & active[dst] & (src != dst)
+        src, dst, attrs = src[keep], dst[keep], edge_attr[keep]
+        if src.numel() == 0:
+            return h
+        output = h.new_zeros(h.shape)
+        for relation, (relation_src, relation_dst, relation_attr) in enumerate((
+                (src, dst, attrs), (dst, src, attrs))):
+            values = self.typed_value[relation](h[relation_src]) + self.typed_edge_value[relation](relation_attr)
+            aggregate = h.new_zeros(h.shape)
+            aggregate.index_add_(0, relation_dst, values)
+            counts = h.new_zeros((h.size(0), 1))
+            counts.index_add_(0, relation_dst, h.new_ones((relation_dst.numel(), 1)))
+            aggregate = aggregate / counts.clamp_min(1.0)
+            gate = torch.sigmoid(self.typed_gate[relation](torch.cat((h, aggregate), dim=-1)))
+            output = output + gate * aggregate
+        return self.typed_norm(h + output) * active.unsqueeze(-1)
+
+    def _masked_graph_norm(self, values, batch, active, norm):
+        """GraphNorm over active cars only, retaining inactive rows as zeros."""
+        if norm is None:
+            return values * active.unsqueeze(-1)
+        graph_count = int(batch.max().item()) + 1 if batch.numel() else 0
+        if graph_count == 0:
+            return torch.zeros_like(values)
+        weights = active.to(values.dtype).unsqueeze(-1)
+        counts = values.new_zeros((graph_count, 1)).index_add_(0, batch, weights)
+        sums = values.new_zeros((graph_count, values.size(-1))).index_add_(0, batch, values * weights)
+        means = sums / counts.clamp_min(1.0)
+        centered = values - means[batch] * norm.mean_scale
+        squares = values.new_zeros((graph_count, values.size(-1))).index_add_(
+            0, batch, centered.square() * weights
+        )
+        variance = squares / counts.clamp_min(1.0)
+        normalized = centered / torch.sqrt(variance[batch] + norm.eps)
+        return (normalized * norm.weight + norm.bias) * weights
 
     def _ensure_self_loops(self, num_nodes: int, edge_index: torch.Tensor,
                            edge_attr: torch.Tensor, device, position_coverage=1.0):
@@ -201,7 +283,7 @@ class HammerTimeSTGNN(nn.Module):
         combined_attr = torch.cat([edge_attr, loop_attr], dim=0)
         return combined_index, combined_attr
 
-    def forward_window(self, snapshots: list):
+    def forward_window(self, snapshots: list, return_aux: bool = False):
         """
         Forward pass for a single sequence of W snapshots.
         snapshots: list of W Data objects, each with x: [N, in_dim]
@@ -212,9 +294,12 @@ class HammerTimeSTGNN(nn.Module):
             device = self.proj.weight.device
             x = g.x.to(device=device, dtype=self.proj.weight.dtype)
             N = x.size(0)
+            active = self._mask_graph(g, device)
             
             # 1. Project node features
             h = torch.relu(self.proj(x))
+            if self.mask_inactive_nodes:
+                h = h * active.unsqueeze(-1)
 
             # 2. Add self-loops (with optional edge dropout during training)
             raw_edge_index = getattr(g, "edge_index", None)
@@ -224,6 +309,7 @@ class HammerTimeSTGNN(nn.Module):
                 raw_edge_index, edge_mask = dropout_edge(raw_edge_index, p=self.drop_edge_rate, training=True)
                 if raw_edge_attr is not None:
                     raw_edge_attr = raw_edge_attr[edge_mask]
+            typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
 
             edge_idx, edge_attr = self._ensure_self_loops(
                 N, raw_edge_index, raw_edge_attr, device,
@@ -231,19 +317,30 @@ class HammerTimeSTGNN(nn.Module):
             )
             edge_idx = edge_idx.to(device)
             edge_attr = edge_attr.to(device=device, dtype=h.dtype)
+            if self.mask_inactive_nodes:
+                edge_keep = active[edge_idx[0]] & active[edge_idx[1]]
+                edge_idx, edge_attr = edge_idx[:, edge_keep], edge_attr[edge_keep]
 
             # 3. Two GAT layers with residual skip and GraphNorm
             h1 = self.gat1(h, edge_idx, edge_attr)
             if self.norm1 is not None:
-                h1 = self.norm1(h1)
+                h1 = (self._masked_graph_norm(h1, torch.zeros(N, dtype=torch.long, device=device), active, self.norm1)
+                      if self.mask_inactive_nodes else self.norm1(h1))
             h1 = torch.relu(h1)
             h = (h + h1) if self.residual else h1
+            h = self._typed_messages(h, typed_edge_index.to(device) if typed_edge_index is not None else edge_idx,
+                                     typed_edge_attr.to(device=device, dtype=h.dtype) if typed_edge_attr is not None else edge_attr, active)
 
             h2 = self.gat2(h, edge_idx, edge_attr)
             if self.norm2 is not None:
-                h2 = self.norm2(h2)
+                h2 = (self._masked_graph_norm(h2, torch.zeros(N, dtype=torch.long, device=device), active, self.norm2)
+                      if self.mask_inactive_nodes else self.norm2(h2))
             h2 = torch.relu(h2)
             h = (h + h2) if self.residual else h2
+            # A fixed all-ones token marks an inactive historical slot without
+            # adding default-path parameters or changing old checkpoint keys.
+            if self.mask_inactive_nodes:
+                h = torch.where(active.unsqueeze(-1), h, torch.ones_like(h))
             outs.append(h)  # [N, hidden_dim]
 
         # Stack over time: [N, hidden_dim, W]
@@ -262,9 +359,14 @@ class HammerTimeSTGNN(nn.Module):
 
         # MLP head -> [N]
         out = self.head(z_last).squeeze(-1)
+        if return_aux:
+            aux = {}
+            if self.future_speed_head is not None:
+                aux["future_speed"] = self.future_speed_head(z_last)
+            return out, aux
         return out
 
-    def _forward_batched_windows(self, batch_windows):
+    def _forward_batched_windows(self, batch_windows, return_aux: bool = False):
         """Run spatial message passing over one disjoint union of all B*W graphs."""
         batch_size = len(batch_windows)
         window_size = len(batch_windows[0])
@@ -279,9 +381,15 @@ class HammerTimeSTGNN(nn.Module):
         device = self.proj.weight.device
         dtype = self.proj.weight.dtype
         graphs = []
+        active_rows = []
+        typed_edges = []
+        typed_attrs = []
+        node_offset = 0
         for window in batch_windows:
             for snapshot in window:
                 x = snapshot.x.to(device=device, dtype=dtype)
+                active = self._mask_graph(snapshot, device)
+                active_rows.append(active)
                 raw_edge_index = getattr(snapshot, "edge_index", None)
                 raw_edge_attr = getattr(snapshot, "edge_attr", None)
                 if self.training and self.drop_edge_rate > 0.0 and raw_edge_index is not None and raw_edge_index.size(1) > 0:
@@ -289,26 +397,44 @@ class HammerTimeSTGNN(nn.Module):
                     raw_edge_index, edge_mask = dropout_edge(raw_edge_index, p=self.drop_edge_rate, training=True)
                     if raw_edge_attr is not None:
                         raw_edge_attr = raw_edge_attr[edge_mask]
+                typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
                 edge_index, edge_attr = self._ensure_self_loops(
                     num_nodes, raw_edge_index, raw_edge_attr, device,
                     getattr(snapshot, "position_coverage", 1.0),
                 )
+                if self.mask_inactive_nodes:
+                    edge_keep = active[edge_index[0]] & active[edge_index[1]]
+                    edge_index, edge_attr = edge_index[:, edge_keep], edge_attr[edge_keep]
+                if (self.typed_edge_values and typed_edge_index is not None
+                        and typed_edge_attr is not None):
+                    typed_edges.append(typed_edge_index.to(device) + node_offset)
+                    typed_attrs.append(typed_edge_attr.to(device=device, dtype=dtype))
+                node_offset += num_nodes
                 graphs.append(Data(x=x, edge_index=edge_index,
                                    edge_attr=edge_attr.to(device=device, dtype=dtype)))
 
         disjoint = Batch.from_data_list(graphs).to(device)
+        active = torch.cat(active_rows)
         h = torch.relu(self.proj(disjoint.x))
+        if self.mask_inactive_nodes:
+            h = h * active.unsqueeze(-1)
         h1 = self.gat1(h, disjoint.edge_index, disjoint.edge_attr)
         if self.norm1 is not None:
-            h1 = self.norm1(h1, disjoint.batch)
+            h1 = (self._masked_graph_norm(h1, disjoint.batch, active, self.norm1)
+                  if self.mask_inactive_nodes else self.norm1(h1, disjoint.batch))
         h1 = torch.relu(h1)
         h = (h + h1) if self.residual else h1
+        if self.typed_edge_values and typed_edges:
+            h = self._typed_messages(h, torch.cat(typed_edges, dim=1), torch.cat(typed_attrs), active)
 
         h2 = self.gat2(h, disjoint.edge_index, disjoint.edge_attr)
         if self.norm2 is not None:
-            h2 = self.norm2(h2, disjoint.batch)
+            h2 = (self._masked_graph_norm(h2, disjoint.batch, active, self.norm2)
+                  if self.mask_inactive_nodes else self.norm2(h2, disjoint.batch))
         h2 = torch.relu(h2)
         h = (h + h2) if self.residual else h2
+        if self.mask_inactive_nodes:
+            h = torch.where(active.unsqueeze(-1), h, torch.ones_like(h))
 
         h = h.reshape(batch_size, window_size, num_nodes, self.hidden_dim)
         z = h.permute(0, 2, 3, 1).contiguous()
@@ -321,9 +447,15 @@ class HammerTimeSTGNN(nn.Module):
             for temporal_block in self.temporal_blocks:
                 z = temporal_block(z)
         z_last = z[:, :, -1].reshape(batch_size, num_nodes, self.hidden_dim)
-        return self.head(z_last).squeeze(-1)
+        prediction = self.head(z_last).squeeze(-1)
+        if return_aux:
+            aux = {}
+            if self.future_speed_head is not None:
+                aux["future_speed"] = self.future_speed_head(z_last)
+            return prediction, aux
+        return prediction
 
-    def forward(self, batch_windows):
+    def forward(self, batch_windows, return_aux: bool = False):
         """
         Accepts either:
           - A single list of W Data objects -> returns [N]
@@ -332,8 +464,8 @@ class HammerTimeSTGNN(nn.Module):
         if not batch_windows:
             raise ValueError("Model input must contain at least one graph window.")
         if isinstance(batch_windows[0], (list, tuple)):
-            return self._forward_batched_windows(batch_windows)
-        return self.forward_window(batch_windows)
+            return self._forward_batched_windows(batch_windows, return_aux=return_aux)
+        return self.forward_window(batch_windows, return_aux=return_aux)
 
 
 def create_model(config: dict) -> HammerTimeSTGNN:
@@ -357,6 +489,10 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         use_graph_norm=bool(m_cfg.get("use_graph_norm", False)),
         drop_edge_rate=float(m_cfg.get("drop_edge_rate", 0.0)),
         residual=bool(m_cfg.get("residual", False)),
+        typed_edge_values=bool(m_cfg.get("typed_edge_values", False)),
+        mask_inactive_nodes=bool(m_cfg.get("mask_inactive_nodes", False)),
+        predict_future_speed=bool(m_cfg.get("predict_future_speed", False)),
+        future_speed_horizon_steps=int(m_cfg.get("future_speed_horizon_steps", 5)),
     )
 
 

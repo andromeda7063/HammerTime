@@ -64,6 +64,8 @@ def _training_data_signature(train_loader, val_loader) -> str:
             digest.update(str(index).encode("ascii"))
             _tensor_digest_update(digest, sample.get("target"))
             _tensor_digest_update(digest, sample.get("mask"))
+            _tensor_digest_update(digest, sample.get("aux_speed_target"))
+            _tensor_digest_update(digest, sample.get("aux_speed_mask"))
             for snapshot in sample.get("snapshots", ()):
                 race_id = str(getattr(snapshot, "race_id", ""))
                 time_sec = float(getattr(snapshot, "time_sec", float("nan")))
@@ -76,7 +78,8 @@ def _training_data_signature(train_loader, val_loader) -> str:
         digest.update(json.dumps(key, separators=(",", ":")).encode("utf-8"))
         for field in ("x", "mask", "position_valid", "edge_index", "edge_attr",
                       "edge_index_race_progress", "edge_attr_race_progress",
-                      "edge_index_physical_circuit", "edge_attr_physical_circuit"):
+                      "edge_index_physical_circuit", "edge_attr_physical_circuit",
+                      "aligned_speed_kph", "aligned_speed_valid"):
             _tensor_digest_update(digest, getattr(snapshot, field, None))
         for field in ("driver_names", "position_coverage", "blocked_neighbor_count"):
             digest.update(repr(getattr(snapshot, field, None)).encode("utf-8"))
@@ -209,6 +212,23 @@ def masked_smooth_l1_loss(preds: torch.Tensor, targets: torch.Tensor, masks: tor
     return nn.functional.smooth_l1_loss(preds[valid], targets[valid], beta=beta, reduction="mean")
 
 
+def masked_auxiliary_speed_loss(preds: torch.Tensor, targets_kph: torch.Tensor,
+                                masks: torch.Tensor, scale_kph: float,
+                                beta: float = 1.0) -> torch.Tensor:
+    """Smooth L1 on normalized kph values, masking unavailable future observations."""
+    if preds.shape != targets_kph.shape or masks.shape != targets_kph.shape:
+        raise ValueError("Auxiliary speed predictions, targets, and masks must have the same shape.")
+    if not np.isfinite(scale_kph) or scale_kph <= 0:
+        raise ValueError("auxiliary.future_speed_scale_kph must be finite and positive.")
+    valid = masks.bool() & torch.isfinite(targets_kph)
+    if (valid & ~torch.isfinite(preds)).any():
+        raise FloatingPointError("Non-finite future-speed prediction for a valid auxiliary target.")
+    if not valid.any():
+        return torch.nan_to_num(preds).sum() * 0.0
+    normalized = targets_kph / float(scale_kph)
+    return nn.functional.smooth_l1_loss(preds[valid], normalized[valid], beta=beta, reduction="mean")
+
+
 @torch.no_grad()
 def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> float:
     """
@@ -218,7 +238,8 @@ def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> floa
     total_abs_err = 0.0
     total_samples = 0
 
-    for batch_snaps, targets, masks in val_loader:
+    for batch in val_loader:
+        batch_snaps, targets, masks = batch[:3]
         targets = targets.to(device)
         masks = masks.to(device)
         preds = model(batch_snaps)
@@ -250,6 +271,22 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     if loss_name not in loss_functions:
         raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
     loss_function = loss_functions[loss_name]
+    auxiliary_cfg = config.get("auxiliary", {})
+    aux_enabled = bool(auxiliary_cfg.get("future_speed_enabled", False))
+    aux_weight = float(auxiliary_cfg.get("future_speed_weight", 0.0)) if aux_enabled else 0.0
+    aux_scale_kph = float(auxiliary_cfg.get("future_speed_scale_kph", 100.0))
+    aux_beta = float(auxiliary_cfg.get("future_speed_smooth_l1_beta", 1.0))
+    if aux_enabled:
+        if not bool(getattr(model, "predict_future_speed", False)):
+            raise ValueError("Future-speed auxiliary loss is enabled, but the model has no enabled future-speed head.")
+        expected_horizon = int(config.get("data", {}).get("horizon", 0))
+        model_horizon = int(getattr(model, "future_speed_horizon_steps", -1))
+        if expected_horizon < 1 or model_horizon != expected_horizon:
+            raise ValueError("Model future-speed horizon must equal data.horizon before training.")
+        if aux_weight < 0 or not np.isfinite(aux_weight):
+            raise ValueError("auxiliary.future_speed_weight must be finite and non-negative.")
+        if aux_beta <= 0 or not np.isfinite(aux_beta):
+            raise ValueError("auxiliary.future_speed_smooth_l1_beta must be finite and positive.")
     lr = float(t_cfg.get("lr", 0.001))
     wd = float(t_cfg.get("weight_decay", 0.0001))
     max_epochs = int(t_cfg.get("max_epochs", 100))
@@ -284,6 +321,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     if len(val_loader) == 0:
         raise ValueError("Validation loader is empty; early stopping needs held-out validation data.")
     scaler = getattr(train_loader.dataset, "feature_scaler", None)
+    edge_scaler = getattr(train_loader.dataset, "edge_feature_scaler", None)
     resume_signature = _resume_signature(model, train_loader, val_loader, config)
     if resume_from is not None and resume_signature["data_sha256"] is None:
         raise ValueError("Cannot resume: train/validation datasets do not expose fingerprintable sample records.")
@@ -361,14 +399,34 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         epoch_loss = 0.0
         num_batches = 0
 
-        for batch_snaps, targets, masks in train_loader:
+        for batch in train_loader:
+            if aux_enabled:
+                if len(batch) != 5:
+                    raise ValueError("Future-speed auxiliary loss is enabled, but loader batches lack auxiliary targets; rebuild the dataset/cache.")
+                batch_snaps, targets, masks, aux_targets, aux_masks = batch
+            else:
+                batch_snaps, targets, masks = batch[:3]
             targets = targets.to(device)
             masks = masks.to(device)
 
             optimizer.zero_grad()
-            preds = model(batch_snaps)
-
-            loss = loss_function(preds, targets, masks)
+            if aux_enabled:
+                output = model(batch_snaps, return_aux=True)
+                if (not isinstance(output, tuple) or len(output) != 2
+                        or not isinstance(output[1], dict) or "future_speed" not in output[1]):
+                    raise ValueError("Auxiliary model must return (main_prediction, {'future_speed': tensor}) when return_aux=True.")
+                preds, aux_outputs = output
+                aux_preds = aux_outputs["future_speed"]
+                if aux_preds.shape != aux_targets.shape:
+                    raise ValueError("Future-speed head horizon/node dimensions do not match dataset labels.")
+                loss = loss_function(preds, targets, masks)
+                aux_loss = masked_auxiliary_speed_loss(
+                    aux_preds, aux_targets.to(device), aux_masks.to(device), aux_scale_kph, aux_beta
+                )
+                loss = loss + aux_weight * aux_loss
+            else:
+                preds = model(batch_snaps)
+                loss = loss_function(preds, targets, masks)
 
             # Immutable Law 9 / Failure Case: NaN Guard
             if not torch.isfinite(loss):
@@ -401,7 +459,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             history_entry["lr"] = current_lr
         history.append(history_entry)
 
-        train_unit = "s" if loss_name in ("mae", "smooth_l1", "huber") else "s²"
+        train_unit = ("weighted objective" if aux_enabled else
+                      ("s" if loss_name in ("mae", "smooth_l1", "huber") else "s²"))
         train_label = "SmoothL1" if loss_name in ("smooth_l1", "huber") else ("L1" if loss_name == "mae" else "MSE")
         lr_suffix = f" | LR: {current_lr:.6f}" if lr_scheduler_type != "none" else ""
         logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit} | Val MAE: {val_mae:.4f} s{lr_suffix}")
@@ -425,6 +484,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                                     "var_": scaler.var_.tolist(),
                                     "n_features_in_": int(scaler.n_features_in_)}
                                    if scaler is not None and hasattr(scaler, "mean_") else None),
+                "edge_feature_scaler": edge_scaler.metadata() if edge_scaler is not None else None,
             }
             if scheduler is not None:
                 checkpoint["scheduler_state_dict"] = scheduler.state_dict()

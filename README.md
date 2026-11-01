@@ -44,6 +44,16 @@ data:
 
 Race identifiers must be unique. Each session gets its own FastF1 cache subdirectory and processed-data directory. Clean-air target references are calculated within each session because sector times do not transfer across circuits. Feature scaling and model fitting use the training partition.
 
+### GNNv2 research configuration
+
+The opt-in GNNv2 configuration retains the physical-v2 node and edge widths, window length, forecast horizon, split, primary target, metrics, acceptance gates, and physics thresholds. It enables active-node-only normalization and propagation, typed edge-conditioned messages, and an auxiliary decoder trained on aligned speed metadata from the five future frames of eligible windows. The active-node behavior is opt-in; legacy configurations keep their prior forward path. Auxiliary labels are supervision only; they are not added to node features. The aligned values inherit the existing interpolation behavior and do not represent raw-channel observation masks. This is an implementation candidate, not a measured improvement. To prepare and run it on authentic 2023 FastF1 data, use a dedicated output directory:
+
+```bash
+uv run --frozen python hammertime_100/run_2023_fastf1_season.py --config hammertime_100/configs/train_2023_fastf1_season_gnnv2.yaml --output .local/research-history/2023-fastf1-gnnv2
+```
+
+The runner uses the existing season-held-out protocol and unchanged evaluation gates. Do not interpret a successful preparation or training run as a performance result; record the prepared manifest and held-out evaluation before making a research claim.
+
 Sessions for a different circuit must supply their own positive `lap_length_m`; they cannot inherit Monza's geometry. Repeated source sessions under different IDs and IDs that map to the same directory are rejected.
 
 ### OpenF1 Monza 2023
