@@ -600,7 +600,9 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             with artifact_staged.open("wb") as output:
                 pickle.dump(payload, output, protocol=pickle.HIGHEST_PROTOCOL)
                 output.flush()
-                os.fdatasync(output.fileno())
+                # fdatasync is unavailable on Windows; fsync provides the
+                # portable file-level durability fallback there.
+                getattr(os, "fdatasync", os.fsync)(output.fileno())
             del payload, snapshots, labels_all
             gc.collect()
 

@@ -1,5 +1,9 @@
 # Research and Change Record
 
+## Windows prepared-cohort durability — 2026-11-01
+
+Prepared-cohort staging now uses `os.fdatasync` where available and falls back to `os.fsync` on platforms such as Windows where `fdatasync` is not exposed. The flush and file-level durability sync still complete before the staged artifact is finalized. Source-only review and `git diff --check` were used; no project code, tests, imports, compilation, training, or benchmarks were run.
+
 This file records durable implementation changes and their verification limits. Scientific assumptions and unresolved decisions remain in [ASSUMPTIONS.md](ASSUMPTIONS.md) and [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md). Local execution records are archived under the ignored `.local/research-history/` directory and are not included in Git commits.
 
 ## OpenF1 and pipeline correctness updates — 2026-10-30
