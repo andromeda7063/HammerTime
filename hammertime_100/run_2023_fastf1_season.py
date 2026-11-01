@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import traceback
 import uuid
 
 import numpy as np
@@ -51,6 +52,7 @@ CIRCUITS = {
     "Monaco": ("Monaco", 3337.0, "monaco"),
     "Barcelona": ("Spain", 4657.0, "spain"),
     "Montreal": ("Canada", 4361.0, "canada"),
+    "Montréal": ("Canada", 4361.0, "canada"),
     "Spielberg": ("Austria", 4318.0, "austria"),
     "Silverstone": ("Great Britain", 5891.0, "great-britain"),
     "Budapest": ("Hungary", 4381.0, "hungary"),
@@ -58,6 +60,7 @@ CIRCUITS = {
     "Zandvoort": ("Netherlands", 4259.0, "netherlands"),
     "Monza": ("Italy", 5793.0, "italy"),
     "Singapore": ("Singapore", 4940.0, "singapore"),
+    "Marina Bay": ("Singapore", 4940.0, "singapore"),
     "Suzuka": ("Japan", 5807.0, "japan"),
     "Lusail": ("Qatar", 5419.0, "qatar"),
     "Austin": ("United States", 5513.0, "usa"),
@@ -65,6 +68,7 @@ CIRCUITS = {
     "São Paulo": ("São Paulo", 4309.0, "brazil"),
     "Las Vegas": ("Las Vegas", 6201.0, "las-vegas"),
     "Yas Marina Circuit": ("Abu Dhabi", 5281.0, "abu-dhabi"),
+    "Yas Island": ("Abu Dhabi", 5281.0, "abu-dhabi"),
     "Abu Dhabi": ("Abu Dhabi", 5281.0, "abu-dhabi"),
 }
 
@@ -126,6 +130,23 @@ def atomic_bytes(path: Path, value: bytes) -> None:
 
 def atomic_json(path: Path, value) -> None:
     atomic_bytes(path, (json.dumps(value, indent=2, allow_nan=False, default=str) + "\n").encode())
+
+
+def _sanitized_error(exc: Exception, secrets: tuple[str, str]) -> dict[str, str]:
+    """Capture actionable failure details while scrubbing account credentials."""
+    message = str(exc)
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+            formatted = formatted.replace(secret, "[REDACTED]")
+    sensitive_assignment = re.compile(
+        r"(?i)\b(password|token|authorization|api[_-]?key)(\s*[:=]\s*)[^\s,;]+"
+    )
+    bearer = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
+    message = bearer.sub("Bearer [REDACTED]", sensitive_assignment.sub(r"\1\2[REDACTED]", message))
+    formatted = bearer.sub("Bearer [REDACTED]", sensitive_assignment.sub(r"\1\2[REDACTED]", formatted))
+    return {"exception_type": type(exc).__name__, "message": message, "traceback": formatted}
 
 
 def _safe_id(value: str) -> str:
@@ -618,6 +639,7 @@ def run(args: argparse.Namespace) -> Path:
     cache_root = HERE / "data/cache/fastf1-2023-authenticated"
     cache_root.mkdir(parents=True, exist_ok=True)
     fastf1.Cache.enable_cache(str(cache_root))
+    failure_stage = "load template and discover calendar"
     try:
         template_path = HERE / "configs/supplied_fastf1_monza_2023_gated.yaml"
         with template_path.open(encoding="utf-8") as stream:
@@ -634,6 +656,7 @@ def run(args: argparse.Namespace) -> Path:
             os.environ.pop("F1_USERNAME", None)
             os.environ.pop("F1_PASSWORD", None)
             os.environ.pop("FASTF1_AUTH_METHOD", None)
+        failure_stage = "acquire and normalize race sessions"
         stages_root = out / "race_cache/sessions"
         raw_root = out / "race_cache/raw_sessions"
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -751,12 +774,14 @@ def run(args: argparse.Namespace) -> Path:
         candidates = [cohort_prefix, *sorted(out / "cohorts".glob(f"{cohort_fingerprint[:20]}-rebuild*"))]
         cached = None
         cohort_dir = cohort_prefix
+        failure_stage = "validate or prepare graph cohort"
         for candidate in candidates:
             cached = _cohort_cached(candidate, base, source_hash)
             if cached is not None:
                 cohort_dir = candidate
                 break
         if cached is None:
+            failure_stage = "prepare graph cohort from normalized race tables"
             if cohort_prefix.exists():
                 # Keep a corrupt/incompatible artifact for investigation and
                 # build a new immutable output directory.
@@ -825,6 +850,7 @@ def run(args: argparse.Namespace) -> Path:
                 complete_training = False
         loaders = None
         if not complete_training:
+            failure_stage = "train or resume model"
             train_loader, val_loader, test_loader, scaler = create_dataloaders(
                 copy.deepcopy(payload["snapshots"]), payload["labels"], payload["driver_to_idx"], cfg)
             model = create_model(cfg).to(device)
@@ -850,6 +876,7 @@ def run(args: argparse.Namespace) -> Path:
         pred_fingerprint = canonical_hash({"best_sha256": sha256(best_path),
                                            "test_membership_sha256": manifest["split_membership_sha256"]["test"],
                                            "prediction_code": sha256(HERE / "src/evaluate.py")})
+        failure_stage = "held-out prediction and export"
         predictions_path = training_dir / "test_predictions.pkl"
         def predict_frame() -> pd.DataFrame:
             if loaders is None:
@@ -928,9 +955,9 @@ def run(args: argparse.Namespace) -> Path:
             _record_output(residual_path, plot_fingerprint)
         return out
     except Exception as exc:
-        # Keep secrets out of durable diagnostics; exception type is sufficient here.
-        atomic_json(out / "run_failure.json", {"exception_type": type(exc).__name__,
-                                               "stage": "acquisition_or_training"})
+        details = _sanitized_error(exc, secrets)
+        details["stage"] = failure_stage
+        atomic_json(out / "run_failure.json", details)
         raise RuntimeError(f"2023 FastF1 season run failed ({type(exc).__name__}); see {out} for sanitized diagnostics.") from None
 
 

@@ -24,6 +24,35 @@ def _offline_process_task(task):
 
 
 class FastF1SeasonResumeTests(unittest.TestCase):
+    def test_cached_calendar_location_aliases_resolve_reviewed_circuits(self):
+        class FakeFastF1:
+            __version__ = "3.9.0"
+
+            @staticmethod
+            def get_event_schedule(_year, include_testing=False):
+                return pd.DataFrame([
+                    {"EventName": "Canadian Grand Prix", "Location": "Montréal", "RoundNumber": 8},
+                    {"EventName": "Singapore Grand Prix", "Location": "Marina Bay", "RoundNumber": 16},
+                    {"EventName": "Abu Dhabi Grand Prix", "Location": "Yas Island", "RoundNumber": 23},
+                ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events, skips = runner.discover(FakeFastF1, Path(tmp))
+        self.assertEqual(skips, [])
+        self.assertEqual([event["lap_length_m"] for event in events], [4361.0, 4940.0, 5281.0])
+        self.assertEqual([event["circuit_id"] for event in events], ["canada", "singapore", "abu-dhabi"])
+
+    def test_failure_diagnostics_redact_credentials_and_tokens(self):
+        secret = "fixture-password"
+        try:
+            raise RuntimeError(f"token=secret-token password={secret}")
+        except RuntimeError as exc:
+            details = runner._sanitized_error(exc, ("fixture-user", secret))
+        self.assertNotIn(secret, details["message"])
+        self.assertNotIn(secret, details["traceback"])
+        self.assertNotIn("secret-token", details["message"])
+        self.assertNotIn("secret-token", details["traceback"])
+
     def test_completed_normalized_stage_is_reused_and_partial_cache_rejected(self):
         event = {"year": 2023, "gp": "Fixture Grand Prix", "session_type": "R",
                  "race_id": "2023-Fixture-R", "source": "fastf1", "circuit_id": "fixture",
