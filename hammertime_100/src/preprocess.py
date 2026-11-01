@@ -88,7 +88,7 @@ def align_driver_telemetry(
     # Interpolate numerical columns only across short, observed gaps. Rows outside
     # a driver's telemetry coverage remain invalid on the shared race time grid.
     row_valid = (uniform_times >= t_start) & (uniform_times <= t_end)
-    interp_cols = ["Speed", "Throttle", "Brake", "Distance", "X", "Y", "Z"]
+    interp_cols = ["Speed", "Throttle", "Brake", "DRS", "Distance", "X", "Y", "Z"]
     for col in interp_cols:
         if col in tel_sorted.columns:
             valid = tel_sorted[["TimeSec", col]].copy()
@@ -121,6 +121,27 @@ def align_driver_telemetry(
             if col in ("Speed", "Throttle", "Distance"):
                 row_valid[:] = False
     resampled["IsValid"] = row_valid
+
+    # DRS activation indicator: In FastF1, DRS >= 10 indicates wing flap is open
+    drs_values = pd.to_numeric(resampled.get("DRS", pd.Series(np.nan, index=resampled.index)), errors="coerce")
+    resampled["DRSActive"] = np.where(np.isfinite(drs_values), (drs_values.to_numpy(dtype=float) >= 10).astype(float), 0.0)
+    resampled["DRSSupported"] = np.isfinite(drs_values).astype(float)
+
+    # Longitudinal acceleration: a_long = Delta v / Delta t in m/s^2
+    speeds_mps = pd.to_numeric(resampled["Speed"], errors="coerce").to_numpy(dtype=float) / 3.6
+    a_long = np.zeros(len(uniform_times), dtype=float)
+    if len(uniform_times) > 1:
+        dt = np.diff(uniform_times)
+        dv = np.diff(speeds_mps)
+        valid_accel = resampled["IsValid"].iloc[:-1].to_numpy(dtype=bool) & resampled["IsValid"].iloc[1:].to_numpy(dtype=bool)
+        valid_accel &= (dt > 0) & (dt <= max_interpolate_sec + 1e-9)
+        valid_accel &= np.isfinite(dv)
+        computed_a = np.zeros(len(dt), dtype=float)
+        computed_a[valid_accel] = dv[valid_accel] / dt[valid_accel]
+        computed_a = np.clip(computed_a, -25.0, 15.0)
+        a_long[1:] = computed_a
+        a_long[0] = a_long[1] if len(a_long) > 1 else 0.0
+    resampled["a_long"] = np.where(np.isfinite(a_long), a_long, 0.0)
 
     # Attach Lap information
     resampled["LapNumber"] = np.nan

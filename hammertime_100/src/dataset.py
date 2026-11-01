@@ -69,7 +69,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
                                      W: int = 10, K: int = 5, sample_period_sec: float = 0.25,
                                      timestamp_tolerance_sec: float | None = None,
                                      continuity_tolerance_sec: float | None = None,
-                                     min_valid_targets: int = 1):
+                                     min_valid_targets: int = 1,
+                                     stride: int = 1):
     """Build chronological W-frame inputs with labels exactly K frames after the input."""
     required = {"Driver", "TimeSec", "DeltaT_Sector"}
     missing = required.difference(labels_df.columns)
@@ -108,7 +109,8 @@ def _build_windowed_samples_one_race(snapshots: list, labels_df: pd.DataFrame, d
 
     samples = []
     span = W + K
-    for start in range(0, len(ordered) - span + 1):
+    stride = max(1, int(stride))
+    for start in range(0, len(ordered) - span + 1, stride):
         stop = start + span
         local_times = times[start:stop]
         race_ids = [getattr(snap, "race_id", None) for snap in ordered[start:stop]]
@@ -179,8 +181,10 @@ def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_i
                            W: int = 10, K: int = 5, sample_period_sec: float = 0.25,
                            timestamp_tolerance_sec: float | None = None,
                            continuity_tolerance_sec: float | None = None,
-                           min_valid_targets: int = 1):
+                           min_valid_targets: int = 1,
+                           stride: int = 1):
     """Build windows independently per race when race IDs are available."""
+    stride = max(1, int(stride))
     race_ids = [getattr(snap, "race_id", None) for snap in snapshots]
     if race_ids and all(race_id is not None for race_id in race_ids) and "RaceId" in labels_df.columns:
         samples = []
@@ -189,12 +193,14 @@ def build_windowed_samples(snapshots: list, labels_df: pd.DataFrame, driver_to_i
             race_labels = labels_df[labels_df["RaceId"] == race_id]
             samples.extend(_build_windowed_samples_one_race(
                 race_snaps, race_labels, driver_to_idx, W, K, sample_period_sec,
-                timestamp_tolerance_sec, continuity_tolerance_sec, min_valid_targets
+                timestamp_tolerance_sec, continuity_tolerance_sec, min_valid_targets,
+                stride=stride,
             ))
         return samples
     return _build_windowed_samples_one_race(snapshots, labels_df, driver_to_idx, W, K,
                                             sample_period_sec, timestamp_tolerance_sec,
-                                            continuity_tolerance_sec, min_valid_targets)
+                                            continuity_tolerance_sec, min_valid_targets,
+                                            stride=stride)
 
 
 def _partition_samples(samples, train_ratio, val_ratio, purge_steps):
@@ -300,11 +306,13 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     if hz <= 0:
         raise ValueError("preprocess.sample_hz must be positive.")
     period = 1.0 / hz
+    stride = int(data_cfg.get("window_stride", data_cfg.get("stride", 1)))
     samples = build_windowed_samples(
         snapshots, labels_df, driver_to_idx, W, K, period,
         float(data_cfg["timestamp_tolerance_sec"]),
         float(data_cfg["continuity_tolerance_sec"]),
         int(data_cfg["min_valid_targets_per_sample"]),
+        stride=stride,
     )
     if not samples:
         raise ValueError("No valid graph windows matched target labels on the configured time grid.")

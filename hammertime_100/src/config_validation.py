@@ -56,8 +56,11 @@ def validate_config(config: dict) -> None:
                  "train.checkpoint_path"):
         if not isinstance(value(path), str) or not value(path).strip():
             raise ValueError(f"{path} must be a non-empty string.")
-    if config.get("train", {}).get("loss", "mae") not in ("mae", "mse"):
-        raise ValueError("train.loss must be 'mae' or 'mse'.")
+    if config.get("train", {}).get("loss", "mae") not in ("mae", "mse", "smooth_l1", "huber"):
+        raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
+    lr_scheduler = config.get("train", {}).get("lr_scheduler", "none")
+    if lr_scheduler not in ("none", "plateau"):
+        raise ValueError("train.lr_scheduler must be 'none' or 'plateau'.")
     number("session.year", minimum=1, integer=True)
     validate_session_source(config["session"], config.get("openf1"))
     for path in ("track.mini_sectors", "graph.num_nodes", "data.window_size", "train.batch_size",
@@ -70,6 +73,8 @@ def validate_config(config: dict) -> None:
         number(path, minimum=1, integer=True)
     for path in ("data.horizon", "data.random_seed", "train.num_workers"):
         number(path, integer=True)
+    if "window_stride" in config.get("data", {}):
+        number("data.window_stride", minimum=1, integer=True)
     number("data.random_seed", integer=True, maximum=2**32 - 1)
     for path in ("track.lap_length_m", "preprocess.sample_hz", "graph.edge_threshold_sec",
                  "graph.rbf_sigma", "train.lr", "baselines.xgboost.learning_rate",
@@ -97,6 +102,9 @@ def validate_config(config: dict) -> None:
         raise ValueError("data.min_valid_targets_per_sample cannot exceed graph.num_nodes.")
     if value("model.hidden_dim") % value("model.gat_heads"):
         raise ValueError("model.hidden_dim must be divisible by model.gat_heads.")
+    gat_type = config.get("model", {}).get("gat_type", "gat")
+    if gat_type not in ("gat", "gatv2"):
+        raise ValueError("model.gat_type must be 'gat' or 'gatv2'.")
     temporal_mode = config["model"].get("temporal_mode", "conv")
     if temporal_mode not in ("conv", "gated_dilated"):
         raise ValueError("model.temporal_mode must be 'conv' or 'gated_dilated'.")
@@ -110,17 +118,17 @@ def validate_config(config: dict) -> None:
             raise ValueError("model.temporal_dilations must provide a receptive field covering data.window_size.")
     graph_cfg = value("graph")
     node_schema = graph_cfg.get("node_feature_schema", "legacy_v1")
-    if node_schema not in ("legacy_v1", "circuit_context_v1"):
-        raise ValueError("graph.node_feature_schema must be 'legacy_v1' or 'circuit_context_v1'.")
+    if node_schema not in ("legacy_v1", "circuit_context_v1", "circuit_context_v2"):
+        raise ValueError("graph.node_feature_schema must be 'legacy_v1', 'circuit_context_v1', or 'circuit_context_v2'.")
     edge_schema = graph_cfg.get("edge_feature_schema", "scalar_rbf")
-    if edge_schema not in ("scalar_rbf", "physical_v1"):
-        raise ValueError("graph.edge_feature_schema must be 'scalar_rbf' or 'physical_v1'.")
+    if edge_schema not in ("scalar_rbf", "physical_v1", "physical_v2"):
+        raise ValueError("graph.edge_feature_schema must be 'scalar_rbf', 'physical_v1', or 'physical_v2'.")
     neighbor_mode = graph_cfg.get("neighbor_mode", "race_progress")
     if neighbor_mode not in ("race_progress", "physical_circuit"):
         raise ValueError("graph.neighbor_mode must be 'race_progress' or 'physical_circuit'.")
-    if edge_schema == "physical_v1" and neighbor_mode != "physical_circuit":
-        raise ValueError("graph.edge_feature_schema='physical_v1' requires neighbor_mode='physical_circuit'.")
-    expected_edge_dim = 1 if edge_schema == "scalar_rbf" else 4
+    if edge_schema in ("physical_v1", "physical_v2") and neighbor_mode != "physical_circuit":
+        raise ValueError("graph.edge_feature_schema='physical_v1' or 'physical_v2' requires neighbor_mode='physical_circuit'.")
+    expected_edge_dim = 1 if edge_schema == "scalar_rbf" else (4 if edge_schema == "physical_v1" else 5)
     if value("model.edge_dim") != expected_edge_dim:
         raise ValueError(f"model.edge_dim must be {expected_edge_dim} for graph.edge_feature_schema={edge_schema!r}.")
     categories = value("graph.compound_categories")
@@ -128,11 +136,22 @@ def validate_config(config: dict) -> None:
             or any(not isinstance(item, str) or not item.strip() for item in categories)
             or len({item.upper() for item in categories}) != len(categories)):
         raise ValueError("graph.compound_categories must contain distinct, non-empty strings.")
-    expected_node_dim = (4 + len(categories)) + (10 if node_schema == "circuit_context_v1" else 0)
+    context_extra = 10 if node_schema == "circuit_context_v1" else (11 if node_schema == "circuit_context_v2" else 0)
+    expected_node_dim = (4 + len(categories)) + context_extra
     if value("model.in_dim") != expected_node_dim:
         raise ValueError(
             f"model.in_dim must be {expected_node_dim} for graph.node_feature_schema={node_schema!r}."
         )
+    if "drop_edge_rate" in config.get("model", {}):
+        rate = config["model"]["drop_edge_rate"]
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not (0.0 <= rate < 1.0):
+            raise ValueError("model.drop_edge_rate must be a number in [0, 1).")
+    if "use_graph_norm" in config.get("model", {}):
+        if not isinstance(config["model"]["use_graph_norm"], bool):
+            raise ValueError("model.use_graph_norm must be a boolean.")
+    if "residual" in config.get("model", {}):
+        if not isinstance(config["model"]["residual"], bool):
+            raise ValueError("model.residual must be a boolean.")
     clip = value("target.clip_delta_sec")
     if (not isinstance(clip, list) or len(clip) != 2
             or any(isinstance(item, bool) or not isinstance(item, (int, float))

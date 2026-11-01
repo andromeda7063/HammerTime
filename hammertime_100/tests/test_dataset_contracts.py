@@ -150,5 +150,21 @@ class DatasetContractTests(unittest.TestCase):
         self.assertEqual(len(samples), 0)
 
 
+    def test_window_stride_subsamples_proportionally(self):
+        """Stride parameter subsamples windows without losing alignment."""
+        frames = [snapshot(i * 0.25) for i in range(20)]
+        labels = pd.DataFrame([
+            {"RaceId": "race-a", "Driver": "AA", "TimeSec": i * 0.25, "DeltaT_Sector": 1.0}
+            for i in range(20)
+        ])
+        s1 = build_windowed_samples(frames, labels, {"AA": 0, "BB": 1}, W=2, K=1, stride=1)
+        s2 = build_windowed_samples(frames, labels, {"AA": 0, "BB": 1}, W=2, K=1, stride=2)
+        s4 = build_windowed_samples(frames, labels, {"AA": 0, "BB": 1}, W=2, K=1, stride=4)
+        self.assertEqual(len(s1), 18)
+        self.assertEqual(len(s2), 9)
+        self.assertEqual(len(s4), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
+

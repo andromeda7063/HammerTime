@@ -12,11 +12,14 @@ import pickle
 import platform
 import subprocess
 import tempfile
+import gc
+from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 import sys
 
 import pandas as pd
+import torch
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -111,12 +114,40 @@ def _target_signature(loader) -> str:
     return _sha256_bytes(_canonical_json(rows))
 
 
-def _build_snapshots_by_race(aligned: pd.DataFrame, config: dict, specs: list[dict]):
+def clone_snapshots(snapshots: Sequence) -> list:
+    """Fast, memory-efficient clone of graph snapshots preserving immutable graph structure.
+
+    Avoids Python copy.deepcopy overhead on large lists of PyG Data objects
+    by shallow-copying Data wrappers and cloning node feature tensor x (and edge_attr if present),
+    which is the only attribute modified in-place by scaler fitting.
+    """
+    clones = [copy.copy(snap) for snap in snapshots]
+    for snap in clones:
+        snap.x = snap.x.clone()
+        if getattr(snap, "edge_attr", None) is not None and isinstance(snap.edge_attr, torch.Tensor):
+            snap.edge_attr = snap.edge_attr.clone()
+    return clones
+
+
+def _build_snapshots_by_race(aligned: pd.DataFrame | Sequence[pd.DataFrame], config: dict, specs: list[dict]):
     snapshots, driver_maps = [], {}
+    if isinstance(aligned, pd.DataFrame):
+        by_race = {str(k): v for k, v in aligned.groupby("RaceId", sort=False)}
+    elif isinstance(aligned, dict):
+        by_race = aligned
+    else:
+        # Sequence of per-race DataFrames
+        by_race = {}
+        for item in aligned:
+            if isinstance(item, pd.DataFrame) and "RaceId" in item.columns and not item.empty:
+                by_race[str(item["RaceId"].iloc[0])] = item
+        if len(by_race) != len(specs) and len(aligned) == len(specs):
+            by_race = {str(spec["race_id"]): df for spec, df in zip(specs, aligned)}
+
     for spec in specs:
         race_id = str(spec["race_id"])
-        race_frame = aligned.loc[aligned["RaceId"].astype(str) == race_id].copy()
-        if race_frame.empty:
+        race_frame = by_race.get(race_id)
+        if race_frame is None or race_frame.empty:
             raise ValueError(f"No aligned rows remain for configured race {race_id!r}.")
         race_config = copy.deepcopy(config)
         race_config["session"].update(spec)
@@ -135,17 +166,29 @@ def _build_snapshots_by_race(aligned: pd.DataFrame, config: dict, specs: list[di
     return snapshots, driver_to_idx
 
 
-def _coverage(aligned: pd.DataFrame, labels: pd.DataFrame, snapshots: list) -> dict:
-    valid = aligned.get("IsValid", pd.Series(False, index=aligned.index)).fillna(False).astype(bool)
-    valid_rows = aligned.loc[valid]
-    laps = (valid_rows.groupby(["RaceId", "Driver", "LapNumber"], dropna=True).ngroups
-            if {"RaceId", "Driver", "LapNumber"}.issubset(valid_rows.columns) else 0)
+def _coverage(aligned: pd.DataFrame | Sequence[pd.DataFrame], labels: pd.DataFrame, snapshots: list) -> dict:
+    if isinstance(aligned, pd.DataFrame):
+        aligned_list = [aligned]
+    else:
+        aligned_list = list(aligned)
+    total_aligned_rows = sum(len(df) for df in aligned_list)
+    valid_aligned_rows = 0
+    drivers = set()
+    total_laps = 0
+    for df in aligned_list:
+        valid = df.get("IsValid", pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        valid_rows = df.loc[valid]
+        valid_aligned_rows += int(valid.sum())
+        if "Driver" in df.columns:
+            drivers.update(df["Driver"].dropna().unique())
+        if {"RaceId", "Driver", "LapNumber"}.issubset(valid_rows.columns):
+            total_laps += valid_rows.groupby(["RaceId", "Driver", "LapNumber"], dropna=True).ngroups
     edge_total = sum(int(snapshot.edge_index.size(1)) for snapshot in snapshots)
     return {
-        "aligned_rows": int(len(aligned)),
-        "valid_aligned_rows": int(valid.sum()),
-        "drivers": int(aligned["Driver"].nunique()) if "Driver" in aligned else 0,
-        "valid_laps": int(laps),
+        "aligned_rows": int(total_aligned_rows),
+        "valid_aligned_rows": int(valid_aligned_rows),
+        "drivers": int(len(drivers)),
+        "valid_laps": int(total_laps),
         "target_rows": int(len(labels)),
         "target_drivers": int(labels["Driver"].nunique()) if "Driver" in labels else 0,
         "graph_snapshots": int(len(snapshots)),
@@ -409,32 +452,33 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
                         "source_metadata": source_metadata,
                     })
 
-            aligned_all = pd.concat(aligned_tables, ignore_index=True)
             labels_all = pd.concat(label_tables, ignore_index=True)
+            del label_tables
 
-            # Derive the frozen split from the legacy input representation. The
-            # context reference is then fitted only on unique frames actually
-            # consumed by training windows and the final split is asserted equal.
-            base_config = copy.deepcopy(config)
-            base_config["graph"]["node_feature_schema"] = "legacy_v1"
-            base_config["model"]["in_dim"] = 4 + len(base_config["graph"]["compound_categories"])
-            base_config["model"]["edge_dim"] = 1 if config["graph"].get("edge_feature_schema", "scalar_rbf") == "scalar_rbf" else 4
-            base_snapshots, base_driver_to_idx = _build_snapshots_by_race(aligned_all, base_config, specs)
-            initial_train, initial_val, initial_test, _ = create_dataloaders(
-                copy.deepcopy(base_snapshots), labels_all, base_driver_to_idx, base_config
-            )
-            initial_membership = {"train": _membership(initial_train),
-                                  "validation": _membership(initial_val),
-                                  "test": _membership(initial_test)}
-            initial_target_signatures = {
-                "train": _target_signature(initial_train),
-                "validation": _target_signature(initial_val),
-            }
-            train_frame_keys = _training_input_frame_keys(initial_train)
             schema = node_feature_schema(config)
-            calibration = {"schema_id": schema, "references": [],
-                           "training_frame_count": len(train_frame_keys)}
             if schema == "circuit_context_v1":
+                # Derive the frozen split from the legacy input representation. The
+                # context reference is then fitted only on unique frames actually
+                # consumed by training windows and the final split is asserted equal.
+                base_config = copy.deepcopy(config)
+                base_config["graph"]["node_feature_schema"] = "legacy_v1"
+                base_config["model"]["in_dim"] = 4 + len(base_config["graph"]["compound_categories"])
+                base_config["model"]["edge_dim"] = 1 if config["graph"].get("edge_feature_schema", "scalar_rbf") == "scalar_rbf" else 4
+                base_snapshots, base_driver_to_idx = _build_snapshots_by_race(aligned_tables, base_config, specs)
+                initial_train, initial_val, initial_test, _ = create_dataloaders(
+                    base_snapshots, labels_all, base_driver_to_idx, base_config
+                )
+                initial_membership = {"train": _membership(initial_train),
+                                      "validation": _membership(initial_val),
+                                      "test": _membership(initial_test)}
+                initial_target_signatures = {
+                    "train": _target_signature(initial_train),
+                    "validation": _target_signature(initial_val),
+                }
+                train_frame_keys = _training_input_frame_keys(initial_train)
+                del base_snapshots, initial_train, initial_val, initial_test
+                gc.collect()
+
                 sessions_by_race = {}
                 for spec in specs:
                     if not spec.get("circuit_id") or not spec.get("lap_length_m"):
@@ -443,35 +487,67 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
                         "circuit_id": str(spec["circuit_id"]),
                         "lap_length_m": float(spec["lap_length_m"]),
                     }
-                contextual = prepare_context_features(
-                    aligned_all, sessions_by_race,
-                    sample_hz=float(config["preprocess"]["sample_hz"]),
-                    mini_sectors=int(config["track"]["mini_sectors"]), schema=schema,
-                )
-                calibration = fit_context_calibration(contextual, train_frame_keys, schema=schema)
-                contextual = apply_context_calibration(contextual, calibration)
-                snapshots, driver_to_idx = _build_snapshots_by_race(contextual, config, specs)
-            else:
-                snapshots, driver_to_idx = _build_snapshots_by_race(aligned_all, config, specs)
+                sample_hz = float(config["preprocess"]["sample_hz"])
+                mini_sectors = int(config["track"]["mini_sectors"])
+                contextual_tables = [
+                    prepare_context_features(tbl, sessions_by_race, sample_hz=sample_hz,
+                                             mini_sectors=mini_sectors, schema=schema)
+                    for tbl in aligned_tables
+                ]
+                del aligned_tables
+                gc.collect()
 
-            train_loader, val_loader, test_loader, _scaler = create_dataloaders(
-                copy.deepcopy(snapshots), labels_all, driver_to_idx, config
-            )
-            membership = {"train": _membership(train_loader),
-                          "validation": _membership(val_loader),
-                          "test": _membership(test_loader)}
-            if membership != initial_membership:
-                raise ValueError("Feature or graph views changed frozen split membership; this is not permitted.")
-            final_target_signatures = {
-                "train": _target_signature(train_loader),
-                "validation": _target_signature(val_loader),
-            }
-            if final_target_signatures != initial_target_signatures:
-                raise ValueError("Feature or graph views changed train/validation targets or masks.")
+                calibration = fit_context_calibration(contextual_tables, train_frame_keys, schema=schema)
+                contextual_tables = [
+                    apply_context_calibration(tbl, calibration)
+                    for tbl in contextual_tables
+                ]
+                snapshots, driver_to_idx = _build_snapshots_by_race(contextual_tables, config, specs)
+                coverage = _coverage(contextual_tables, labels_all, snapshots)
+                del contextual_tables
+                gc.collect()
+
+                train_loader, val_loader, test_loader, _scaler = create_dataloaders(
+                    clone_snapshots(snapshots), labels_all, driver_to_idx, config
+                )
+                membership = {"train": _membership(train_loader),
+                              "validation": _membership(val_loader),
+                              "test": _membership(test_loader)}
+                if membership != initial_membership:
+                    raise ValueError("Feature or graph views changed frozen split membership; this is not permitted.")
+                final_target_signatures = {
+                    "train": _target_signature(train_loader),
+                    "validation": _target_signature(val_loader),
+                }
+                if final_target_signatures != initial_target_signatures:
+                    raise ValueError("Feature or graph views changed train/validation targets or masks.")
+            else:
+                snapshots, driver_to_idx = _build_snapshots_by_race(aligned_tables, config, specs)
+                coverage = _coverage(aligned_tables, labels_all, snapshots)
+                del aligned_tables
+                gc.collect()
+
+                train_loader, val_loader, test_loader, _scaler = create_dataloaders(
+                    clone_snapshots(snapshots), labels_all, driver_to_idx, config
+                )
+                membership = {"train": _membership(train_loader),
+                              "validation": _membership(val_loader),
+                              "test": _membership(test_loader)}
+                final_target_signatures = {
+                    "train": _target_signature(train_loader),
+                    "validation": _target_signature(val_loader),
+                }
+                train_frame_keys = _training_input_frame_keys(train_loader)
+                calibration = {"schema_id": schema, "references": [],
+                               "training_frame_count": len(train_frame_keys)}
+
             membership_hashes = {name: _sha256_bytes(_canonical_json(rows))
                                  for name, rows in membership.items()}
             split_metadata = copy.deepcopy(train_loader.dataset.split_metadata)
-            coverage = _coverage(aligned_all, labels_all, snapshots)
+            edge_scaler_metadata = (train_loader.dataset.edge_feature_scaler.metadata()
+                                     if hasattr(train_loader.dataset.edge_feature_scaler, "metadata") else None)
+            del train_loader, val_loader, test_loader, _scaler
+            gc.collect()
             source_hashes = _artifact_relative_hashes(source_files, staging_dir, output_dir)
             if not source_hashes:
                 raise ValueError("Cohort preparation produced no hashable source artifacts.")
@@ -517,6 +593,10 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             artifact_staged = staging_dir / artifact_final.name
             with artifact_staged.open("wb") as output:
                 pickle.dump(payload, output, protocol=pickle.HIGHEST_PROTOCOL)
+                output.flush()
+                os.fdatasync(output.fileno())
+            del payload, snapshots, labels_all
+            gc.collect()
 
             manifest = {
                 "schema_version": 2, "provider": provider, "providers": [provider],
@@ -533,8 +613,7 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
                 "context_calibration": calibration, "context_calibration_sha256": calibration_hash,
                 "training_input_frame_keys_sha256": train_key_hash,
                 "aligned_source_manifest_sha256": source_manifest_hash,
-                "edge_feature_scaler": (train_loader.dataset.edge_feature_scaler.metadata()
-                                         if hasattr(train_loader.dataset.edge_feature_scaler, "metadata") else None),
+                "edge_feature_scaler": edge_scaler_metadata,
                 "environment": _environment(), "git_head": _git_revision(),
                 "test_metrics_evaluated": False, "training_started": False,
             }

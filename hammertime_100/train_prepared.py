@@ -20,7 +20,7 @@ from ablation import (ABLATION_CANDIDATES, CONTEXT_GRAPH_CANDIDATES,
                       run_ablation_study)  # noqa: E402
 from baselines import run_validation_baselines  # noqa: E402
 from dataset import create_dataloaders  # noqa: E402
-from prepare_cohort import load_prepared_cohort  # noqa: E402
+from prepare_cohort import clone_snapshots, load_prepared_cohort  # noqa: E402
 
 
 def _membership(loader) -> list[dict]:
@@ -78,7 +78,7 @@ def train_prepared(artifact_path: Path, config_path: Path, output_dir: Path,
 
     # Loader construction fits the scaler on train windows only. Work on a copy:
     # the artifact remains immutable and can be reused for another declared run.
-    snapshots = copy.deepcopy(payload["snapshots"])
+    snapshots = clone_snapshots(payload["snapshots"])
     train_loader, val_loader, _test_loader, _scaler = create_dataloaders(
         snapshots, payload["labels"], payload["driver_to_idx"], config
     )

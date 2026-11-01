@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Batch, Data
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATConv, GATv2Conv
 import yaml
 from physical_graph import EDGE_FEATURES_BY_SCHEMA
 
@@ -50,7 +50,7 @@ class HammerTimeSTGNN(nn.Module):
     """
     Spatio-Temporal Graph Neural Network for F1 Traffic Delay Prediction.
     Stage 1: Input projection (Linear)
-    Stage 2: Spatial graph attention (2x GATConv with dynamic RBF edge weights)
+    Stage 2: Spatial graph attention (2x GATConv or GATv2Conv with dynamic edge weights)
     Stage 3: Legacy Conv1d or an optional gated dilated causal residual block stack
     Stage 4: MLP head predicting delta t_sector per car
     """
@@ -65,6 +65,10 @@ class HammerTimeSTGNN(nn.Module):
         temporal_mode: str = "conv",
         temporal_dilations: list[int] | tuple[int, ...] = (1, 2, 4),
         edge_feature_schema: str = "scalar_rbf",
+        gat_type: str = "gat",
+        use_graph_norm: bool = False,
+        drop_edge_rate: float = 0.0,
+        residual: bool = False,
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
@@ -73,12 +77,14 @@ class HammerTimeSTGNN(nn.Module):
             raise ValueError("conv1d_kernel must be positive.")
         if temporal_mode not in ("conv", "gated_dilated"):
             raise ValueError("temporal_mode must be 'conv' or 'gated_dilated'.")
+        if gat_type not in ("gat", "gatv2"):
+            raise ValueError("gat_type must be 'gat' or 'gatv2'.")
         if (not isinstance(temporal_dilations, (list, tuple)) or not temporal_dilations
                 or any(isinstance(item, bool) or not isinstance(item, int) or item <= 0
                        for item in temporal_dilations)):
             raise ValueError("temporal_dilations must contain positive integers.")
         if edge_feature_schema not in EDGE_FEATURES_BY_SCHEMA:
-            raise ValueError("edge_feature_schema must be scalar_rbf or physical_v1.")
+            raise ValueError(f"edge_feature_schema must be one of {list(EDGE_FEATURES_BY_SCHEMA)}.")
         if edge_dim != len(EDGE_FEATURES_BY_SCHEMA[edge_feature_schema]):
             raise ValueError("edge_dim does not match edge_feature_schema width.")
         self.in_dim = in_dim
@@ -86,14 +92,18 @@ class HammerTimeSTGNN(nn.Module):
         self.gat_heads = gat_heads
         self.edge_dim = edge_dim
         self.edge_feature_schema = edge_feature_schema
+        self.gat_type = gat_type
+        self.use_graph_norm = bool(use_graph_norm)
+        self.drop_edge_rate = float(drop_edge_rate)
+        self.residual = bool(residual)
         head_dim = hidden_dim // gat_heads
 
         # Stage 1: Linear Input Projection
         self.proj = nn.Linear(in_dim, hidden_dim)
 
-        # Stage 2: Spatial Message Passing (GAT with edge features)
-        # Note: add_self_loops=True with fill_value=1.0 ensures zero-edge snapshots flow smoothly
-        self.gat1 = GATConv(
+        # Stage 2: Spatial Message Passing (GAT or GATv2 with edge features)
+        gat_cls = GATv2Conv if gat_type == "gatv2" else GATConv
+        self.gat1 = gat_cls(
             in_channels=hidden_dim,
             out_channels=head_dim,
             heads=gat_heads,
@@ -101,7 +111,7 @@ class HammerTimeSTGNN(nn.Module):
             dropout=dropout,
             add_self_loops=False
         )
-        self.gat2 = GATConv(
+        self.gat2 = gat_cls(
             in_channels=hidden_dim,
             out_channels=head_dim,
             heads=gat_heads,
@@ -109,6 +119,14 @@ class HammerTimeSTGNN(nn.Module):
             dropout=dropout,
             add_self_loops=False
         )
+
+        if self.use_graph_norm:
+            from torch_geometric.nn.norm import GraphNorm
+            self.norm1 = GraphNorm(hidden_dim)
+            self.norm2 = GraphNorm(hidden_dim)
+        else:
+            self.norm1 = None
+            self.norm2 = None
 
         # Stage 3: Legacy convolution stays parameter-identical for old checkpoints.
         self.temporal_mode = temporal_mode
@@ -139,7 +157,7 @@ class HammerTimeSTGNN(nn.Module):
         loop_index = torch.arange(num_nodes, dtype=torch.long, device=device).unsqueeze(0).repeat(2, 1)
         if self.edge_feature_schema == "scalar_rbf":
             loop_attr = torch.ones((num_nodes, 1), dtype=torch.float, device=device)
-        else:
+        elif self.edge_feature_schema == "physical_v1":
             coverage = torch.as_tensor(position_coverage, dtype=torch.float, device=device).reshape(-1)
             if coverage.numel() == 0:
                 coverage = torch.zeros(1, dtype=torch.float, device=device)
@@ -148,6 +166,16 @@ class HammerTimeSTGNN(nn.Module):
             loop_attr = torch.zeros((num_nodes, 4), dtype=torch.float, device=device)
             loop_attr[:, 0] = 1.0
             loop_attr[:, 3] = coverage[0]
+        else:  # physical_v2
+            coverage = torch.as_tensor(position_coverage, dtype=torch.float, device=device).reshape(-1)
+            if coverage.numel() == 0:
+                coverage = torch.zeros(1, dtype=torch.float, device=device)
+            if coverage.numel() != 1:
+                raise ValueError("position_coverage must be a scalar per snapshot.")
+            loop_attr = torch.zeros((num_nodes, 5), dtype=torch.float, device=device)
+            loop_attr[:, 0] = 1.0
+            loop_attr[:, 3] = coverage[0]
+            loop_attr[:, 4] = 0.0
 
         if edge_index is None or edge_index.size(1) == 0:
             return loop_index, loop_attr
@@ -155,10 +183,15 @@ class HammerTimeSTGNN(nn.Module):
         if edge_attr is None:
             if self.edge_feature_schema == "scalar_rbf":
                 edge_attr = torch.ones((edge_index.size(1), 1), dtype=torch.float, device=device)
-            else:
+            elif self.edge_feature_schema == "physical_v1":
                 edge_attr = torch.zeros((edge_index.size(1), 4), dtype=torch.float, device=device)
                 edge_attr[:, 0] = 1.0
                 edge_attr[:, 3] = coverage[0]
+            else:
+                edge_attr = torch.zeros((edge_index.size(1), 5), dtype=torch.float, device=device)
+                edge_attr[:, 0] = 1.0
+                edge_attr[:, 3] = coverage[0]
+                edge_attr[:, 4] = 0.0
         else:
             edge_attr = edge_attr.to(device)
         if edge_attr.ndim != 2 or edge_attr.size(1) != self.edge_dim:
@@ -183,17 +216,34 @@ class HammerTimeSTGNN(nn.Module):
             # 1. Project node features
             h = torch.relu(self.proj(x))
 
-            # 2. Add self-loops for robust message passing
+            # 2. Add self-loops (with optional edge dropout during training)
+            raw_edge_index = getattr(g, "edge_index", None)
+            raw_edge_attr = getattr(g, "edge_attr", None)
+            if self.training and self.drop_edge_rate > 0.0 and raw_edge_index is not None and raw_edge_index.size(1) > 0:
+                from torch_geometric.utils import dropout_edge
+                raw_edge_index, edge_mask = dropout_edge(raw_edge_index, p=self.drop_edge_rate, training=True)
+                if raw_edge_attr is not None:
+                    raw_edge_attr = raw_edge_attr[edge_mask]
+
             edge_idx, edge_attr = self._ensure_self_loops(
-                N, getattr(g, "edge_index", None), getattr(g, "edge_attr", None), device,
+                N, raw_edge_index, raw_edge_attr, device,
                 getattr(g, "position_coverage", 1.0),
             )
             edge_idx = edge_idx.to(device)
             edge_attr = edge_attr.to(device=device, dtype=h.dtype)
 
-            # 3. Two GAT layers
-            h = torch.relu(self.gat1(h, edge_idx, edge_attr))
-            h = torch.relu(self.gat2(h, edge_idx, edge_attr))
+            # 3. Two GAT layers with residual skip and GraphNorm
+            h1 = self.gat1(h, edge_idx, edge_attr)
+            if self.norm1 is not None:
+                h1 = self.norm1(h1)
+            h1 = torch.relu(h1)
+            h = (h + h1) if self.residual else h1
+
+            h2 = self.gat2(h, edge_idx, edge_attr)
+            if self.norm2 is not None:
+                h2 = self.norm2(h2)
+            h2 = torch.relu(h2)
+            h = (h + h2) if self.residual else h2
             outs.append(h)  # [N, hidden_dim]
 
         # Stack over time: [N, hidden_dim, W]
@@ -232,9 +282,15 @@ class HammerTimeSTGNN(nn.Module):
         for window in batch_windows:
             for snapshot in window:
                 x = snapshot.x.to(device=device, dtype=dtype)
+                raw_edge_index = getattr(snapshot, "edge_index", None)
+                raw_edge_attr = getattr(snapshot, "edge_attr", None)
+                if self.training and self.drop_edge_rate > 0.0 and raw_edge_index is not None and raw_edge_index.size(1) > 0:
+                    from torch_geometric.utils import dropout_edge
+                    raw_edge_index, edge_mask = dropout_edge(raw_edge_index, p=self.drop_edge_rate, training=True)
+                    if raw_edge_attr is not None:
+                        raw_edge_attr = raw_edge_attr[edge_mask]
                 edge_index, edge_attr = self._ensure_self_loops(
-                    num_nodes, getattr(snapshot, "edge_index", None),
-                    getattr(snapshot, "edge_attr", None), device,
+                    num_nodes, raw_edge_index, raw_edge_attr, device,
                     getattr(snapshot, "position_coverage", 1.0),
                 )
                 graphs.append(Data(x=x, edge_index=edge_index,
@@ -242,8 +298,18 @@ class HammerTimeSTGNN(nn.Module):
 
         disjoint = Batch.from_data_list(graphs).to(device)
         h = torch.relu(self.proj(disjoint.x))
-        h = torch.relu(self.gat1(h, disjoint.edge_index, disjoint.edge_attr))
-        h = torch.relu(self.gat2(h, disjoint.edge_index, disjoint.edge_attr))
+        h1 = self.gat1(h, disjoint.edge_index, disjoint.edge_attr)
+        if self.norm1 is not None:
+            h1 = self.norm1(h1, disjoint.batch)
+        h1 = torch.relu(h1)
+        h = (h + h1) if self.residual else h1
+
+        h2 = self.gat2(h, disjoint.edge_index, disjoint.edge_attr)
+        if self.norm2 is not None:
+            h2 = self.norm2(h2, disjoint.batch)
+        h2 = torch.relu(h2)
+        h = (h + h2) if self.residual else h2
+
         h = h.reshape(batch_size, window_size, num_nodes, self.hidden_dim)
         z = h.permute(0, 2, 3, 1).contiguous()
         z = z.reshape(batch_size * num_nodes, self.hidden_dim, window_size)
@@ -287,6 +353,10 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         temporal_mode=m_cfg.get("temporal_mode", "conv"),
         temporal_dilations=m_cfg.get("temporal_dilations", [1, 2, 4]),
         edge_feature_schema=config.get("graph", {}).get("edge_feature_schema", "scalar_rbf"),
+        gat_type=m_cfg.get("gat_type", "gat"),
+        use_graph_norm=bool(m_cfg.get("use_graph_norm", False)),
+        drop_edge_rate=float(m_cfg.get("drop_edge_rate", 0.0)),
+        residual=bool(m_cfg.get("residual", False)),
     )
 
 

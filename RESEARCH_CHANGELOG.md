@@ -88,3 +88,72 @@ The FastF1 season runner now uses a stable default workspace and reuses hash-ver
 The runner now submits each atomically persisted raw race table to a bounded spawn-based process pool for CPU normalization while the parent continues serialized FastF1 acquisition. `--processing-workers` defaults to four, accepts up to eight, and is capped by available memory; workers receive only file paths and nonsecret event/config data. Completed race stages remain reusable after worker or parent failure, and reports stay in calendar order regardless of worker completion order. The offline process fixture verified distinct worker processes, out-of-order completion, and per-race failure isolation; it does not benchmark full-season throughput.
 
 Follow-up of the saved 2026-11-01 FastF1 run confirmed that the error record's timestamp matched the reported failure, all 19 normalized race stages and their 76 listed source tables were present, and the normalized-source reader loaded all 19 sessions offline. The recorded `FileNotFoundError` had no message or traceback, and the temporary cohort staging directory had already been cleaned, so the exact missing path cannot be recovered from that run. Failures now record a credential-scrubbed message, traceback, and stage for diagnosis on resume. Cached calendar locations `Montréal`, `Marina Bay`, and `Yas Island` now resolve to existing reviewed circuit length mappings; this reuses prior 19 race stages and adds only the previously skipped calendar rounds when rerun. Offline fixtures cover the aliases and credential redaction; no authentication, acquisition, or training was performed for this follow-up.
+
+## Cohort fingerprint module resolution and globbing fix — 2026-11-01
+
+The scrubbed diagnostics in `run_failure.json` identified the `FileNotFoundError` during cohort fingerprinting: `hammertime_100/run_2023_fastf1_season.py` attempted to hash `HERE / "src" / "run_pipeline.py"`, but `run_pipeline.py` is located at `HERE / "run_pipeline.py"`. Module resolution was factored into `_cohort_fingerprint`, checking `HERE / name` and `HERE / "src" / name` across all required prepare modules. In addition, operator precedence in candidate directory discovery was corrected to `(out / "cohorts").glob(...)` (previously `out / "cohorts".glob(...)`, which evaluated as an attribute lookup on a string literal). The cohort failure stage was also moved prior to fingerprinting. An offline test in `test_fastf1_season_resume.py` verifies all prepare code modules resolve to genuine files, the canonical fingerprint generates without missing-file errors, and rebuild candidates glob cleanly. All 223 unit tests pass.
+
+## Multi-session cohort driver count alignment (`graph.num_nodes`) — 2026-11-01
+
+The scrubbed diagnostics in `run_failure.json` caught `ValueError: Cohort has 22 distinct drivers, exceeding graph.num_nodes=20` during cohort preparation in `prepare_cohort.py`. The baseline single-race configuration template (`supplied_fastf1_monza_2023_gated.yaml`) defaulted `graph.num_nodes` to 20 for single-race grids; across the 19 authentic 2023 race sessions, mid-season driver substitutions (Daniel Ricciardo #3, Liam Lawson #40, and Nyck de Vries #21) expanded the cohort's distinct driver count to 22. In `hammertime_100/run_2023_fastf1_season.py`, `_align_cohort_num_nodes` now inspects the distinct drivers across the validated normalized sessions and ensures `base["graph"]["num_nodes"]` is aligned to accommodate the full cohort (matching the existing multi-session OpenF1 configuration rule `graph.num_nodes: 22`). A unit test in `test_fastf1_season_resume.py` checks that cohort node counts expand appropriately for substitution scenarios, and all 224 unit tests pass.
+
+## Cohort preparation memory optimization and duplicate pass elimination — 2026-11-01
+
+During full 2023 season execution with 19 authentic sessions (~12 million rows, 480,000 graph snapshots), `prepare_cohort.py` encountered Linux OOM termination on a 15 GiB RAM host. Memory profiling identified three compounding allocation bottlenecks:
+1. `aligned_tables` held 19 per-race DataFrames totaling ~4.3 GiB; calling `pd.concat(aligned_tables)` allocated a second 4.3 GiB DataFrame (`aligned_all`) simultaneously while `aligned_tables` remained pinned in scope.
+2. For legacy schemas (`schema != "circuit_context_v1"`), `prepare_cohort.py` constructed 480,000 graph snapshots and full dataloaders in an initial "base" pass, and then re-ran `_build_snapshots_by_race` and `create_dataloaders` a second time while the first set of snapshots and dataloaders remained held in memory.
+3. Python `copy.deepcopy` across lists of 480,000 PyTorch Geometric `Data` objects incurred massive object-graph traversal and memoization dictionary overhead (~3.1 GiB peak RAM and ~155s per pass).
+
+To resolve these bottlenecks without modifying scientific assumptions, data coverage, split definitions, or feature schemas:
+- Added `clone_snapshots(snapshots)`: A lightweight shallow copy of `Data` objects that clones only the mutable tensor attributes (`x`, and `edge_attr` if present), reducing memory footprint by ~8x (from 3.1 GiB to 400 MiB) and execution time by ~14x (from 155s to 10s).
+- Enhanced `_build_snapshots_by_race` and `_coverage` to support sequences of per-race DataFrames (`aligned_tables`), indexing by `race_id` directly without redundant full-table slicing or concatenating `aligned_all` for legacy schemas.
+- In `prepare_cohort`, when `schema != "circuit_context_v1"`, eliminated the redundant second snapshot construction pass and duplicate dataloader creation, and explicitly freed intermediate tables with `del` and `gc.collect()`.
+- Updated `train_prepared.py` and `run_2023_fastf1_season.py` to use `clone_snapshots` in place of `copy.deepcopy(payload["snapshots"])`.
+
+## Configurable temporal window stride and batch size scaling — 2026-11-01
+
+Following user review, added support for configurable window stride (`data.window_stride`) and batch size (`train.batch_size`):
+- Because telemetry is sampled at 4 Hz (0.25s) with a 10-frame (2.5s) window, stride 1 yields 90% overlap between consecutive windows. Setting `window_stride: 2` (0.5s) reduces autocorrelation and cuts dataset size in half while retaining ~160–180 training windows per driver per lap.
+- Scaling `batch_size` to 256 reduces the PyTorch Geometric graph collation iterations per epoch by 2x and improves CPU SIMD/BLAS vectorization.
+- In `hammertime_100/src/dataset.py`, `_build_windowed_samples_one_race`, `build_windowed_samples`, and `create_dataloaders` accept `stride` (defaulting to 1 for backward compatibility).
+- `hammertime_100/run_2023_fastf1_season.py` exposes `--window-stride` and `--batch-size` CLI arguments.
+- Unit tests in `test_dataset_contracts.py` verify exact proportional subsampling and split integrity. All 225 unit tests pass.
+
+## Architectural improvements decision guide specification — 2026-11-01
+
+Added `hammertime_100/docs/research/architectural_improvements_decision_guide.md` providing a formal, evidence-grounded blueprint for prospective architectural enhancements to the HammerTime Spatio-Temporal Graph Neural Network (`HammerTimeSTGNN`). The guide defines a structured evaluation framework for autonomous agents and research engineers covering five candidate proposals:
+1. Multi-dimensional physical edge attributes (Simonovsky ECC / Battaglia GN): Expands scalar RBF to 5D physical vectors ($[\Delta t, d_{\text{physical}}, \Delta v, v_{\text{leader}}, \mathbb{I}_{\text{DRS}}]$).
+2. Heterogeneous dual-relation graphs (Schlichtkrull R-GCN / Kipf NRI): Adds a reverse defensive pressure relation alongside leader-follower wake.
+3. Multi-scale hierarchical temporal dilations (Wu Graph WaveNet / Nie PatchTST): Dual-stream fusion separating micro-telemetry from stint tire degradation.
+4. Vectorized circuit geometry graphs (Liang LaneGCN / Gao VectorNet): Bipartite cross-attention into static circuit centerline waypoints.
+5. Joint spatio-temporal cross-attention (Shi MTR / Salzmann Trajectron++): Evaluates computational tradeoffs under CPU vs. GPU.
+
+Each proposal specifies primary literature citations, mathematical design, agent decision criteria (*"Can it be implemented?"* and *"Should it be implemented?"*), falsifiable hypotheses, ablation controls, and physics acceptance gates.
+
+## Parameter expansion, GATv2 dynamic attention, physical edges, and ReduceLROnPlateau — 2026-11-01
+
+Following baseline 2023 FastF1 season evaluation (which achieved held-out Test MAE 0.0905 s, plateauing after early stopping at epoch 9 due to fixed learning rate 0.001 bouncing around the minimum), executed an architectural and feature pipeline enhancement within strict host compute and memory limits (15 GiB RAM ceiling):
+1. **Node Feature Expansion (`circuit_context_v1`, 19-dim):** Causal expansion appending brake (`Brake`, `BrakeSupported`), within-lap normalized cyclic phase ($\sin(2\pi \cdot \text{sector} / 20)$, $\cos(2\pi \cdot \text{sector} / 20)$), lap length, two-frame causal track curvature ($\kappa$), lateral acceleration proxy ($v^2 \cdot \kappa$), geometry support flag, and train-only fitted median speed reference delta ($\Delta v_{\text{ref}}$) to the existing 9-dim telemetry representation.
+2. **Physical Multi-Dimensional Edge Attributes (`physical_v1`, 4-dim):** Extended scalar RBF edge proximity to multi-channel physical edge vectors incorporating physical longitudinal gap, relative speed delta, and position sensor coverage flag.
+3. **Dynamic Dynamic Attention (`GATv2Conv`):** Upgraded spatial graph convolution from static GAT to dynamic `GATv2Conv` (Brody et al., ICLR 2022) with `edge_dim=4` condition projection, resolving the static monotonic ranking bottleneck of standard GAT.
+4. **Learning Rate Scheduling (`ReduceLROnPlateau`):** Integrated adaptive LR decay (`train.lr_scheduler: "plateau"`, factor 0.5, patience 2, min_lr 1e-5) stepping on validation MAE, allowing the optimizer to descend past the ~90 ms error barrier. LR is tracked in history, checkpointed atomically in `best.pt` and `best.last.pt`, and recovered seamlessly across interruptions.
+5. **Memory Optimization for Context Preparation:** Refactored `fit_context_calibration` and `prepare_cohort` for `circuit_context_v1` to operate sequentially per-race table rather than allocating a 4.4 GiB global concatenated DataFrame. This reduced peak memory during context preparation by over 3x, strictly honoring the system's 15 GiB RAM ceiling.
+6. **Verification & Configuration:** Added `hammertime_100/configs/train_2023_fastf1_season_physical_v1.yaml`, CLI flags in `run_2023_fastf1_season.py`, and comprehensive unit tests `test_model_gatv2.py` and `test_scheduler_contracts.py`. All 232 test suite checks pass cleanly.
+
+## HammerTime v2: Physics-Informed ST-GNN with DRS, Dimensionless Scaling, GraphNorm, and Negative Delay Modeling — 2026-11-01
+
+Following held-out test diagnostics on the 2023 FastF1 season baseline (which uncovered severe mode collapse where the model predicted strictly positive delays $[0.00\text{ s}, +0.25\text{ s}]$ despite 47.33% of authentic ground-truth labels being negative due to DRS and slipstream towing $\Delta T < 0$), implemented and verified HammerTime v2 on branch `codex/research-improvements`:
+1. **DRS and Longitudinal Acceleration Preprocessing (`preprocess.py`):** Added `"DRS"` extraction to telemetry interpolation, extracting binary `DRSActive` ($1.0$ when $\text{DRS} \ge 10$) and finite difference longitudinal acceleration $a_{\text{long}} = \Delta v_{\text{mps}} / \Delta t$ clipped to realistic vehicle physics limits $[-25.0, 15.0]\text{ m/s}^2$.
+2. **Dimensionless Node Schema (`circuit_context_v2`, 20-dim):** Added dimensionless speed ratio $v / v_{\text{ref}}$, speed delta $v - v_{\text{ref}}$, `DRSActive`, $a_{\text{long}}$, and continuous `lap_phase` $\in [0, 1]$. Completely eliminated raw circuit length `lap_length_m` from model inputs to eliminate track memorization and enable cross-circuit transferability.
+3. **In-Wake Corridor Edge Schema (`physical_v2`, 5-dim):** Added binary `in_wake_corridor` ($1.0$ if $\text{gap\_m} \le 35\text{ m}$ and $\text{gap\_sec} \le 0.6\text{ s}$) to distinguish turbulent wake deficit from slipstream tow corridors. Updated `PhysicalEdgeFeatureScaler` for 5-channel continuous normalization.
+4. **Spatial Residuals, GraphNorm, and DropEdge (`model.py`):** Integrated `torch_geometric.nn.norm.GraphNorm(hidden_dim)`, spatial residual skip connections ($h = h + \text{GATv2}(h, \mathcal{E})$) preventing individual vehicle kinematic states from washing out across graph convolutions, and topological edge dropout (`drop_edge_rate=0.15`) keeping self-loops intact.
+5. **Smooth L1 Loss (`masked_smooth_l1_loss`) & Gradient Clipping (`train.py`):** Implemented Smooth L1 ($\beta = 0.02\text{ s}$) loss to provide smooth, sub-linear gradient descent across zero into negative delay territory, replacing the constant $\pm 1$ gradient of standard L1 that caused positive-only local minimum trapping. Added gradient norm clipping (`max_norm=1.0`).
+6. **Host CPU Scaling & Memory Containment:** Scaled intra-op PyTorch threads to `--torch-threads 8` (engaging all physical cores on the 12-thread host) and `--processing-workers 4`, scaling CPU utilization to 400% during preprocessing and ~80% during training without exceeding resident RAM bounds (staying <9 GiB against the 15 GiB limit).
+7. **Verification & Testing:** Added `hammertime_100/configs/train_2023_fastf1_season_physical_v2.yaml`, updated CLI schema routing, and created `test_v2_features.py`. All 240 unit test checks pass cleanly.
+
+
+
+
+
+
+

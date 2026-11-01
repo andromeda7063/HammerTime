@@ -507,6 +507,35 @@ def _collect_normalization_futures(future_to_id: dict) -> tuple[dict[str, dict],
     return results, failures
 
 
+def _cohort_fingerprint(config: dict, source_hash: str) -> str:
+    prepare_files = (
+        "prepare_cohort.py", "run_pipeline.py", "graph.py",
+        "context_features.py", "dataset.py", "preprocess.py", "target.py",
+    )
+    prepare_code = {
+        name: sha256(HERE / name if (HERE / name).is_file() else HERE / "src" / name)
+        for name in prepare_files
+    }
+    return canonical_hash({
+        "source_manifest_sha256": source_hash,
+        "config": config,
+        "prepare_code": prepare_code,
+    })
+
+
+def _align_cohort_num_nodes(config: dict, events: list[dict], stages_root: Path) -> int:
+    """Ensure graph.num_nodes accommodates distinct drivers (e.g. substitutions) across sessions."""
+    cohort_drivers: set[str] = set()
+    for event in events:
+        stage = stages_root / _safe_id(event["race_id"])
+        aligned_path = stage / "aligned_telemetry.parquet"
+        if aligned_path.is_file():
+            cohort_drivers.update(pd.read_parquet(aligned_path, columns=["Driver"])["Driver"].astype(str).unique())
+    required = max(int(config.get("graph", {}).get("num_nodes", 20)), len(cohort_drivers))
+    config.setdefault("graph", {})["num_nodes"] = required
+    return required
+
+
 def _cohort_cached(cohort_dir: Path, config: dict, source_hash: str):
     from prepare_cohort import load_prepared_cohort, _canonical_json, _sha256_bytes
     artifact = cohort_dir / "prepared_cohort.pkl"
@@ -641,12 +670,30 @@ def run(args: argparse.Namespace) -> Path:
     fastf1.Cache.enable_cache(str(cache_root))
     failure_stage = "load template and discover calendar"
     try:
-        template_path = HERE / "configs/supplied_fastf1_monza_2023_gated.yaml"
+        template_path = Path(args.config) if getattr(args, "config", None) is not None else HERE / "configs/supplied_fastf1_monza_2023_gated.yaml"
         with template_path.open(encoding="utf-8") as stream:
             base = yaml.safe_load(stream)
         base["data"]["split_method"] = "race"
         base["data"]["random_seed"] = args.seed
         base["train"]["max_epochs"] = args.epochs
+        if getattr(args, "batch_size", None) is not None:
+            base["train"]["batch_size"] = int(args.batch_size)
+        if getattr(args, "window_stride", None) is not None:
+            base["data"]["window_stride"] = int(args.window_stride)
+        if getattr(args, "patience", None) is not None:
+            base["train"]["early_stopping_patience"] = int(args.patience)
+        if getattr(args, "gat_type", None) is not None:
+            base["model"]["gat_type"] = str(args.gat_type)
+        if getattr(args, "lr_scheduler", None) is not None:
+            base["train"]["lr_scheduler"] = str(args.lr_scheduler)
+        if getattr(args, "node_schema", None) is not None:
+            base["graph"]["node_feature_schema"] = str(args.node_schema)
+            base["model"]["in_dim"] = 20 if args.node_schema == "circuit_context_v2" else (19 if args.node_schema == "circuit_context_v1" else 9)
+        if getattr(args, "edge_schema", None) is not None:
+            base["graph"]["edge_feature_schema"] = str(args.edge_schema)
+            base["model"]["edge_dim"] = 5 if args.edge_schema == "physical_v2" else (4 if args.edge_schema == "physical_v1" else 1)
+        if getattr(args, "neighbor_mode", None) is not None:
+            base["graph"]["neighbor_mode"] = str(args.neighbor_mode)
         base["tuning"]["enabled"] = False
         os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = secrets
         os.environ["FASTF1_AUTH_METHOD"] = "password"
@@ -761,20 +808,17 @@ def run(args: argparse.Namespace) -> Path:
         base["track"]["lap_length_m"] = good[0]["lap_length_m"]
         base["train"]["checkpoint_path"] = str(out / "training" / "pending" / "best.pt")
         base["train"]["history_path"] = str(out / "training" / "pending" / "training_history.csv")
+        _align_cohort_num_nodes(base, good, stages_root)
         config_path = out / "season_config.yaml"
         atomic_bytes(config_path, yaml.safe_dump(base, sort_keys=False).encode())
         source_root = out / "race_cache"
         source_hash = write_normalized_source(stages_root, source_root, config_path, good)
-        cohort_fingerprint = canonical_hash({"source_manifest_sha256": source_hash,
-                                             "config": base,
-                                             "prepare_code": {name: sha256(HERE / "src" / name) for name in (
-                                                 "prepare_cohort.py", "run_pipeline.py", "graph.py",
-                                                 "context_features.py", "dataset.py", "preprocess.py", "target.py")}})
+        failure_stage = "validate or prepare graph cohort"
+        cohort_fingerprint = _cohort_fingerprint(base, source_hash)
         cohort_prefix = out / "cohorts" / cohort_fingerprint[:20]
-        candidates = [cohort_prefix, *sorted(out / "cohorts".glob(f"{cohort_fingerprint[:20]}-rebuild*"))]
+        candidates = [cohort_prefix, *sorted((out / "cohorts").glob(f"{cohort_fingerprint[:20]}-rebuild*"))]
         cached = None
         cohort_dir = cohort_prefix
-        failure_stage = "validate or prepare graph cohort"
         for candidate in candidates:
             cached = _cohort_cached(candidate, base, source_hash)
             if cached is not None:
@@ -802,6 +846,7 @@ def run(args: argparse.Namespace) -> Path:
         from evaluate import (compute_metrics, predict_test_set, validate_clean_air_physics,
                               validate_drs_train_physics)
         from model import create_model
+        from prepare_cohort import clone_snapshots
         from train import train_model
 
         cfg = copy.deepcopy(payload["config"])
@@ -851,15 +896,20 @@ def run(args: argparse.Namespace) -> Path:
         loaders = None
         if not complete_training:
             failure_stage = "train or resume model"
+            snapshots_to_load = payload.pop("snapshots")
+            labels_to_load = payload.pop("labels")
             train_loader, val_loader, test_loader, scaler = create_dataloaders(
-                copy.deepcopy(payload["snapshots"]), payload["labels"], payload["driver_to_idx"], cfg)
+                snapshots_to_load, labels_to_load, payload["driver_to_idx"], cfg)
+            del snapshots_to_load, labels_to_load
+            import gc
+            gc.collect()
             model = create_model(cfg).to(device)
             torch.manual_seed(args.seed)
             np.random.seed(args.seed)
             resume_from = last_path if last_path.is_file() else None
             best_val, history = train_model(model, train_loader, val_loader, cfg, device, resume_from=resume_from)
             hist = pd.DataFrame(history)
-            atomic_csv(hist, Path(cfg["train"]["history_path"]))
+            _atomic_csv(hist, Path(cfg["train"]["history_path"]))
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
             saved = checkpoint.get("feature_scaler") or {}
             if not np.allclose(scaler.mean_, saved.get("mean_", [])) or not np.allclose(scaler.scale_, saved.get("scale_", [])):
@@ -879,9 +929,15 @@ def run(args: argparse.Namespace) -> Path:
         failure_stage = "held-out prediction and export"
         predictions_path = training_dir / "test_predictions.pkl"
         def predict_frame() -> pd.DataFrame:
+            nonlocal loaders
             if loaders is None:
+                snapshots_to_eval = payload.pop("snapshots") if "snapshots" in payload else payload["snapshots"]
+                labels_to_eval = payload.pop("labels") if "labels" in payload else payload["labels"]
                 _, _, test_loader, scaler = create_dataloaders(
-                    copy.deepcopy(payload["snapshots"]), payload["labels"], payload["driver_to_idx"], cfg)
+                    snapshots_to_eval, labels_to_eval, payload["driver_to_idx"], cfg)
+                del snapshots_to_eval, labels_to_eval
+                import gc
+                gc.collect()
             else:
                 _, _, test_loader, scaler = loaders
             model = create_model(cfg).to(device)
@@ -892,6 +948,9 @@ def run(args: argparse.Namespace) -> Path:
             _, pred, records = predict_test_set(model, test_loader, device)
             return pd.DataFrame(records)
         frame = load_or_compute_predictions(predictions_path, pred_fingerprint, predict_frame)
+        del loaders
+        import gc
+        gc.collect()
         y = frame["y_true"].to_numpy(float)
         pred = frame["y_pred"].to_numpy(float)
         records = frame.to_dict(orient="records")
@@ -972,10 +1031,31 @@ def main() -> int:
                         help="Independent CPU-only race normalization processes (1-8), memory-capped.")
     parser.add_argument("--torch-threads", "--threads", dest="threads", type=int, default=1,
                         help="PyTorch intra-op CPU threads.")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Training batch size (default: config batch size, e.g. 128 or 256).")
+    parser.add_argument("--window-stride", type=int, default=1,
+                        help="Temporal window subsampling stride (default: 1; e.g. 2 for 0.5s stride).")
+    parser.add_argument("--config", type=Path, default=None,
+                        help="Optional YAML config path override (default: configs/supplied_fastf1_monza_2023_gated.yaml).")
+    parser.add_argument("--patience", type=int, default=None,
+                        help="Early stopping patience in epochs.")
+    parser.add_argument("--gat-type", choices=("gat", "gatv2"), default=None,
+                        help="GAT convolution layer type ('gat' or 'gatv2').")
+    parser.add_argument("--lr-scheduler", choices=("none", "plateau"), default=None,
+                        help="Learning rate scheduler ('none' or 'plateau').")
+    parser.add_argument("--node-schema", choices=("legacy_v1", "circuit_context_v1", "circuit_context_v2"), default=None,
+                        help="Graph node feature schema ('legacy_v1' [9-dim], 'circuit_context_v1' [19-dim], or 'circuit_context_v2' [20-dim]).")
+    parser.add_argument("--edge-schema", choices=("scalar_rbf", "physical_v1", "physical_v2"), default=None,
+                        help="Graph edge feature schema ('scalar_rbf' [1-dim], 'physical_v1' [4-dim], or 'physical_v2' [5-dim]).")
+    parser.add_argument("--neighbor-mode", choices=("race_progress", "physical_circuit"), default=None,
+                        help="Graph neighbor connection mode ('race_progress' or 'physical_circuit').")
     args = parser.parse_args()
     if (args.epochs < 1 or args.seed < 0 or not 1 <= args.workers <= 8
-            or not 1 <= args.processing_workers <= 8 or args.threads < 1):
-        parser.error("--epochs and --threads must be positive, --seed non-negative, and both worker counts between 1 and 8")
+            or not 1 <= args.processing_workers <= 8 or args.threads < 1
+            or (args.batch_size is not None and args.batch_size < 1)
+            or args.window_stride < 1
+            or (args.patience is not None and args.patience < 1)):
+        parser.error("--epochs and --threads must be positive, --seed non-negative, worker counts between 1 and 8, and positive batch-size/window-stride/patience")
     try:
         print(run(args))
     except Exception as exc:

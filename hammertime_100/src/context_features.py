@@ -17,6 +17,7 @@ import pandas as pd
 
 LEGACY_SCHEMA = "legacy_v1"
 CONTEXT_SCHEMA = "circuit_context_v1"
+CONTEXT_V2_SCHEMA = "circuit_context_v2"
 
 DEFAULT_COMPOUNDS = ("SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET")
 CONTEXT_FEATURES = (
@@ -31,13 +32,26 @@ CONTEXT_FEATURES = (
     "SpeedDeltaToTrainReference",
     "ReferenceAvailable",
 )
+CONTEXT_V2_FEATURES = (
+    "SpeedRatioToTrainReference",
+    "SpeedDeltaToTrainReference",
+    "Brake",
+    "DRSActive",
+    "a_long",
+    "lap_sin",
+    "lap_cos",
+    "lap_phase",
+    "abs_curvature",
+    "lateral_accel_proxy",
+    "ReferenceAvailable",
+)
 
 
 def resolve_feature_schema(config: Mapping) -> str:
     """Return the configured graph schema; old configurations stay legacy."""
     graph_config = config.get("graph", {})
     schema = graph_config.get("node_feature_schema", graph_config.get("feature_schema", LEGACY_SCHEMA))
-    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA):
+    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA):
         raise ValueError(f"Unsupported graph.node_feature_schema {schema!r}.")
     return str(schema)
 
@@ -52,7 +66,7 @@ def feature_names(
     compound_categories: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """Return the exact, stable feature order for a schema."""
-    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA):
+    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA):
         raise ValueError(f"Unsupported feature schema {schema!r}.")
     categories = tuple(str(value).upper() for value in (compound_categories or DEFAULT_COMPOUNDS))
     if not categories or len(set(categories)) != len(categories):
@@ -60,6 +74,8 @@ def feature_names(
     names = ("Speed", "Throttle", *(f"Compound_{value}" for value in categories), "TyreLife", "MiniSector")
     if schema == CONTEXT_SCHEMA:
         names += CONTEXT_FEATURES
+    elif schema == CONTEXT_V2_SCHEMA:
+        names += CONTEXT_V2_FEATURES
     return tuple(names)
 
 
@@ -79,11 +95,15 @@ def feature_schema_metadata(
         "BrakeSupported": "binary 0/1",
         "lap_sin": "unitless",
         "lap_cos": "unitless",
+        "lap_phase": "unitless track progress in [0, 1]",
         "lap_length_m": "m",
         "abs_curvature": "1/m",
         "lateral_accel_proxy": "m/s^2",
         "GeometrySupported": "binary 0/1",
         "SpeedDeltaToTrainReference": "km/h",
+        "SpeedRatioToTrainReference": "dimensionless ratio v / v_ref; defaults to 1.0",
+        "DRSActive": "binary 0/1; active rear wing open when DRS >= 10",
+        "a_long": "m/s^2; longitudinal acceleration dv / dt",
         "ReferenceAvailable": "binary 0/1",
     }
     for category in categories:
@@ -92,11 +112,11 @@ def feature_schema_metadata(
         "id": schema,
         "feature_names": list(names),
         "raw_units": [units[name] for name in names],
-        "geometry_lookback_frames": 2 if schema == CONTEXT_SCHEMA else 0,
+        "geometry_lookback_frames": 2 if schema in (CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA) else 0,
         "speed_reference": (
             "median Speed by CircuitId and MiniSector over unique active training input frames; "
             "unseen groups are unavailable"
-            if schema == CONTEXT_SCHEMA else None
+            if schema in (CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA) else None
         ),
     }
 
@@ -153,7 +173,7 @@ def prepare_context_features(
     immediately preceding grid frames for the same race and driver. It does
     not inspect future samples.
     """
-    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA):
+    if schema not in (LEGACY_SCHEMA, CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA):
         raise ValueError(f"Unsupported feature schema {schema!r}.")
     if schema == LEGACY_SCHEMA:
         return aligned_df
@@ -191,8 +211,10 @@ def prepare_context_features(
     sectors = pd.to_numeric(result["MiniSector"], errors="coerce").to_numpy(dtype=float)
     valid_sector = np.isfinite(sectors)
     valid_sector &= (sectors >= 0) & (sectors < mini_sectors)
-    phase = np.zeros(len(result), dtype=np.float64)
-    phase[valid_sector] = 2.0 * np.pi * (sectors[valid_sector] + 0.5) / float(mini_sectors)
+    lap_progress = np.zeros(len(result), dtype=np.float64)
+    lap_progress[valid_sector] = (sectors[valid_sector] + 0.5) / float(mini_sectors)
+    phase = 2.0 * np.pi * lap_progress
+    result["lap_phase"] = lap_progress
     result["lap_sin"] = np.sin(phase)
     result["lap_cos"] = np.cos(phase)
 
@@ -200,6 +222,12 @@ def prepare_context_features(
     brake_supported = np.isfinite(brake.to_numpy(dtype=float))
     result["Brake"] = np.where(brake_supported, (brake.to_numpy(dtype=float) >= 0.5).astype(float), 0.0)
     result["BrakeSupported"] = brake_supported.astype(float)
+
+    drs = pd.to_numeric(aligned_df.get("DRSActive", pd.Series(0.0, index=result.index)), errors="coerce")
+    result["DRSActive"] = np.where(np.isfinite(drs.to_numpy(dtype=float)), drs.to_numpy(dtype=float), 0.0)
+
+    a_long_val = pd.to_numeric(aligned_df.get("a_long", pd.Series(0.0, index=result.index)), errors="coerce")
+    result["a_long"] = np.where(np.isfinite(a_long_val.to_numpy(dtype=float)), a_long_val.to_numpy(dtype=float), 0.0)
     result["abs_curvature"] = 0.0
     result["lateral_accel_proxy"] = 0.0
     result["GeometrySupported"] = 0.0
@@ -266,39 +294,56 @@ def prepare_context_features(
 
 
 def fit_context_calibration(
-    aligned_df: pd.DataFrame,
+    aligned_df: pd.DataFrame | Sequence[pd.DataFrame],
     train_input_membership: Iterable,
     schema: str = CONTEXT_SCHEMA,
 ) -> dict:
     """Fit per-circuit/mini-sector median speed using unique train frames only."""
-    if schema != CONTEXT_SCHEMA:
+    if schema not in (CONTEXT_SCHEMA, CONTEXT_V2_SCHEMA):
         return {"schema_id": schema, "references": [], "training_frame_count": 0}
-    required = {"RaceId", "TimeSec", "Driver", "CircuitId", "MiniSector", "Speed"}
-    missing = required.difference(aligned_df.columns)
-    if missing:
-        raise ValueError(f"Calibration input is missing columns: {sorted(missing)}")
     frame_keys = _membership_keys(train_input_membership)
-    frame = pd.DataFrame(aligned_df, copy=False)
-    frame.attrs = {}
-    race_values = frame["RaceId"].astype(str)
-    time_values = pd.to_numeric(frame["TimeSec"], errors="coerce")
+    train_races = {race_id for race_id, _ in frame_keys}
+
+    if isinstance(aligned_df, pd.DataFrame):
+        tables = [aligned_df]
+    else:
+        tables = [tbl for tbl in aligned_df if not tbl.empty and str(tbl["RaceId"].iloc[0]) in train_races]
+
+    required = {"RaceId", "TimeSec", "Driver", "CircuitId", "MiniSector", "Speed"}
+    for tbl in tables:
+        missing = required.difference(tbl.columns)
+        if missing:
+            raise ValueError(f"Calibration input is missing columns: {sorted(missing)}")
+
     membership_index = pd.MultiIndex.from_tuples(sorted(frame_keys), names=["RaceId", "TimeSec"])
-    aligned_index = pd.MultiIndex.from_arrays(
-        [race_values.to_numpy(), np.round(time_values.to_numpy(dtype=float), 9)],
-        names=["RaceId", "TimeSec"],
-    )
-    selected = aligned_index.isin(membership_index)
-    active = frame.get("IsValid", pd.Series(True, index=frame.index)).fillna(True).astype(bool)
-    not_pit = ~frame.get("IsPitLap", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
-    speeds = pd.to_numeric(frame["Speed"], errors="coerce")
-    sectors = pd.to_numeric(frame["MiniSector"], errors="coerce")
-    usable = selected & active.to_numpy(dtype=bool) & not_pit.to_numpy(dtype=bool)
-    usable &= np.isfinite(speeds.to_numpy(dtype=float)) & np.isfinite(sectors.to_numpy(dtype=float))
-    work = frame.loc[usable, ["RaceId", "TimeSec", "Driver", "CircuitId"]].copy()
-    work.attrs = {}
-    work["MiniSector"] = sectors.loc[usable].astype(int).to_numpy()
-    work["Speed"] = speeds.loc[usable].to_numpy(dtype=float)
-    work = work.drop_duplicates(["RaceId", "TimeSec", "Driver"])
+    filtered_subsets = []
+    for tbl in tables:
+        frame = pd.DataFrame(tbl, copy=False)
+        frame.attrs = {}
+        race_values = frame["RaceId"].astype(str)
+        time_values = pd.to_numeric(frame["TimeSec"], errors="coerce")
+        aligned_index = pd.MultiIndex.from_arrays(
+            [race_values.to_numpy(), np.round(time_values.to_numpy(dtype=float), 9)],
+            names=["RaceId", "TimeSec"],
+        )
+        selected = aligned_index.isin(membership_index)
+        active = frame.get("IsValid", pd.Series(True, index=frame.index)).fillna(True).astype(bool)
+        not_pit = ~frame.get("IsPitLap", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
+        speeds = pd.to_numeric(frame["Speed"], errors="coerce")
+        sectors = pd.to_numeric(frame["MiniSector"], errors="coerce")
+        usable = selected & active.to_numpy(dtype=bool) & not_pit.to_numpy(dtype=bool)
+        usable &= np.isfinite(speeds.to_numpy(dtype=float)) & np.isfinite(sectors.to_numpy(dtype=float))
+        if not usable.any():
+            continue
+        work_piece = frame.loc[usable, ["RaceId", "TimeSec", "Driver", "CircuitId"]].copy()
+        work_piece.attrs = {}
+        work_piece["MiniSector"] = sectors.loc[usable].astype(int).to_numpy()
+        work_piece["Speed"] = speeds.loc[usable].to_numpy(dtype=float)
+        filtered_subsets.append(work_piece)
+
+    if not filtered_subsets:
+        raise ValueError("No active finite-speed training rows are available for context calibration.")
+    work = pd.concat(filtered_subsets, ignore_index=True).drop_duplicates(["RaceId", "TimeSec", "Driver"])
     if work.empty:
         raise ValueError("No active finite-speed training rows are available for context calibration.")
     grouped = work.groupby(["CircuitId", "MiniSector"], sort=True)["Speed"]
@@ -308,7 +353,7 @@ def fit_context_calibration(
         for (circuit, sector), values in grouped
     ]
     return {
-        "schema_id": CONTEXT_SCHEMA,
+        "schema_id": schema,
         "algorithm": "median_speed_by_circuit_and_mini_sector_v1",
         "training_frame_count": len(frame_keys),
         "training_row_count": int(len(work)),
@@ -333,6 +378,7 @@ def apply_context_calibration(aligned_df: pd.DataFrame, calibration: Mapping) ->
     speeds = pd.to_numeric(result.get("Speed", pd.Series(np.nan, index=result.index)), errors="coerce")
     sectors = pd.to_numeric(result.get("MiniSector", pd.Series(np.nan, index=result.index)), errors="coerce")
     deltas = np.zeros(len(result), dtype=np.float32)
+    ratios = np.ones(len(result), dtype=np.float32)
     supported = np.zeros(len(result), dtype=np.float32)
     if "CircuitId" in result.columns:
         circuit_values = result["CircuitId"].astype(str)
@@ -349,8 +395,11 @@ def apply_context_calibration(aligned_df: pd.DataFrame, calibration: Mapping) ->
         reference_values[found_reference] = reference_array[reference_positions[found_reference]]
         available = np.isfinite(reference_values) & np.isfinite(speeds.to_numpy(dtype=float))
         deltas[available] = speeds.to_numpy(dtype=float)[available] - reference_values[available]
+        valid_ref = available & (reference_values > 5.0)
+        ratios[valid_ref] = np.clip(speeds.to_numpy(dtype=float)[valid_ref] / reference_values[valid_ref], 0.2, 2.5)
         supported[available] = 1.0
     result["SpeedDeltaToTrainReference"] = deltas
+    result["SpeedRatioToTrainReference"] = ratios
     result["ReferenceAvailable"] = supported
     return result
 
@@ -391,5 +440,14 @@ def build_node_feature_vector(
         for name in CONTEXT_FEATURES:
             value = _finite(row.get(name, 0.0))
             extra.append(0.0 if value is None else value)
+        values.extend(extra)
+    elif feature_schema == CONTEXT_V2_SCHEMA:
+        extra = []
+        for name in CONTEXT_V2_FEATURES:
+            value = _finite(row.get(name, 0.0))
+            if value is None:
+                extra.append(1.0 if name == "SpeedRatioToTrainReference" else 0.0)
+            else:
+                extra.append(value)
         values.extend(extra)
     return np.asarray(values, dtype=np.float32)

@@ -204,6 +204,48 @@ class FastF1SeasonResumeTests(unittest.TestCase):
             self.assertEqual(manifest["artifact_type"], "hammertime-normalized-source-cache")
             self.assertNotIn("prepared_cohort.pkl", [Path(path).name for path in paths])
 
+    def test_cohort_fingerprint_resolves_all_prepare_code_modules(self):
+        config = {"fixture": 1}
+        fingerprint = runner._cohort_fingerprint(config, "fixture-source-hash")
+        self.assertEqual(len(fingerprint), 64)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            cohort_prefix = out / "cohorts" / fingerprint[:20]
+            candidates = [cohort_prefix, *sorted((out / "cohorts").glob(f"{fingerprint[:20]}-rebuild*"))]
+            self.assertEqual(candidates, [cohort_prefix])
+            rebuild_dir = out / "cohorts" / f"{fingerprint[:20]}-rebuild1"
+            rebuild_dir.mkdir(parents=True)
+            candidates = [cohort_prefix, *sorted((out / "cohorts").glob(f"{fingerprint[:20]}-rebuild*"))]
+            self.assertEqual(candidates, [cohort_prefix, rebuild_dir])
+
+    def test_align_cohort_num_nodes_expands_for_substitutions(self):
+        config = {"graph": {"num_nodes": 20}}
+        events = [{"race_id": "r1"}, {"race_id": "r2"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            stages_root = Path(tmp)
+            for r_id, drivers in [("r1", ["1", "2", "3"]), ("r2", ["1", "4", "5", "6"])]:
+                stage = stages_root / r_id
+                stage.mkdir()
+                pd.DataFrame({"Driver": drivers, "value": [1.0] * len(drivers)}).to_parquet(
+                    stage / "aligned_telemetry.parquet", index=False
+                )
+            num_nodes = runner._align_cohort_num_nodes(config, events, stages_root)
+            self.assertEqual(num_nodes, 20)
+            self.assertEqual(config["graph"]["num_nodes"], 20)
+
+            extra_drivers = [str(i) for i in range(10, 27)]
+            stage_extra = stages_root / "r3"
+            stage_extra.mkdir()
+            pd.DataFrame({"Driver": extra_drivers, "value": [1.0] * len(extra_drivers)}).to_parquet(
+                stage_extra / "aligned_telemetry.parquet", index=False
+            )
+            events.append({"race_id": "r3"})
+            num_nodes = runner._align_cohort_num_nodes(config, events, stages_root)
+            self.assertEqual(num_nodes, 23)
+            self.assertEqual(config["graph"]["num_nodes"], 23)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

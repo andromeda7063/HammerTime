@@ -199,6 +199,16 @@ def masked_mse_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Ten
     return torch.square(preds[valid] - targets[valid]).mean()
 
 
+def masked_smooth_l1_loss(preds: torch.Tensor, targets: torch.Tensor, masks: torch.Tensor, beta: float = 0.02) -> torch.Tensor:
+    """Compute Smooth L1 (Huber) loss over active target nodes only."""
+    if preds.shape != targets.shape or masks.shape != targets.shape:
+        raise ValueError("Predictions, targets, and masks must have the same shape.")
+    valid = masks.bool()
+    if not valid.any():
+        raise ValueError("Cannot train a batch with no valid target nodes.")
+    return nn.functional.smooth_l1_loss(preds[valid], targets[valid], beta=beta, reduction="mean")
+
+
 @torch.no_grad()
 def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> float:
     """
@@ -227,13 +237,18 @@ def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> floa
 def train_model(model: nn.Module, train_loader, val_loader, config: dict, device: torch.device,
                 *, resume_from: str | Path | None = None):
     """
-    Train with the configured masked MAE or MSE objective; select checkpoints by validation MAE.
+    Train with the configured masked MAE, MSE, or Smooth L1 objective; select checkpoints by validation MAE.
     """
     t_cfg = config["train"]
     loss_name = str(t_cfg.get("loss", "mae")).casefold()
-    loss_functions = {"mae": masked_l1_loss, "mse": masked_mse_loss}
+    loss_functions = {
+        "mae": masked_l1_loss,
+        "mse": masked_mse_loss,
+        "smooth_l1": masked_smooth_l1_loss,
+        "huber": masked_smooth_l1_loss,
+    }
     if loss_name not in loss_functions:
-        raise ValueError("train.loss must be 'mae' or 'mse'.")
+        raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
     loss_function = loss_functions[loss_name]
     lr = float(t_cfg.get("lr", 0.001))
     wd = float(t_cfg.get("weight_decay", 0.0001))
@@ -249,6 +264,20 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         raise ValueError("resume_from must point to a last-epoch checkpoint, not best.pt.")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
+
+    lr_scheduler_type = str(t_cfg.get("lr_scheduler", "none")).casefold()
+    scheduler = None
+    if lr_scheduler_type == "plateau":
+        scheduler_patience = int(t_cfg.get("lr_scheduler_patience", 2))
+        scheduler_factor = float(t_cfg.get("lr_scheduler_factor", 0.5))
+        scheduler_min_lr = float(t_cfg.get("lr_scheduler_min_lr", 1e-5))
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=scheduler_factor,
+            patience=scheduler_patience,
+            min_lr=scheduler_min_lr,
+        )
 
     if len(train_loader) == 0:
         raise ValueError("Training loader is empty.")
@@ -283,6 +312,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             raise ValueError("Resume checkpoint epoch is outside the configured training budget.")
         model.load_state_dict(checkpoint["model_state_dict"], strict=True)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if scheduler is not None and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         best_val_mae = float(checkpoint["best_val_mae"])
         best_epoch = int(checkpoint["best_epoch"])
         patience_counter = int(checkpoint["patience_counter"])
@@ -349,6 +380,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             for name, parameter in model.named_parameters():
                 if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
                     raise FloatingPointError(f"Non-finite gradient for {name} at epoch {epoch}.")
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -359,15 +391,20 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         if not np.isfinite(val_mae):
             raise FloatingPointError(f"Non-finite validation MAE at epoch {epoch}.")
 
-        history.append({
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        history_entry = {
             "epoch": epoch,
             "train_loss": avg_train_loss,
-            "val_mae": val_mae
-        })
+            "val_mae": val_mae,
+        }
+        if lr_scheduler_type != "none":
+            history_entry["lr"] = current_lr
+        history.append(history_entry)
 
-        train_unit = "s" if loss_name == "mae" else "s²"
-        train_label = "L1" if loss_name == "mae" else "MSE"
-        logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit} | Val MAE: {val_mae:.4f} s")
+        train_unit = "s" if loss_name in ("mae", "smooth_l1", "huber") else "s²"
+        train_label = "SmoothL1" if loss_name in ("smooth_l1", "huber") else ("L1" if loss_name == "mae" else "MSE")
+        lr_suffix = f" | LR: {current_lr:.6f}" if lr_scheduler_type != "none" else ""
+        logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit} | Val MAE: {val_mae:.4f} s{lr_suffix}")
 
         # Early stopping and checkpointing
         if val_mae < best_val_mae:
@@ -389,15 +426,20 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                                     "n_features_in_": int(scaler.n_features_in_)}
                                    if scaler is not None and hasattr(scaler, "mean_") else None),
             }
+            if scheduler is not None:
+                checkpoint["scheduler_state_dict"] = scheduler.state_dict()
             best_checkpoint_state = copy.deepcopy(checkpoint)
             _atomic_torch_save(checkpoint, ckpt_path)
             logger.info(f"[*] Best model updated. Saved checkpoint to {ckpt_path} (Val MAE: {val_mae:.4f} s)")
         else:
             patience_counter += 1
 
+        if scheduler is not None:
+            scheduler.step(val_mae)
+
         # Persist only at complete-epoch boundaries. This file is separate from
         # best.pt so a restart can continue Adam and early stopping exactly.
-        _atomic_torch_save({
+        last_checkpoint = {
             "format_version": 2,
             "checkpoint_kind": "last_epoch",
             "completed_epoch": epoch,
@@ -412,7 +454,10 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             "run_id": run_id,
             "best_checkpoint_state": best_checkpoint_state,
             "rng_state": _capture_rng_state(train_loader, val_loader),
-        }, last_ckpt_path)
+        }
+        if scheduler is not None:
+            last_checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+        _atomic_torch_save(last_checkpoint, last_ckpt_path)
         if patience_counter >= patience:
             logger.info(f"Early stopping triggered after {epoch} epochs (Best Val MAE: {best_val_mae:.4f} s).")
             break
@@ -420,8 +465,11 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     history_path = Path(t_cfg.get("history_path", ckpt_path.parent / "training_history.csv"))
     history_path.parent.mkdir(parents=True, exist_ok=True)
     if history:
+        fieldnames = ["epoch", "train_loss", "val_mae"]
+        if any("lr" in row for row in history):
+            fieldnames.append("lr")
         with history_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["epoch", "train_loss", "val_mae"])
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(history)
     if not np.isfinite(best_val_mae):

@@ -23,6 +23,13 @@ EDGE_FEATURES_BY_SCHEMA = {
         "leader_minus_follower_speed_mps",
         "position_coverage",
     ),
+    "physical_v2": (
+        "rbf_gap",
+        "gap_m",
+        "leader_minus_follower_speed_mps",
+        "position_coverage",
+        "in_wake_corridor",
+    ),
 }
 PHYSICAL_EDGE_CONTINUOUS_COLUMNS = (1, 2)
 
@@ -67,6 +74,7 @@ def build_physical_circuit_edges(
     max_gap_sec: float = 2.0,
     sigma_sec: float = 1.0,
     expected_on_track_count: int | None = None,
+    edge_schema: str = "physical_v1",
 ) -> PhysicalEdgeSet:
     """Connect each car to the next observed car around the circular track.
 
@@ -76,10 +84,10 @@ def build_physical_circuit_edges(
     activity.  If that selected car has no usable model node, the edge is
     omitted and counted; the search does not bridge to a farther car.
 
-    The four raw edge channels are ``[RBF, gap_m,
-    leader_minus_follower_speed_mps, position_coverage]``.  Only ``gap_m`` and
-    relative speed are normalized later, using edges from training input
-    snapshots only.
+    The raw edge channels are ``[RBF, gap_m, leader_minus_follower_speed_mps,
+    position_coverage]`` (and optionally ``in_wake_corridor`` for physical_v2).
+    Only ``gap_m`` and relative speed are normalized later, using edges from
+    training input snapshots only.
     """
     if (not math.isfinite(float(lap_length_m)) or lap_length_m <= 0
             or not math.isfinite(float(max_gap_sec)) or max_gap_sec <= 0
@@ -131,17 +139,21 @@ def build_physical_circuit_edges(
 
             src.append(int(driver_to_idx[leader]))
             dst.append(int(driver_to_idx[follower]))
-            attrs.append([
+            attr = [
                 math.exp(-(gap_sec ** 2) / (2.0 * sigma_sec ** 2)),
                 gap_m,
                 leader_speed - follower_speed,
                 coverage,
-            ])
+            ]
+            if edge_schema == "physical_v2":
+                attr.append(1.0 if (gap_m <= 35.0 and gap_sec <= 0.6) else 0.0)
+            attrs.append(attr)
 
+    edge_dim = len(EDGE_FEATURES_BY_SCHEMA.get(edge_schema, EDGE_FEATURES_BY_SCHEMA["physical_v1"]))
     edge_index = (torch.tensor([src, dst], dtype=torch.long) if src
                   else torch.empty((2, 0), dtype=torch.long))
     edge_attr = (torch.tensor(attrs, dtype=torch.float32) if attrs
-                 else torch.empty((0, len(EDGE_FEATURES_BY_SCHEMA["physical_v1"])),
+                 else torch.empty((0, edge_dim),
                                   dtype=torch.float32))
     return PhysicalEdgeSet(edge_index, edge_attr, coverage, blocked)
 
@@ -163,16 +175,20 @@ class PhysicalEdgeFeatureScaler:
 
     def fit(self, snapshots: Sequence, train_snapshot_indices: Sequence[int]):
         blocks = []
+        schema_seen = "physical_v1"
         for index in sorted(set(int(i) for i in train_snapshot_indices)):
             attrs = getattr(snapshots[index], "edge_attr_physical_circuit", None)
             if attrs is None or attrs.numel() == 0:
                 continue
-            if attrs.ndim != 2 or attrs.shape[1] != 4:
-                raise ValueError("physical_circuit edge attrs must have shape [E, 4].")
+            if attrs.ndim != 2 or attrs.shape[1] not in (4, 5):
+                raise ValueError("physical_circuit edge attrs must have shape [E, 4] or [E, 5].")
+            if attrs.shape[1] == 5:
+                schema_seen = "physical_v2"
             values = attrs[:, list(PHYSICAL_EDGE_CONTINUOUS_COLUMNS)].detach().cpu().numpy()
             valid = np.isfinite(values).all(axis=1)
             if valid.any():
                 blocks.append(values[valid])
+        self.schema_ = schema_seen
         if blocks:
             values = np.concatenate(blocks, axis=0).astype(np.float64, copy=False)
             self.mean_ = values.mean(axis=0)
@@ -193,8 +209,8 @@ class PhysicalEdgeFeatureScaler:
     def transform(self, edge_attr: torch.Tensor) -> torch.Tensor:
         if not self.fitted_:
             raise ValueError("Physical edge scaler must be fitted on training edges first.")
-        if edge_attr.ndim != 2 or edge_attr.shape[1] != 4:
-            raise ValueError("physical_v1 edge attrs must have shape [E, 4].")
+        if edge_attr.ndim != 2 or edge_attr.shape[1] not in (4, 5):
+            raise ValueError("physical edge attrs must have shape [E, 4] or [E, 5].")
         transformed = edge_attr.clone()
         if transformed.numel():
             mean = torch.as_tensor(self.mean_, dtype=transformed.dtype, device=transformed.device)
@@ -206,8 +222,9 @@ class PhysicalEdgeFeatureScaler:
     def metadata(self) -> dict:
         if not self.fitted_:
             raise ValueError("Physical edge scaler metadata is unavailable before fitting.")
+        schema_name = getattr(self, "schema_", "physical_v1")
         return {
-            "schema": "physical_v1",
+            "schema": schema_name,
             "continuous_features": [EDGE_FEATURES_BY_SCHEMA["physical_v1"][i]
                                     for i in PHYSICAL_EDGE_CONTINUOUS_COLUMNS],
             "mean_": self.mean_.tolist(),
@@ -219,13 +236,14 @@ class PhysicalEdgeFeatureScaler:
 
     @classmethod
     def from_metadata(cls, metadata: Mapping) -> "PhysicalEdgeFeatureScaler":
-        if metadata.get("schema") != "physical_v1":
+        if metadata.get("schema") not in ("physical_v1", "physical_v2"):
             raise ValueError("Unsupported physical edge scaler metadata schema.")
         if metadata.get("continuous_features") != [
                 EDGE_FEATURES_BY_SCHEMA["physical_v1"][i]
                 for i in PHYSICAL_EDGE_CONTINUOUS_COLUMNS]:
             raise ValueError("Physical edge scaler feature order does not match physical_v1.")
         scaler = cls()
+        scaler.schema_ = metadata.get("schema", "physical_v1")
         scaler.mean_ = np.asarray(metadata["mean_"], dtype=np.float64)
         scaler.var_ = np.asarray(metadata["var_"], dtype=np.float64)
         scaler.scale_ = np.asarray(metadata["scale_"], dtype=np.float64)

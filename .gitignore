@@ -32,6 +32,7 @@ dist/
 data/cache/
 data/processed/
 hammertime_100/data/
+hammertime_100/src/data/
 *.ff1pkl
 fastf1_http_cache*
 *.sqlite

@@ -241,8 +241,9 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                 max_gap_sec=max_gap,
                 sigma_sec=sigma,
                 expected_on_track_count=expected_on_track,
+                edge_schema=edge_feature_schema,
             )
-        elif neighbor_mode == "physical_circuit" or edge_feature_schema == "physical_v1":
+        elif neighbor_mode == "physical_circuit" or edge_feature_schema in ("physical_v1", "physical_v2"):
             raise ValueError(
                 f"Physical graph mode requires a configured lap length for race {race_id!r}."
             )
@@ -252,9 +253,10 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             # physical topology without fabricating a lap length or edges.
             known_positions = sum(position_valid_by_driver.values())
             coverage = (known_positions / expected_on_track) if expected_on_track else 0.0
+            fallback_dim = 5 if edge_feature_schema == "physical_v2" else 4
             physical_edges = PhysicalEdgeSet(
                 edge_index=torch.empty((2, 0), dtype=torch.long),
-                edge_attr=torch.empty((0, 4), dtype=torch.float32),
+                edge_attr=torch.empty((0, fallback_dim), dtype=torch.float32),
                 position_coverage=float(coverage),
                 blocked_neighbor_count=0,
             )
@@ -269,7 +271,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                 edge_attr_physical_circuit[:, :1]
                 if edge_feature_schema == "scalar_rbf" else edge_attr_physical_circuit
             )
-        if edge_feature_schema == "physical_v1":
+        if edge_feature_schema in ("physical_v1", "physical_v2"):
             active_edge_index = edge_index_physical_circuit
             active_edge_attr = edge_attr_physical_circuit
         is_safety_car = (
