@@ -1,13 +1,14 @@
-"""Authenticate to FastF1, acquire 2023 Grand Prix races, and train HammerTime.
+"""Prepare and train a race-complete 2023 FastF1 season cohort.
 
-From the repository root (FastF1 3.9.0 is supplied as a runtime overlay):
+Online acquisition mode (FastF1 3.9.0 is supplied as a runtime overlay):
     uv run --frozen --with fastf1==3.9.0 python hammertime_100/run_2023_fastf1_season.py --processing-workers 8 --workers 2 --torch-threads 8
 
-The script reads F1_USERNAME and F1_PASSWORD from the process environment or
-the repository-root .env file. It never writes credentials to run artifacts.
-Only FastF1 is used for event discovery and race data. Failed/unsupported races
-are recorded and skipped; the existing coverage, physics, split, and model
-gates are applied unchanged by the HammerTime preparation and training code.
+Use --local-data-only --raw-sessions-dir PATH to avoid all FastF1 source/auth
+access. That mode requires hash-verified local raw tables for all 22 registered
+2023 Grand Prix races and fails closed if any session is missing or invalid.
+Online mode reads credentials from the process environment or repository .env.
+Credentials are never written to run artifacts. Existing coverage, physics,
+split, and model gates are applied unchanged by preparation and training.
 """
 from __future__ import annotations
 
@@ -70,6 +71,28 @@ CIRCUITS = {
     "Yas Marina Circuit": ("Abu Dhabi", 5281.0, "abu-dhabi"),
     "Yas Island": ("Abu Dhabi", 5281.0, "abu-dhabi"),
     "Abu Dhabi": ("Abu Dhabi", 5281.0, "abu-dhabi"),
+}
+
+# The complete 2023 Grand Prix race inventory. Local-data-only runs must match
+# this registry exactly; they never infer season completeness from whatever
+# directories happen to be present on disk.
+EXPECTED_2023_RACE_IDS = (
+    "2023-Bahrain-R", "2023-SaudiArabia-R", "2023-Australia-R", "2023-Azerbaijan-R",
+    "2023-Miami-R", "2023-Monaco-R", "2023-Spain-R", "2023-Canada-R",
+    "2023-Austria-R", "2023-GreatBritain-R", "2023-Hungary-R", "2023-Belgium-R",
+    "2023-Netherlands-R", "2023-Italy-R", "2023-Singapore-R", "2023-Japan-R",
+    "2023-Qatar-R", "2023-UnitedStates-R", "2023-Mexico-R", "2023-SãoPaulo-R",
+    "2023-LasVegas-R", "2023-AbuDhabi-R",
+)
+EXPECTED_2023_ROUND_SCHEMES = {
+    "completed_races_1_to_22": {
+        race_id: round_number
+        for round_number, race_id in enumerate(EXPECTED_2023_RACE_IDS, start=1)
+    },
+    "published_calendar_1_to_5_then_7_to_23": {
+        race_id: round_number
+        for race_id, round_number in zip(EXPECTED_2023_RACE_IDS, (*range(1, 6), *range(7, 24)))
+    },
 }
 
 
@@ -240,6 +263,111 @@ def _valid_raw_stage(stage: Path, expected_fingerprint: str) -> dict | None:
         return None
 
 
+def _validate_local_raw_manifest(stage: Path, expected_race_id: str) -> dict:
+    """Validate a transferred authentic raw stage without FastF1 or network access."""
+    marker = stage / "raw_manifest.json"
+    if stage.is_symlink() or not marker.is_file() or marker.is_symlink():
+        raise ValueError(f"missing manifest: {marker}")
+    record = json.loads(marker.read_text(encoding="utf-8"))
+    event = record.get("event")
+    if not isinstance(event, dict):
+        raise ValueError("manifest has no event object")
+    round_number = event.get("round_number")
+    if (event.get("year") != 2023 or event.get("session_type") != "R"
+            or event.get("race_id") != expected_race_id
+            or isinstance(round_number, bool) or not isinstance(round_number, int)
+            or round_number < 1 or round_number > 23):
+        raise ValueError("manifest event identity/year/session/round is invalid for the registered 2023 race")
+    gp = event.get("gp")
+    if not isinstance(gp, str) or not gp.strip():
+        raise ValueError("manifest GP event name is missing")
+    length = event.get("lap_length_m")
+    if isinstance(length, bool) or not isinstance(length, (int, float)) or not np.isfinite(length) or length <= 0:
+        raise ValueError("manifest circuit length is missing or invalid")
+    source_metadata = record.get("source_metadata")
+    if (not isinstance(source_metadata, dict) or source_metadata.get("provider") != "fastf1"
+            or not isinstance(source_metadata.get("session"), dict)
+            or not source_metadata["session"].get("circuit_key")):
+        raise ValueError("manifest does not identify FastF1 as its source provider")
+    manifest_fingerprint = record.get("fingerprint")
+    if not isinstance(manifest_fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", manifest_fingerprint) is None:
+        raise ValueError("manifest has no valid raw-stage fingerprint")
+    files = record.get("files")
+    if not isinstance(files, dict) or not {"raw_laps.parquet", "raw_telemetry.parquet"}.issubset(files):
+        raise ValueError("manifest is missing the required raw lap or telemetry table")
+    root = stage.resolve(strict=True)
+    for relative_name, expected in files.items():
+        if not isinstance(relative_name, str) or Path(relative_name).name != relative_name:
+            raise ValueError("manifest contains a non-canonical raw table path")
+        path = stage / relative_name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"raw table is missing or is a symlink: {relative_name}")
+        if path.resolve(strict=True).parent != root:
+            raise ValueError(f"raw table escapes its race directory: {relative_name}")
+        if not isinstance(expected, dict) or set(("bytes", "sha256")) - expected.keys():
+            raise ValueError(f"raw table has incomplete integrity metadata: {relative_name}")
+        if not isinstance(expected["bytes"], int) or isinstance(expected["bytes"], bool) or expected["bytes"] <= 0:
+            raise ValueError(f"raw table has invalid byte count: {relative_name}")
+        if not isinstance(expected["sha256"], str) or len(expected["sha256"]) != 64:
+            raise ValueError(f"raw table has invalid SHA256 metadata: {relative_name}")
+        if (path.stat().st_size != expected["bytes"]
+                or sha256(path) != expected["sha256"]):
+            raise ValueError(f"raw table size or SHA256 mismatch: {relative_name}")
+    drivers = record.get("drivers")
+    if not isinstance(drivers, list) or not drivers:
+        raise ValueError("manifest has no driver inventory")
+    return record
+
+
+def load_local_raw_inventory(raw_root: Path) -> tuple[list[dict], list[dict], str]:
+    """Require and verify every registered 2023 race in a transferred raw cache."""
+    try:
+        root = raw_root.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"Local raw-session directory is unavailable: {raw_root} ({type(exc).__name__}).") from None
+    if not root.is_dir():
+        raise RuntimeError(f"Local raw-session path is not a directory: {root}")
+    events, manifests, problems = [], [], []
+    expected_directories = {_safe_id(race_id) for race_id in EXPECTED_2023_RACE_IDS}
+    for child in root.iterdir():
+        if child.name.startswith("."):
+            continue  # Preserve and ignore prior atomic staging/stale backups.
+        if child.is_dir() and child.name not in expected_directories:
+            problems.append(f"unregistered raw-session directory: {child.name}")
+    for race_id in EXPECTED_2023_RACE_IDS:
+        stage = root / _safe_id(race_id)
+        try:
+            manifest = _validate_local_raw_manifest(stage, race_id)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            problems.append(f"{race_id}: {exc}")
+            continue
+        events.append(manifest["event"])
+        manifests.append(manifest)
+    if problems or len(events) != len(EXPECTED_2023_RACE_IDS):
+        details = "\n  - ".join(problems) if problems else "registered race inventory count mismatch"
+        raise RuntimeError(
+            f"Local-data-only mode requires all {len(EXPECTED_2023_RACE_IDS)} verified 2023 Grand Prix race stages. "
+            f"No races were downloaded or skipped. Problems:\n  - {details}\n"
+            "Copy the complete race_cache/raw_sessions directory from the authentic source-data archive, "
+            "then pass its path with --raw-sessions-dir."
+        )
+    gp_names = [str(event["gp"]).strip().casefold() for event in events]
+    circuit_keys = [str(manifest["source_metadata"]["session"]["circuit_key"]).strip().casefold()
+                    for manifest in manifests]
+    if len(set(gp_names)) != len(EXPECTED_2023_RACE_IDS) or len(set(circuit_keys)) != len(EXPECTED_2023_RACE_IDS):
+        raise RuntimeError("Local-data-only mode found duplicate Grand Prix names or circuit identities in the 22-race inventory.")
+    round_assignments = {event["race_id"]: event["round_number"] for event in events}
+    matching_schemes = [name for name, expected in EXPECTED_2023_ROUND_SCHEMES.items()
+                        if round_assignments == expected]
+    if len(matching_schemes) != 1:
+        raise RuntimeError(
+            "Local-data-only mode requires a complete, internally consistent 2023 round-numbering scheme "
+            "(completed-race rounds 1–22 or published-calendar rounds 1–5 then 7–23); "
+            "mixed, duplicate, or unknown round assignments are rejected."
+        )
+    return events, manifests, matching_schemes[0]
+
+
 def ensure_raw_stage(event: dict, cache_root: Path, raw_root: Path,
                      fastf1_version: str, credentials: tuple[str, str]) -> tuple[dict | None, str | None]:
     """Serialize FastF1 access in the parent and atomically persist raw session tables."""
@@ -271,6 +399,7 @@ def ensure_raw_stage(event: dict, cache_root: Path, raw_root: Path,
         source_metadata = {"provider": "fastf1", "session": {"circuit_key": circuit_key}}
         record = {"fingerprint": fingerprint, "event": final_event, "files": files,
                   "source_metadata": source_metadata,
+                  "fastf1_version": fastf1_version,
                   "drivers": [str(driver) for driver in session.drivers],
                   "coverage": {"raw_lap_rows": int(len(session.laps))}}
         atomic_json(staging / "raw_manifest.json", record)
@@ -388,7 +517,8 @@ def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
 
 
 def write_normalized_source(stage_root: Path, source_root: Path,
-                            config_path: Path, events: list[dict]) -> str:
+                            config_path: Path, events: list[dict],
+                            cache_root: Path | None = None) -> str:
     """Write an authenticated normalized-source cache manifest, not a cohort manifest."""
     from prepare_cohort import _canonical_json, _sha256_bytes
 
@@ -410,7 +540,8 @@ def write_normalized_source(stage_root: Path, source_root: Path,
             source_files.append(rel)
         records.append({"race_id": race_id, "provider": "fastf1", "year": int(event["year"]),
                         "gp": str(event["gp"]), "session_type": str(event["session_type"]),
-                        "session_key": event.get("session_key"), "cache_root": str((HERE / "data/cache/fastf1-2023-authenticated" / race_id).resolve()),
+                        "session_key": event.get("session_key"),
+                        "cache_root": str((cache_root / race_id).resolve()) if cache_root is not None else None,
                         "lap_length_m": float(event["lap_length_m"]), "source_files": source_files,
                         "coverage": stage_meta["coverage"], "source_metadata": stage_meta["source_metadata"]})
     manifest = {"schema_version": 1, "artifact_type": "hammertime-normalized-source-cache",
@@ -454,21 +585,69 @@ def _worker_warmup() -> int:
 
 
 def _normalization_fingerprint(event: dict, raw_manifest: dict, config: dict,
-                              fastf1_version: str) -> str:
+                              fastf1_version: str,
+                              raw_manifest_sha256: str | None = None) -> str:
     return canonical_hash({"processing": _race_fingerprint(event, config, fastf1_version),
-                           "raw_source_sha256": raw_manifest["files"]})
+                           "raw_source_sha256": raw_manifest["files"],
+                           "raw_manifest_sha256": raw_manifest_sha256,
+                           "raw_manifest_inputs": {
+                               "event": raw_manifest.get("event"),
+                               "drivers": raw_manifest.get("drivers"),
+                               "source_metadata": raw_manifest.get("source_metadata"),
+                               "fastf1_version": raw_manifest.get("fastf1_version"),
+                               "fingerprint": raw_manifest.get("fingerprint"),
+                           }})
 
 
 def _normalization_task(event: dict, raw_stage: Path, raw_manifest: dict,
-                        config: dict, fastf1_version: str, normalized_root: Path) -> dict:
-    fingerprint = _normalization_fingerprint(event, raw_manifest, config, fastf1_version)
+                        config: dict, fastf1_version: str, normalized_root: Path,
+                        source_metadata: dict | None = None) -> dict:
+    fingerprint = _normalization_fingerprint(
+        event, raw_manifest, config, fastf1_version, sha256(raw_stage / "raw_manifest.json"))
     raw_files = {str((raw_stage / name).resolve()): info for name, info in raw_manifest["files"].items()}
+    source_metadata = dict(source_metadata or raw_manifest["source_metadata"])
+    source_metadata["raw_manifest_sha256"] = sha256(raw_stage / "raw_manifest.json")
+    source_metadata["raw_manifest_fingerprint"] = raw_manifest.get("fingerprint")
+    source_metadata["raw_source_files"] = raw_manifest["files"]
     return {"event": event, "config": config,
             "stage": str(normalized_root / _safe_id(event["race_id"])),
             "raw_laps": str(raw_stage / "raw_laps.parquet"),
             "raw_telemetry": str(raw_stage / "raw_telemetry.parquet"),
             "drivers": raw_manifest["drivers"], "raw_files": raw_files,
-            "fingerprint": fingerprint, "source_metadata": raw_manifest["source_metadata"]}
+            "fingerprint": fingerprint,
+            "source_metadata": source_metadata}
+
+
+def _normalization_source_version(raw_manifest: dict, local_data_only: bool,
+                                 installed_version: str | None = None) -> str:
+    version = raw_manifest.get("fastf1_version")
+    if isinstance(version, str) and version.strip():
+        return version
+    if local_data_only:
+        # Legacy manifests predate explicit version metadata. Keep their opaque
+        # source fingerprint in the cache identity without guessing a version.
+        return f"unrecorded-local-raw:{raw_manifest.get('fingerprint', 'missing-fingerprint')}"
+    return installed_version or "unrecorded-online-raw"
+
+
+def _normalization_source_metadata(raw_manifest: dict, local_data_only: bool,
+                                   installed_version: str | None = None,
+                                   round_scheme: str | None = None) -> dict:
+    metadata = dict(raw_manifest["source_metadata"])
+    version = raw_manifest.get("fastf1_version")
+    if isinstance(version, str) and version.strip():
+        metadata["fastf1_version"] = version
+        metadata["fastf1_version_provenance"] = "raw_manifest"
+    elif local_data_only:
+        metadata["fastf1_version"] = "unrecorded"
+        metadata["fastf1_version_provenance"] = "legacy_raw_manifest_without_version_field"
+    else:
+        metadata["fastf1_version"] = installed_version or "unrecorded"
+        metadata["fastf1_version_provenance"] = (
+            "runtime_environment_fallback" if installed_version else "online_raw_manifest_without_version_field")
+    if local_data_only and round_scheme:
+        metadata["round_numbering_scheme"] = round_scheme
+    return metadata
 
 
 def _start_worker_pool(workers: int) -> tuple[ProcessPoolExecutor, set[int]]:
@@ -521,6 +700,13 @@ def _cohort_fingerprint(config: dict, source_hash: str) -> str:
         "config": config,
         "prepare_code": prepare_code,
     })
+
+
+def _training_identity_config(config: dict) -> dict:
+    """Exclude progress logging, which cannot change the trained model."""
+    identity = copy.deepcopy(config)
+    identity.get("train", {}).pop("log_every_batches", None)
+    return identity
 
 
 def _align_cohort_num_nodes(config: dict, events: list[dict], stages_root: Path) -> int:
@@ -645,34 +831,54 @@ def aggregate(frame: pd.DataFrame, group: str) -> list[dict]:
 
 
 def run(args: argparse.Namespace) -> Path:
-    secrets = load_credentials()
-    # Never leave account credentials in the environment when spawned workers
-    # are created. ensure_raw_stage exposes them briefly around serialized loads.
+    local_data_only = bool(getattr(args, "local_data_only", False))
+    secrets = ("", "") if local_data_only else load_credentials()
+    # Keep credentials out of worker environments in either source mode. The
+    # offline mode neither reads nor uses them.
     for name in ("F1_USERNAME", "F1_PASSWORD", "FASTF1_AUTH_METHOD"):
         os.environ.pop(name, None)
-    import fastf1
-    from packaging.version import Version
-    if Version(fastf1.__version__) < Version("3.9.0"):
-        raise RuntimeError("FastF1 account authentication requires 3.9.0+. Run with: uv run --frozen --with fastf1==3.9.0 python hammertime_100/run_2023_fastf1_season.py")
+    fastf1 = None
+    if not local_data_only:
+        # ensure_raw_stage exposes credentials briefly around serialized loads.
+        import fastf1
+        from packaging.version import Version
+        if Version(fastf1.__version__) < Version("3.9.0"):
+            raise RuntimeError("FastF1 account authentication requires 3.9.0+. Run with: uv run --frozen --with fastf1==3.9.0 python hammertime_100/run_2023_fastf1_season.py")
+        source_version = fastf1.__version__
+    else:
+        source_version = "local-data-only"
     out = args.output.expanduser().resolve() if args.output else ROOT / ".local/research-history/2023-fastf1-season"
     out.mkdir(parents=True, exist_ok=True)
     global ACTIVE_OUTPUT
     ACTIVE_OUTPUT = out
-    for name in ("race_cache/sessions", "race_cache/raw_sessions", "cohorts", "training"):
+    output_dirs = ["race_cache/sessions", "cohorts", "training"]
+    if not local_data_only:
+        output_dirs.append("race_cache/raw_sessions")
+    for name in output_dirs:
         (out / name).mkdir(parents=True, exist_ok=True)
     log_path = out / "run.log"
     logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
                         format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("fastf1").setLevel(logging.INFO)
+    if not local_data_only:
+        logging.getLogger("fastf1").setLevel(logging.INFO)
     cache_root = HERE / "data/cache/fastf1-2023-authenticated"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    fastf1.Cache.enable_cache(str(cache_root))
-    failure_stage = "load template and discover calendar"
+    if not local_data_only:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        fastf1.Cache.enable_cache(str(cache_root))
+    failure_stage = "load template and discover or validate source data"
     try:
         template_path = Path(args.config) if getattr(args, "config", None) is not None else HERE / "configs/supplied_fastf1_monza_2023_gated.yaml"
         with template_path.open(encoding="utf-8") as stream:
             base = yaml.safe_load(stream)
+        log_every_batches = getattr(args, "log_every_batches", None)
+        if log_every_batches is None:
+            log_every_batches = base.get("train", {}).get("log_every_batches", 10)
+        if (isinstance(log_every_batches, bool) or not isinstance(log_every_batches, int)
+                or log_every_batches < 1):
+            raise ValueError("train.log_every_batches must be a positive integer.")
+        # Batch-report cadence does not alter preparation or training results.
+        base["train"].pop("log_every_batches", None)
         base["data"]["split_method"] = "race"
         base["data"]["random_seed"] = args.seed
         base["train"]["max_epochs"] = args.epochs
@@ -695,21 +901,32 @@ def run(args: argparse.Namespace) -> Path:
         if getattr(args, "neighbor_mode", None) is not None:
             base["graph"]["neighbor_mode"] = str(args.neighbor_mode)
         base["tuning"]["enabled"] = False
-        os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = secrets
-        os.environ["FASTF1_AUTH_METHOD"] = "password"
-        try:
-            events, skips = discover(fastf1, out)
-        finally:
-            os.environ.pop("F1_USERNAME", None)
-            os.environ.pop("F1_PASSWORD", None)
-            os.environ.pop("FASTF1_AUTH_METHOD", None)
+        if local_data_only:
+            raw_root_arg = getattr(args, "raw_sessions_dir", None)
+            if raw_root_arg is None:
+                raise ValueError("--local-data-only requires --raw-sessions-dir pointing at the transferred raw_sessions directory.")
+            raw_root = Path(raw_root_arg).expanduser().resolve(strict=True)
+            events, raw_cached, round_scheme = load_local_raw_inventory(raw_root)
+            skips = []
+            LOG.info("Verified complete local inventory: %d of %d authentic 2023 race sessions; round scheme %s.",
+                     len(events), len(EXPECTED_2023_RACE_IDS), round_scheme)
+        else:
+            os.environ["F1_USERNAME"], os.environ["F1_PASSWORD"] = secrets
+            os.environ["FASTF1_AUTH_METHOD"] = "password"
+            try:
+                events, skips = discover(fastf1, out)
+            finally:
+                os.environ.pop("F1_USERNAME", None)
+                os.environ.pop("F1_PASSWORD", None)
+                os.environ.pop("FASTF1_AUTH_METHOD", None)
+            raw_root = out / "race_cache/raw_sessions"
         failure_stage = "acquire and normalize race sessions"
         stages_root = out / "race_cache/sessions"
-        raw_root = out / "race_cache/raw_sessions"
-        with ThreadPoolExecutor(max_workers=args.workers) as pool:
-            raw_cached = list(pool.map(
-                lambda event: _valid_raw_stage(raw_root / _safe_id(event["race_id"]),
-                                               _raw_fingerprint(event, fastf1.__version__)), events))
+        if not local_data_only:
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                raw_cached = list(pool.map(
+                    lambda event: _valid_raw_stage(raw_root / _safe_id(event["race_id"]),
+                                                   _raw_fingerprint(event, fastf1.__version__)), events))
 
         failures: list[dict] = list(skips)
         normalized_by_id: dict[str, dict] = {}
@@ -720,6 +937,8 @@ def run(args: argparse.Namespace) -> Path:
         try:
             for event, raw_manifest in zip(events, raw_cached):
                 race_id = str(event["race_id"])
+                if raw_manifest is None and local_data_only:
+                    raise RuntimeError(f"Verified local raw session disappeared for {race_id}; refusing network fallback.")
                 if raw_manifest is None:
                     raw_event, failure_type = ensure_raw_stage(event, cache_root, raw_root,
                                                                fastf1.__version__, secrets)
@@ -734,7 +953,17 @@ def run(args: argparse.Namespace) -> Path:
                     event = {**event, **raw_manifest["event"]}
                     raw_stage = raw_root / _safe_id(race_id)
 
-                fingerprint = _normalization_fingerprint(event, raw_manifest, base, fastf1.__version__)
+                if local_data_only:
+                    # Recheck immediately before normalization to guard against
+                    # changes between inventory validation and worker launch.
+                    raw_manifest = _validate_local_raw_manifest(
+                        raw_stage, race_id)
+
+                event_source_version = _normalization_source_version(
+                    raw_manifest, local_data_only, source_version if not local_data_only else None)
+                fingerprint = _normalization_fingerprint(
+                    event, raw_manifest, base, event_source_version,
+                    sha256(raw_stage / "raw_manifest.json"))
                 normalized_stage = stages_root / _safe_id(race_id)
                 cached = _valid_race_stage(normalized_stage, fingerprint)
                 if cached is not None:
@@ -758,7 +987,11 @@ def run(args: argparse.Namespace) -> Path:
                         continue
                     LOG.info("CPU normalization worker processes started: %d", len(worker_pids))
                 task = _normalization_task(event, raw_stage, raw_manifest, base,
-                                           fastf1.__version__, stages_root)
+                                           event_source_version, stages_root,
+                                           _normalization_source_metadata(
+                                               raw_manifest, local_data_only,
+                                               source_version if not local_data_only else None,
+                                               round_scheme if local_data_only else None))
                 try:
                     future_to_id[process_pool.submit(normalize_race_worker, task)] = race_id
                 except Exception as exc:
@@ -787,7 +1020,12 @@ def run(args: argparse.Namespace) -> Path:
             except (OSError, ValueError, KeyError):
                 continue
             event = {**event, **raw_manifest["event"]}
-            fingerprint = _normalization_fingerprint(event, raw_manifest, base, fastf1.__version__)
+            event_source_version = _normalization_source_version(
+                raw_manifest, local_data_only, source_version if not local_data_only else None)
+            raw_stage = raw_root / _safe_id(race_id)
+            fingerprint = _normalization_fingerprint(
+                event, raw_manifest, base, event_source_version,
+                sha256(raw_stage / "raw_manifest.json"))
             stage_result = _valid_race_stage(stages_root / _safe_id(race_id), fingerprint)
             if stage_result is not None:
                 normalized_by_id[race_id] = {**event, **stage_result["event"]}
@@ -797,13 +1035,21 @@ def run(args: argparse.Namespace) -> Path:
         failures = [failure for failure in failures if failure.get("race_id") not in good_ids]
         atomic_json(out / "failed_sessions.json", failures)
         atomic_json(out / "usable_sessions.json", good)
+        if local_data_only and len(good) != len(EXPECTED_2023_RACE_IDS):
+            missing = [event["race_id"] for event in events if event["race_id"] not in good_ids]
+            raise RuntimeError(
+                f"Local-data-only preparation requires all {len(EXPECTED_2023_RACE_IDS)} races; "
+                f"{len(good)} passed existing normalization gates. Failed races: {', '.join(missing)}. "
+                "No partial-season training was started; see failed_sessions.json for sanitized reasons."
+            )
         if len(good) < 3:
             raise RuntimeError(f"Only {len(good)} authentic, gate-passing races; existing race-held-out training requires at least three.")
 
         base["sessions"] = good
         base["session"].update(good[0])
         base["session"]["race_id"] = good[0]["race_id"]
-        base["session"]["cache_dir"] = str(cache_root)
+        if not local_data_only:
+            base["session"]["cache_dir"] = str(cache_root)
         base["session"]["processed_dir"] = str(out / "race_cache/processed")
         base["track"]["lap_length_m"] = good[0]["lap_length_m"]
         base["train"]["checkpoint_path"] = str(out / "training" / "pending" / "best.pt")
@@ -812,7 +1058,9 @@ def run(args: argparse.Namespace) -> Path:
         config_path = out / "season_config.yaml"
         atomic_bytes(config_path, yaml.safe_dump(base, sort_keys=False).encode())
         source_root = out / "race_cache"
-        source_hash = write_normalized_source(stages_root, source_root, config_path, good)
+        source_hash = write_normalized_source(
+            stages_root, source_root, config_path, good,
+            cache_root if not local_data_only else None)
         failure_stage = "validate or prepare graph cohort"
         cohort_fingerprint = _cohort_fingerprint(base, source_hash)
         cohort_prefix = out / "cohorts" / cohort_fingerprint[:20]
@@ -850,14 +1098,16 @@ def run(args: argparse.Namespace) -> Path:
         from train import train_model
 
         cfg = copy.deepcopy(payload["config"])
+        cfg["train"]["log_every_batches"] = log_every_batches
         cfg["train"]["checkpoint_path"] = str(out / "training" / "_path_placeholder" / "best.pt")
         cfg["train"]["history_path"] = str(out / "training" / "_path_placeholder" / "training_history.csv")
         device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
         torch.set_num_threads(args.threads)
         code_inputs = {name: sha256(HERE / "src" / name) for name in ("train.py", "model.py", "dataset.py")}
         train_fingerprint = canonical_hash({"cohort_artifact": manifest["prepared_artifact_sha256"],
-                                            "config": cfg, "code": code_inputs,
-                                            "fastf1": fastf1.__version__, "device": device.type,
+                                            "config": _training_identity_config(cfg), "code": code_inputs,
+                                            "fastf1": source_version, "source_mode": "local-data-only" if local_data_only else "online",
+                                            "device": device.type,
                                             "threads": args.threads})
         training_dir = out / "training" / train_fingerprint[:20]
         training_dir.mkdir(parents=True, exist_ok=True)
@@ -868,7 +1118,8 @@ def run(args: argparse.Namespace) -> Path:
             "fingerprint": train_fingerprint,
             "prepared_artifact_sha256": manifest["prepared_artifact_sha256"],
             "prepared_manifest_sha256": manifest["prepared_manifest_sha256"],
-            "config_sha256": canonical_hash(cfg), "implementation_sha256": code_inputs,
+            "config_sha256": canonical_hash(_training_identity_config(cfg)),
+            "implementation_sha256": code_inputs,
         }
         resume_manifest_path = training_dir / "resume_manifest.json"
         if resume_manifest_path.is_file():
@@ -1024,16 +1275,23 @@ def run(args: argparse.Namespace) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="Reusable run workspace; default .local/research-history/2023-fastf1-season.")
+    parser.add_argument("--local-data-only", action="store_true",
+                        help="Use only a complete, hash-verified local inventory of all 22 authentic 2023 raw race stages; never authenticate, discover events, or download source data.")
+    parser.add_argument("--raw-sessions-dir", type=Path, default=None,
+                        help="Path to the transferred race_cache/raw_sessions directory (required with --local-data-only).")
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--workers", type=int, default=2, help="Bounded I/O validation/export workers (1-8); downloads stay serialized.")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="Bounded raw-session validation workers in online mode (1-8); FastF1 downloads stay serialized.")
     parser.add_argument("--processing-workers", type=int, default=4,
                         help="Independent CPU-only race normalization processes (1-8), memory-capped.")
     parser.add_argument("--torch-threads", "--threads", dest="threads", type=int, default=1,
                         help="PyTorch intra-op CPU threads.")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Training batch size (default: config batch size, e.g. 128 or 256).")
+    parser.add_argument("--log-every-batches", type=int, default=None,
+                        help="Override training progress interval in batches (default: config value, otherwise 10).")
     parser.add_argument("--window-stride", type=int, default=1,
                         help="Temporal window subsampling stride (default: 1; e.g. 2 for 0.5s stride).")
     parser.add_argument("--config", type=Path, default=None,
@@ -1054,9 +1312,14 @@ def main() -> int:
     if (args.epochs < 1 or args.seed < 0 or not 1 <= args.workers <= 8
             or not 1 <= args.processing_workers <= 8 or args.threads < 1
             or (args.batch_size is not None and args.batch_size < 1)
+            or (args.log_every_batches is not None and args.log_every_batches < 1)
             or args.window_stride < 1
             or (args.patience is not None and args.patience < 1)):
-        parser.error("--epochs and --threads must be positive, --seed non-negative, worker counts between 1 and 8, and positive batch-size/window-stride/patience")
+        parser.error("--epochs, --threads, and any supplied logging interval must be positive, --seed non-negative, worker counts between 1 and 8, and positive batch-size/window-stride/patience")
+    if args.local_data_only and args.raw_sessions_dir is None:
+        parser.error("--local-data-only requires --raw-sessions-dir.")
+    if args.raw_sessions_dir is not None and not args.local_data_only:
+        parser.error("--raw-sessions-dir is used only with --local-data-only.")
     try:
         print(run(args))
     except Exception as exc:

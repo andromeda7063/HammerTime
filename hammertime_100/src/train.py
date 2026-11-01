@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 import random
+import time
 import uuid
 import numpy as np
 import torch
@@ -108,8 +109,14 @@ def _scaler_signature(train_loader) -> dict:
 
 
 def _resume_signature(model, train_loader, val_loader, config: dict) -> dict:
+    # Logging cadence is observational and must not make a resumable run appear
+    # incompatible when the user changes how often progress is printed.
+    signature_config = dict(config)
+    if isinstance(signature_config.get("train"), dict):
+        signature_config["train"] = dict(signature_config["train"])
+        signature_config["train"].pop("log_every_batches", None)
     try:
-        config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":"),
+        config_bytes = json.dumps(signature_config, sort_keys=True, separators=(",", ":"),
                                   allow_nan=False, default=str).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError("Training config cannot be fingerprinted for resume.") from exc
@@ -271,6 +278,10 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     if loss_name not in loss_functions:
         raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
     loss_function = loss_functions[loss_name]
+    log_every_batches = t_cfg.get("log_every_batches", 10)
+    if (isinstance(log_every_batches, bool) or not isinstance(log_every_batches, int)
+            or log_every_batches <= 0):
+        raise ValueError("train.log_every_batches must be a positive integer.")
     auxiliary_cfg = config.get("auxiliary", {})
     aux_enabled = bool(auxiliary_cfg.get("future_speed_enabled", False))
     aux_weight = float(auxiliary_cfg.get("future_speed_weight", 0.0)) if aux_enabled else 0.0
@@ -394,12 +405,25 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     else:
         logger.info(f"[*] Running on CPU (CUDA unavailable). (Max epochs: {max_epochs}, Patience: {patience})...")
 
+    total_batches_per_epoch = len(train_loader)
+    total_training_batches = max(0, max_epochs - first_epoch + 1) * total_batches_per_epoch
+    completed_training_batches = 0
+    run_started_at = time.perf_counter()
+    logger.info("Training progress: epochs %d-%d of %d, %d batches/epoch, log every %d batches, device=%s",
+                first_epoch, max_epochs, max_epochs, total_batches_per_epoch,
+                log_every_batches, device)
+
     for epoch in range(first_epoch, max_epochs + 1):
         model.train()
+        epoch_started_at = time.perf_counter()
         epoch_loss = 0.0
         num_batches = 0
+        primary_loss_sum = 0.0
+        primary_valid_count = 0
+        aux_loss_sum = 0.0
+        aux_valid_count = 0
 
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=1):
             if aux_enabled:
                 if len(batch) != 5:
                     raise ValueError("Future-speed auxiliary loss is enabled, but loader batches lack auxiliary targets; rebuild the dataset/cache.")
@@ -419,14 +443,23 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                 aux_preds = aux_outputs["future_speed"]
                 if aux_preds.shape != aux_targets.shape:
                     raise ValueError("Future-speed head horizon/node dimensions do not match dataset labels.")
-                loss = loss_function(preds, targets, masks)
+                primary_loss = loss_function(preds, targets, masks)
                 aux_loss = masked_auxiliary_speed_loss(
                     aux_preds, aux_targets.to(device), aux_masks.to(device), aux_scale_kph, aux_beta
                 )
-                loss = loss + aux_weight * aux_loss
+                loss = primary_loss + aux_weight * aux_loss
+                aux_valid = aux_masks.to(device).bool() & torch.isfinite(aux_targets.to(device))
+                scalar_stats = [
+                    loss.detach(), primary_loss.detach(), masks.bool().sum().to(dtype=loss.dtype),
+                    aux_loss.detach(), aux_valid.sum().to(dtype=loss.dtype),
+                ]
             else:
                 preds = model(batch_snaps)
-                loss = loss_function(preds, targets, masks)
+                primary_loss = loss_function(preds, targets, masks)
+                loss = primary_loss
+                scalar_stats = [
+                    loss.detach(), primary_loss.detach(), masks.bool().sum().to(dtype=loss.dtype),
+                ]
 
             # Immutable Law 9 / Failure Case: NaN Guard
             if not torch.isfinite(loss):
@@ -441,13 +474,61 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            epoch_loss += loss.item()
+            # Transfer only detached scalar diagnostics; never retain graph tensors.
+            stats = torch.stack(scalar_stats).cpu().tolist()
+            batch_objective, batch_primary_loss, batch_primary_count = stats[:3]
+            epoch_loss += batch_objective
             num_batches += 1
+            primary_loss_sum += batch_primary_loss * int(batch_primary_count)
+            primary_valid_count += int(batch_primary_count)
+            if aux_enabled:
+                batch_aux_loss, batch_aux_count = stats[3:]
+                aux_loss_sum += batch_aux_loss * int(batch_aux_count)
+                aux_valid_count += int(batch_aux_count)
+            completed_training_batches += 1
+
+            if (batch_index == 1 or batch_index % log_every_batches == 0
+                    or batch_index == total_batches_per_epoch):
+                elapsed = time.perf_counter() - run_started_at
+                remaining_batches = max(0, total_training_batches - completed_training_batches)
+                eta_seconds = (elapsed / completed_training_batches * remaining_batches
+                               if completed_training_batches else 0.0)
+                epoch_elapsed = max(time.perf_counter() - epoch_started_at, 1e-9)
+                running_primary = primary_loss_sum / max(primary_valid_count, 1)
+                throughput = primary_valid_count / epoch_elapsed
+                primary_unit = "s²" if loss_name == "mse" else "s"
+                progress = (
+                    f"Epoch {epoch:03d}/{max_epochs:03d} batch {batch_index:04d}/"
+                    f"{total_batches_per_epoch:04d} | objective={batch_objective:.6f}"
+                    f" | primary {loss_name}={batch_primary_loss:.6f} {primary_unit}"
+                    f" (running sample-weighted={running_primary:.6f} {primary_unit}, "
+                    f"valid={primary_valid_count})"
+                )
+                if aux_enabled:
+                    running_aux = aux_loss_sum / max(aux_valid_count, 1)
+                    progress += (
+                        f" | aux SmoothL1={batch_aux_loss:.6f} normalized"
+                        f" (weighted={aux_weight * batch_aux_loss:.6f}, "
+                        f"running sample-weighted={running_aux:.6f}, valid={aux_valid_count})"
+                    )
+                progress += (
+                    f" | LR={optimizer.param_groups[0]['lr']:.6g}"
+                    f" | valid_targets/s={throughput:.2f}"
+                    f" | elapsed={elapsed:.1f}s ETA~{eta_seconds:.1f}s"
+                )
+                logger.info(progress)
 
         avg_train_loss = epoch_loss / max(num_batches, 1)
+        train_elapsed = time.perf_counter() - epoch_started_at
+        logger.info("Epoch %03d/%03d validation started after %.1fs of training.",
+                    epoch, max_epochs, train_elapsed)
+        validation_started_at = time.perf_counter()
         val_mae = evaluate_val_mae(model, val_loader, device)
+        validation_elapsed = time.perf_counter() - validation_started_at
         if not np.isfinite(val_mae):
             raise FloatingPointError(f"Non-finite validation MAE at epoch {epoch}.")
+        logger.info("Epoch %03d/%03d validation complete: Val MAE=%.6f s in %.1fs.",
+                    epoch, max_epochs, val_mae, validation_elapsed)
 
         current_lr = float(optimizer.param_groups[0]["lr"])
         history_entry = {
@@ -467,6 +548,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
 
         # Early stopping and checkpointing
         if val_mae < best_val_mae:
+            checkpoint_updated = True
             best_val_mae = val_mae
             best_epoch = epoch
             patience_counter = 0
@@ -492,10 +574,28 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             _atomic_torch_save(checkpoint, ckpt_path)
             logger.info(f"[*] Best model updated. Saved checkpoint to {ckpt_path} (Val MAE: {val_mae:.4f} s)")
         else:
+            checkpoint_updated = False
             patience_counter += 1
 
         if scheduler is not None:
             scheduler.step(val_mae)
+
+        primary_epoch_loss = primary_loss_sum / max(primary_valid_count, 1)
+        primary_unit = "s²" if loss_name == "mse" else "s"
+        epoch_summary = (
+            f"Epoch {epoch:03d}/{max_epochs:03d} summary | train objective={avg_train_loss:.6f}"
+            f" | sample-weighted primary {loss_name}={primary_epoch_loss:.6f} {primary_unit}"
+            f" ({primary_valid_count} valid targets)"
+            f" | Val MAE={val_mae:.6f} s | train={train_elapsed:.1f}s"
+            f" validation={validation_elapsed:.1f}s"
+            f" | LR={current_lr:.6g} | best checkpoint={'updated' if checkpoint_updated else 'unchanged'}"
+        )
+        if aux_enabled:
+            mean_aux_loss = aux_loss_sum / max(aux_valid_count, 1)
+            epoch_summary += (f" | sample-weighted aux SmoothL1={mean_aux_loss:.6f} normalized"
+                              f" ({aux_valid_count} valid auxiliary labels, "
+                              f"weighted={aux_weight * mean_aux_loss:.6f})")
+        logger.info(epoch_summary)
 
         # Persist only at complete-epoch boundaries. This file is separate from
         # best.pt so a restart can continue Adam and early stopping exactly.
@@ -536,7 +636,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         # A resume from an already completed budget can return its prior score.
         if resume_from is None or best_epoch == 0:
             raise RuntimeError("Training did not produce a finite validation score; no usable checkpoint was saved.")
-    logger.info("Saved training history to %s", history_path)
+    logger.info("Training finished: best Val MAE=%.6f s at epoch %d; history=%s",
+                best_val_mae, best_epoch, history_path)
     return best_val_mae, history
 
 

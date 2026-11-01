@@ -46,7 +46,7 @@ Race identifiers must be unique. Each session gets its own FastF1 cache subdirec
 
 ### GNNv2 research configuration
 
-The opt-in GNNv2 configuration retains the physical-v2 node and edge widths, hidden width and head count, window length, forecast horizon, split, primary target, metrics, acceptance gates, and physics thresholds. It enables active-node-only normalization and propagation, typed edge-conditioned messages, a third same-width spatial attention layer, and an auxiliary decoder trained on aligned speed metadata from the five future frames of eligible windows. It also enables an own-car bypass: an independent MLP reads the final observed frame's scaled node features and adds a zero-initialized correction to the graph-temporal prediction. The bypass contribution is masked for nodes inactive in that final input frame; it does not change the target-validity or coverage rules. Model defaults retain two spatial layers and disable the own-car branch, so existing configurations keep the legacy model structure. Auxiliary labels are supervision only; they are not added to node features. The aligned values inherit the existing interpolation behavior and do not represent raw-channel observation masks. The third layer and bypass are candidate changes, not measured improvements, and their runtime impact has not been measured. To prepare and run this configuration on authentic 2023 FastF1 data, use a dedicated output directory:
+The opt-in GNNv2 configuration retains the physical-v2 node and edge widths, hidden width and head count, window length, forecast horizon, split, primary target, metrics, acceptance gates, and physics thresholds. It enables active-node-only normalization and propagation, typed edge-conditioned messages, a third same-width spatial attention layer, and an auxiliary decoder trained on aligned speed metadata from the five future frames of eligible windows. It also enables an own-car bypass: an independent MLP reads the final observed frame's scaled node features and adds a zero-initialized correction to the graph-temporal prediction. The bypass contribution is masked for nodes inactive in that final input frame; it does not change the target-validity or coverage rules. Model defaults retain two spatial layers and disable the own-car branch, so existing configurations keep the legacy model structure. Auxiliary labels are supervision only; they are not added to node features. The aligned values inherit the existing interpolation behavior and do not represent raw-channel observation masks. The third layer and bypass are candidate changes, not measured improvements, and their runtime impact has not been measured. The following command uses authenticated online acquisition and may request FastF1 source data:
 
 ```bash
 uv run --frozen python hammertime_100/run_2023_fastf1_season.py --config hammertime_100/configs/train_2023_fastf1_season_gnnv2.yaml --output .local/research-history/2023-fastf1-gnnv2
@@ -54,7 +54,18 @@ uv run --frozen python hammertime_100/run_2023_fastf1_season.py --config hammert
 
 The runner uses the existing season-held-out protocol and unchanged evaluation gates. Do not interpret a successful preparation or training run as a performance result; record the prepared manifest and held-out evaluation before making a research claim.
 
-For native Windows setup on an RTX 4060, PowerShell cache transfer, CUDA readiness check, credentials, and season-runner instructions, see the [Windows GNNv2 GPU runbook](hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md).
+For native Windows setup on an RTX 4060, PowerShell raw-data transfer, CUDA readiness check, and season-runner instructions, see the [Windows GNNv2 GPU runbook](hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md).
+
+For a run that must not authenticate to FastF1 or request race data, transfer the complete `race_cache/raw_sessions` directory from a trusted source run and use local-data-only mode. It verifies hashes and the full registered 22-race inventory before normalization; missing or invalid races stop the run without a network fallback. Hash checks detect transfer corruption, while the manifests do not cryptographically attest data origin. Dependency installation may still access package indexes, but this mode does not use FastF1 authentication, calendar discovery, or source downloads:
+
+```bash
+uv run --frozen python hammertime_100/run_2023_fastf1_season.py \
+  --config hammertime_100/configs/train_2023_fastf1_season_gnnv2.yaml \
+  --output .local/research-history/2023-fastf1-gnnv2 \
+  --local-data-only \
+  --raw-sessions-dir .local/research-history/2023-fastf1-gnnv2/race_cache/raw_sessions \
+  --device cuda --epochs 30 --window-stride 2 --log-every-batches 10
+```
 
 Sessions for a different circuit must supply their own positive `lap_length_m`; they cannot inherit Monza's geometry. Repeated source sessions under different IDs and IDs that map to the same directory are rejected.
 

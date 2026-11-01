@@ -1,8 +1,8 @@
 # Run GNNv2 on native Windows with an RTX 4060
 
-This runbook transfers the pushed `codex/gnnv2` branch to a Windows laptop and runs the 2023 FastF1 season workflow with the RTX 4060. It uses PowerShell and `uv`. It does not require copying a Python virtual environment, and it keeps old research artifacts separate from the new run.
+This runbook transfers the pushed `codex/gnnv2` branch and authentic raw race tables to a native Windows laptop, then runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
 
-The target revision is `b4da63a92851a3e405466c021036251de3e26b24` (`b4da63a`). The GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner's CLI defaults override two YAML values: it defaults to 25 epochs and window stride 1. The run command below passes `--epochs 30 --window-stride 2` to retain the config's settings.
+Clone the current `codex/gnnv2` branch. The GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.
 
 ## Install the Windows tools
 
@@ -30,10 +30,10 @@ $Repo = 'C:\F1\HammerTime'
 git clone --branch codex/gnnv2 --single-branch https://github.com/andromeda7063/HammerTime.git $Repo
 Set-Location $Repo
 $RunOut = Join-Path $Repo '.local\research-history\2023-fastf1-gnnv2-windows'
-git rev-parse --short HEAD
+git branch --show-current
 ```
 
-The last command should print `b4da63a` unless the branch has since advanced.
+The last command should print `codex/gnnv2`.
 
 ## Install the locked Python environment
 
@@ -44,20 +44,19 @@ uv python install 3.12
 uv sync --frozen --python 3.12
 ```
 
-On native Windows, the PyTorch wheel selected by `uv.lock` is the standard Windows wheel, which does not enable CUDA in this project setup. For the GPU run, create a per-command overlay with the official PyTorch 2.14.1 CUDA 13.0 wheel and the FastF1 version required by the season runner. This leaves `uv.lock` unchanged:
+On native Windows, the PyTorch wheel selected by `uv.lock` is the standard Windows wheel, which does not enable CUDA in this project setup. For the GPU run, create a per-command overlay with the official PyTorch 2.14.1 CUDA 13.0 wheel. This leaves `uv.lock` unchanged:
 
 ```powershell
 $TorchCuda = 'torch @ https://download-r2.pytorch.org/whl/cu130/torch-2.14.1%2Bcu130-cp312-cp312-win_amd64.whl'
 $GpuRun = @(
     'run', '--frozen', '--python', '3.12',
-    '--with', 'fastf1==3.9.0',
     '--with', $TorchCuda
 )
 ```
 
 Keep this PowerShell session open through the run. If you open another session, recreate `$TorchCuda` and `$GpuRun` there.
 
-The extra FastF1 version is needed because the lock currently pins 3.8.3 while `run_2023_fastf1_season.py` requires FastF1 3.9.0 or newer for account authentication. The CUDA overlay uses the same PyTorch release as the lock but the official `cu130` Windows build. The wheel is about 2 GB, so allow time and disk space for uv to cache it. Do not use `uv pip install` to mutate the environment or `--torch-backend` here; the overlay is applied to each `uv run` command.
+The CUDA overlay uses the same PyTorch release as the lock but the official `cu130` Windows build. The wheel is about 2 GB, so allow time and disk space for uv to cache it. Do not use `uv pip install` to mutate the environment or `--torch-backend` here; the overlay is applied to each `uv run` command.
 
 ## Check that the overlay can use CUDA
 
@@ -83,53 +82,24 @@ if ($LASTEXITCODE -ne 0) { throw 'GPU readiness check failed; do not start train
 
 Continue only if it reports CUDA available and names the RTX 4060. If it fails, stop before the long season run and resolve the driver or wheel issue first. This check imports the third-party libraries only; it does not import or run HammerTime.
 
-## Transfer reusable data from the pendrive
+## Transfer the authentic raw race tables
 
-The workflow needs FastF1 credentials and network access even when caches are present, because it authenticates before event discovery. Enter the credentials for the FastF1 account in the current PowerShell session; the password is read without echoing and is not put in a command literal:
+Only the raw-session archive is needed from the source laptop. It contains about 1.1 GB of per-race Parquet tables and `raw_manifest.json` files. Do not copy `.env`, credentials, the FastF1 HTTP cache, old prepared cohorts, or old checkpoints. Copy this archive from a trusted source run: the runner checks manifest FastF1 provenance, event identity, round-number scheme, byte counts, and SHA256 hashes to detect transfer corruption, but the manifests are not cryptographic attestations of data origin. The raw tables must cover every race in the 22-race registry. It accepts the source archive's consistent completed-race rounds 1–22 or a consistent published-calendar numbering (1–5, then 7–23). Missing, corrupt, duplicate/inconsistent, or unregistered sessions stop the run; the program never falls back to a FastF1 request.
 
-```powershell
-$env:F1_USERNAME = Read-Host 'FastF1 username'
-$SecurePassword = Read-Host 'FastF1 password' -AsSecureString
-$env:F1_PASSWORD = [System.Net.NetworkCredential]::new('', $SecurePassword).Password
-```
-
-Do not copy `.env` or saved credentials from the old laptop. The runner reads `F1_USERNAME` and `F1_PASSWORD` from the process environment or a repository-root `.env`; it sets the FastF1 authentication method internally. Clear the temporary environment values when finished:
-
-```powershell
-Remove-Item Env:F1_USERNAME -ErrorAction SilentlyContinue
-Remove-Item Env:F1_PASSWORD -ErrorAction SilentlyContinue
-```
-
-The copied FastF1 cache and the old season output are ignored by Git. Paths observed on the source machine:
-
-- `hammertime_100/data/cache/fastf1-2023-authenticated` — about 2.5 GB; this is the runner's FastF1 cache location relative to the cloned repository.
-- `.local/research-history/2023-fastf1-season/race_cache/raw_sessions` — about 1.1 GB; raw per-race FastF1 tables and hash manifests can be reused when their recorded FastF1 version and hashes match.
-- The full old `.local/research-history/2023-fastf1-season` directory — about 11 GB, including old normalized tables, prepared cohorts, checkpoints, and reports.
-
-To reuse the FastF1 cache, set `$UsbRoot` to the directory on the pendrive that contains the old repository's `hammertime_100` and `.local` folders, then copy the cache to the runner's expected repository-relative path:
+Set `$UsbRoot` to the pendrive folder containing the old `.local` directory, then copy raw sessions into this run's output tree:
 
 ```powershell
 $UsbRoot = 'E:\HammerTime' # Change this to the pendrive path.
-$FastF1CacheSource = Join-Path $UsbRoot 'hammertime_100\data\cache\fastf1-2023-authenticated'
-$FastF1CacheTarget = Join-Path $Repo 'hammertime_100\data\cache\fastf1-2023-authenticated'
-if (Test-Path $FastF1CacheSource) {
-    robocopy $FastF1CacheSource $FastF1CacheTarget /E /COPY:DAT /DCOPY:DAT /R:1 /W:1
-}
-```
-
-To reuse raw per-race tables, copy only the raw stage into the new output directory. This keeps the existing archive intact and gives the new run its own log, prepared cohort, and training outputs:
-
-```powershell
 $RawSource = Join-Path $UsbRoot '.local\research-history\2023-fastf1-season\race_cache\raw_sessions'
 $RawTarget = Join-Path $RunOut 'race_cache\raw_sessions'
-if (Test-Path $RawSource) {
-    robocopy $RawSource $RawTarget /E /COPY:DAT /DCOPY:DAT /R:1 /W:1
-}
+if (-not (Test-Path $RawSource)) { throw "Raw source directory is missing: $RawSource" }
+robocopy $RawSource $RawTarget /E /COPY:DAT /DCOPY:DAT /R:1 /W:1
+if ($LASTEXITCODE -ge 8) { throw "Raw-session copy failed with robocopy exit code $LASTEXITCODE" }
 ```
 
-`robocopy` exit codes 0–7 are success/informational; 8 or higher means a copy failure. If the pendrive backup has a different root, change `$UsbRoot`; if these source paths are absent, skip the copies and let FastF1 reacquire data. Keep the complete old output as an archive if desired, but do not copy its `.venv` or `.env`.
+`robocopy` exit codes 0–7 are success/informational. If the pendrive backup has a different root, change `$UsbRoot`. A complete raw archive is required; the run will not proceed with partial coverage.
 
-The raw stage is the useful transferable cache. Normalized stage manifests record absolute source paths, and prepared cohort manifests validate their absolute artifact path and configuration/source hashes. The old prepared cohorts (about 8.6 GB total) therefore will be rebuilt or rejected after transfer; the old training checkpoints also do not match the new three-layer/own-car configuration and CUDA run identity. Do not use the tracked historical `hammertime_100/best.pt` as the GNNv2 checkpoint.
+The target creates new normalized tables, prepared cohort, checkpoints, and reports under `$RunOut`. Do not transfer old prepared cohorts or checkpoints; their absolute paths and earlier model/configuration signatures do not match this run. Do not use the tracked historical `hammertime_100/best.pt` as the GNNv2 checkpoint. No FastF1 account credentials are needed in local-data-only mode.
 
 ## Run the 2023 FastF1 season workflow
 
@@ -145,12 +115,15 @@ $env:PYTHONUTF8 = '1' # Optional: helps Windows terminals handle Unicode race/se
     --window-stride 2 `
     --workers 1 `
     --processing-workers 1 `
-    --torch-threads 1
+    --torch-threads 1 `
+    --local-data-only `
+    --raw-sessions-dir $RawTarget `
+    --log-every-batches 10
 ```
 
 The config's batch size of 256 is used because `--batch-size` is omitted. If training reports CUDA out-of-memory, retry with `--batch-size 128`, then 64 if needed. A changed batch size creates a different training fingerprint and a distinct output under `training`; record the value used. The conservative worker counts keep CPU preprocessing/export parallelism low while the model trains on the GPU.
 
-The runner performs calendar discovery, authentic data acquisition or raw-cache reuse, preprocessing, coverage checks, graph preparation, training, held-out evaluation, and exports. The first full run can take substantial time, particularly for the season data preparation; no duration or score is guaranteed. Check the run log and then inspect:
+The runner verifies all 22 local source manifests, preprocesses the raw tables, applies existing coverage checks, prepares the graph cohort, trains, evaluates on the existing held-out split, and exports artifacts. It makes no FastF1 source requests in local-data-only mode. The first full run can take substantial time, particularly during season-data preparation; no duration or score is guaranteed. Training progress is logged on the first batch and every 10 batches after that. Check the run log and then inspect:
 
 - `$RunOut\usable_sessions.json` and `failed_sessions.json` for race coverage;
 - `$RunOut\training\<fingerprint>\best.pt` and `training_history.csv` for the selected validation checkpoint and history;
