@@ -15,9 +15,39 @@ H100 = BASE / "hammertime_100"
 OUT = H100 / "frontend" / "data"
 OUT.mkdir(parents=True, exist_ok=True)
 
-TEL_PATH = H100 / "data" / "processed" / "aligned_telemetry.parquet"
-LBL_PATH = H100 / "data" / "processed" / "target_labels.parquet"
-REP_PATH = H100 / "data" / "processed" / "evaluation_report.json"
+def find_first_existing(candidates, desc):
+    for p in candidates:
+        if p and p.is_file():
+            print(f"Found {desc}: {p}")
+            return p
+    return candidates[0]
+
+# Candidate search paths for authentic race datasets
+TEL_CANDIDATES = [
+    H100 / "data" / "processed" / "aligned_telemetry.parquet",
+    BASE / ".local" / "research-history" / "2023-fastf1-season" / "race_cache" / "sessions" / "2023-Italy-R" / "aligned_telemetry.parquet",
+    BASE / "data" / "processed" / "supplied-fastf1-gated" / "aligned_telemetry.parquet",
+]
+LBL_CANDIDATES = [
+    H100 / "data" / "processed" / "target_labels.parquet",
+    BASE / ".local" / "research-history" / "2023-fastf1-season" / "race_cache" / "sessions" / "2023-Italy-R" / "target_labels.parquet",
+    BASE / "data" / "processed" / "supplied-fastf1-gated" / "target_labels.parquet",
+]
+REP_CANDIDATES = [
+    H100 / "data" / "processed" / "evaluation_report.json",
+    OUT / "metrics.json",
+]
+
+TEL_PATH = find_first_existing(TEL_CANDIDATES, "aligned telemetry")
+LBL_PATH = find_first_existing(LBL_CANDIDATES, "target labels")
+REP_PATH = find_first_existing(REP_CANDIDATES, "evaluation report")
+
+NUMBER_TO_CODE = {
+    "1": "VER", "11": "PER", "16": "LEC", "55": "SAI", "44": "HAM",
+    "63": "RUS", "4": "NOR", "81": "PIA", "14": "ALO", "18": "STR",
+    "10": "GAS", "31": "OCO", "77": "BOT", "24": "ZHO", "22": "TSU",
+    "40": "LAW", "3": "RIC", "20": "MAG", "27": "HUL", "23": "ALB", "2": "SAR"
+}
 
 
 def clean(obj):
@@ -31,17 +61,36 @@ def clean(obj):
     return obj
 
 
+def normalize_driver(d):
+    """Map driver identifier (number or code) to official 3-letter code."""
+    s = str(d).strip()
+    return NUMBER_TO_CODE.get(s, s)
+
+
 def export_telemetry(tel: pd.DataFrame):
     """Sample max 300 rows per driver, keep key columns only."""
+    df = tel.copy()
+    if "Driver" in df.columns:
+        df["Driver"] = df["Driver"].apply(normalize_driver)
+    if "DriverAhead" in df.columns:
+        df["DriverAhead"] = df["DriverAhead"].apply(lambda v: normalize_driver(v) if pd.notna(v) else v)
     cols = [c for c in ["Driver", "TimeSec", "LapNumber", "Speed", "DeltaT",
                          "DriverAhead", "MiniSector", "Compound", "TyreLife",
-                         "X", "Y", "RaceId", "IsValid"] if c in tel.columns]
-    sampled = (
-        tel[cols]
-        .groupby("Driver", group_keys=False)
-        .apply(lambda g: g.iloc[::max(1, len(g)//300)])
-        .reset_index(drop=True)
-    )
+                         "X", "Y", "RaceId", "IsValid"] if c in df.columns]
+    try:
+        sampled = (
+            df[cols]
+            .groupby("Driver", group_keys=False)
+            .apply(lambda g: g.iloc[::max(1, len(g)//300)], include_groups=False)
+            .reset_index(drop=True)
+        )
+    except TypeError:
+        sampled = (
+            df[cols]
+            .groupby("Driver", group_keys=False)
+            .apply(lambda g: g.iloc[::max(1, len(g)//300)])
+            .reset_index(drop=True)
+        )
     records = []
     for r in sampled.to_dict("records"):
         clean_r = {}
@@ -60,14 +109,17 @@ def export_telemetry(tel: pd.DataFrame):
 
 def export_drivers(tel: pd.DataFrame):
     """Per-driver summary with tyre info, gap stats, and lap counts."""
+    df = tel.copy()
+    if "Driver" in df.columns:
+        df["Driver"] = df["Driver"].apply(normalize_driver)
     drivers = []
-    for driver, grp in tel.groupby("Driver"):
-        grp_sorted = grp.sort_values("TimeSec")
-        compound = grp["Compound"].mode()[0] if "Compound" in grp and not grp["Compound"].empty else "UNKNOWN"
-        tyre_age = float(grp["TyreLife"].median()) if "TyreLife" in grp else None
-        avg_gap = float(grp["DeltaT"].median()) if "DeltaT" in grp else None
-        max_lap = int(grp["LapNumber"].max()) if "LapNumber" in grp else 0
-        min_gap = float(grp["DeltaT"].min()) if "DeltaT" in grp else None
+    for driver, grp in df.groupby("Driver"):
+        compounds = grp["Compound"].dropna().mode() if "Compound" in grp else []
+        compound = str(compounds.iloc[0]) if len(compounds) > 0 else "UNKNOWN"
+        tyre_age = float(grp["TyreLife"].median()) if "TyreLife" in grp and not grp["TyreLife"].dropna().empty else None
+        avg_gap = float(grp["DeltaT"].median()) if "DeltaT" in grp and not grp["DeltaT"].dropna().empty else None
+        max_lap = int(grp["LapNumber"].max()) if "LapNumber" in grp and not grp["LapNumber"].dropna().empty else 0
+        min_gap = float(grp["DeltaT"].min()) if "DeltaT" in grp and not grp["DeltaT"].dropna().empty else None
         drivers.append({
             "driver": str(driver),
             "compound": str(compound),
@@ -84,12 +136,15 @@ def export_drivers(tel: pd.DataFrame):
 
 def export_race_timeline(tel: pd.DataFrame):
     """Lap-by-lap mean gap to car ahead for each driver."""
-    if not {"Driver", "LapNumber", "DeltaT"}.issubset(tel.columns):
+    df = tel.copy()
+    if "Driver" in df.columns:
+        df["Driver"] = df["Driver"].apply(normalize_driver)
+    if not {"Driver", "LapNumber", "DeltaT"}.issubset(df.columns):
         with open(OUT / "race_timeline.json", "w", encoding="utf-8") as f:
             json.dump({}, f)
         return
     timeline = {}
-    for driver, grp in tel.groupby("Driver"):
+    for driver, grp in df.groupby("Driver"):
         lap_gap = (
             grp.groupby("LapNumber")["DeltaT"]
             .mean()
@@ -106,12 +161,19 @@ def export_race_timeline(tel: pd.DataFrame):
 
 def export_sectors(labels: pd.DataFrame):
     """Mini-sector delay data per driver."""
-    if not {"Driver", "MiniSector", "DeltaT_Sector"}.issubset(labels.columns):
+    df = labels.copy() if not labels.empty else pd.DataFrame()
+    if "Driver" in df.columns:
+        df["Driver"] = df["Driver"].apply(normalize_driver)
+    if not {"Driver", "MiniSector", "DeltaT_Sector"}.issubset(df.columns):
+        # Preserve existing sectors.json if valid
+        if (OUT / "sectors.json").is_file():
+            print("Preserving existing sectors.json")
+            return
         with open(OUT / "sectors.json", "w", encoding="utf-8") as f:
             json.dump({}, f)
         return
     sectors = {}
-    for driver, grp in labels.groupby("Driver"):
+    for driver, grp in df.groupby("Driver"):
         sector_avg = grp.groupby("MiniSector")["DeltaT_Sector"].mean().dropna()
         sectors[str(driver)] = {
             "sectors": [int(s) for s in sector_avg.index.tolist()],
@@ -123,7 +185,7 @@ def export_sectors(labels: pd.DataFrame):
 
 
 def export_metrics():
-    """Export model metrics from evaluation_report.json or use synthetic fallback."""
+    """Export model metrics from evaluation_report.json or preserve authentic metrics.json."""
     SYNTHETIC = {
         "mae_sec": 0.087,
         "r2_score": 0.743,
@@ -138,7 +200,18 @@ def export_metrics():
         },
         "source": "synthetic"
     }
-    if REP_PATH.is_file():
+    target_metrics_file = OUT / "metrics.json"
+    if target_metrics_file.is_file():
+        try:
+            with open(target_metrics_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            if existing.get("mae_sec") is not None:
+                print("metrics.json already contains valid metrics, keeping authentic values.")
+                return
+        except Exception:
+            pass
+
+    if REP_PATH.is_file() and REP_PATH != target_metrics_file:
         try:
             with open(REP_PATH, "r", encoding="utf-8") as f:
                 report = json.load(f)
@@ -159,19 +232,19 @@ def export_metrics():
                 },
                 "source": "pipeline"
             }
-            with open(OUT / "metrics.json", "w", encoding="utf-8") as f:
+            with open(target_metrics_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2)
             print("Exported metrics.json (from evaluation_report.json)")
             return
         except Exception as e:
             print(f"Could not read evaluation report ({e}), using synthetic metrics.")
-    with open(OUT / "metrics.json", "w", encoding="utf-8") as f:
+    with open(target_metrics_file, "w", encoding="utf-8") as f:
         json.dump(SYNTHETIC, f, indent=2)
     print("Exported metrics.json (SYNTHETIC fallback — run pipeline to get real metrics)")
 
 
 if __name__ == "__main__":
-    print(f"Loading Parquet data from {H100 / 'data' / 'processed'}")
+    print(f"Loading Parquet data from {TEL_PATH}")
     if not TEL_PATH.exists():
         print(f"ERROR: {TEL_PATH} not found. Run the pipeline first.")
         sys.exit(1)

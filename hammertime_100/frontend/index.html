@@ -21,6 +21,14 @@
       <span class="ticker-item">WEATHER: 28°C TRACK: 42°C DRY</span>
       <span class="ticker-item">GRAPH: 20 NODES · DYNAMIC RBF GAUSSIAN EDGES</span>
       <span class="ticker-item">PHYSICS GATES: ALL PASSED</span>
+      <!-- Seamless loop duplicate -->
+      <span class="ticker-live"><span class="pulsing-dot"></span> LIVE INFERENCE</span>
+      <span class="ticker-item">FIA FORMULA 1 WORLD CHAMPIONSHIP™</span>
+      <span class="ticker-item">AUTODROMO NAZIONALE MONZA</span>
+      <span class="ticker-item">53 LAPS · 5.793 KM</span>
+      <span class="ticker-item">WEATHER: 28°C TRACK: 42°C DRY</span>
+      <span class="ticker-item">GRAPH: 20 NODES · DYNAMIC RBF GAUSSIAN EDGES</span>
+      <span class="ticker-item">PHYSICS GATES: ALL PASSED</span>
     </div>
   </aside>
 
@@ -83,7 +91,12 @@
   <nav class="nav-bar" id="main-nav">
     <div class="nav-container">
       <div class="nav-brand"><span class="text-red">HT</span> · CONTROL ROOM</div>
-      <div class="nav-links">
+      <button class="nav-toggle" id="navToggle" aria-label="Toggle navigation menu" aria-expanded="false">
+        <span class="nav-toggle-bar"></span>
+        <span class="nav-toggle-bar"></span>
+        <span class="nav-toggle-bar"></span>
+      </button>
+      <div class="nav-links" id="navLinks">
         <a href="#track-section" class="nav-link active">Live Track Map</a>
         <a href="#telemetry-section" class="nav-link">Driver Telemetry</a>
         <a href="#model-section" class="nav-link">Model Intelligence</a>
@@ -139,7 +152,7 @@
 
           <!-- HTML5 Canvas -->
           <div class="canvas-wrapper">
-            <canvas id="monzaCanvas" width="940" height="520"></canvas>
+            <canvas id="monzaCanvas" width="940" height="520" role="img" aria-label="Interactive telemetry track map of Autodromo Nazionale Monza with 20 F1 cars and aerodynamic wake graph edges"></canvas>
             
             <!-- In-Canvas Corner Overlays -->
             <div class="canvas-legend-overlay">
@@ -151,23 +164,23 @@
 
           <!-- Track Controls -->
           <div class="track-controls-bar">
-            <button id="btnPlayPause" class="btn-f1 btn-primary" title="Play or Pause Animation">
+            <button id="btnPlayPause" class="btn-f1 btn-primary" title="Play or Pause Animation" aria-label="Pause or play race simulation">
               <span id="playIcon">⏸</span> <span id="playText">PAUSE</span>
             </button>
-            <button id="btnResetTrack" class="btn-f1 btn-secondary" title="Reset Grid to Start">
+            <button id="btnResetTrack" class="btn-f1 btn-secondary" title="Reset Grid to Start" aria-label="Reset simulation to lap start">
               ↺ RESET
             </button>
             
-            <div class="speed-toggle-group">
+            <div class="speed-toggle-group" role="group" aria-label="Simulation speed">
               <span class="control-label">Speed:</span>
-              <button class="speed-btn active" data-speed="1">1x</button>
-              <button class="speed-btn" data-speed="2">2x</button>
-              <button class="speed-btn" data-speed="5">5x</button>
+              <button class="speed-btn active" data-speed="1" aria-pressed="true">1x</button>
+              <button class="speed-btn" data-speed="2" aria-pressed="false">2x</button>
+              <button class="speed-btn" data-speed="5" aria-pressed="false">5x</button>
             </div>
 
             <div class="scrubber-wrap">
               <label for="timeScrubber" class="control-label">Timeline Scrub:</label>
-              <input type="range" id="timeScrubber" min="0" max="100" value="0" step="0.1" class="f1-range">
+              <input type="range" id="timeScrubber" min="0" max="100" value="0" step="0.1" class="f1-range" aria-label="Lap progression timeline scrubber" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             </div>
 
             <div class="hud-telemetry" id="focusedDriverHud">
@@ -269,7 +282,7 @@
             <div class="metric-badge" id="telemetryMaxSpeed">MAX: 346 km/h</div>
           </div>
           <div class="chart-container">
-            <canvas id="speedTraceCanvas" width="600" height="230"></canvas>
+            <canvas id="speedTraceCanvas" width="600" height="230" role="img" aria-label="Lap speed profile trace along the 5,793 meter Monza circuit with chicane braking points"></canvas>
           </div>
           <div class="chart-footer-metrics">
             <div class="footer-metric">
@@ -282,7 +295,7 @@
             </div>
             <div class="footer-metric">
               <span class="fm-label">Throttle % Full:</span>
-              <span class="fm-val text-green">83.2%</span>
+              <span class="fm-val text-green" id="telemetryThrottlePct">83.2%</span>
             </div>
           </div>
         </div>
@@ -297,7 +310,7 @@
             <div class="metric-badge badge-orange" id="telemetryAvgGap">AVG GAP: 1.42s</div>
           </div>
           <div class="chart-container">
-            <canvas id="gapHistoryCanvas" width="600" height="230"></canvas>
+            <canvas id="gapHistoryCanvas" width="600" height="230" role="img" aria-label="Authentic lap-by-lap interval history to preceding car with dirty air interference bands"></canvas>
           </div>
           <div class="chart-footer-metrics">
             <div class="footer-metric">
@@ -605,17 +618,22 @@
     </div>
   </footer>
 
-  <!-- Lightbox Modal for Gallery Images -->
-  <div class="lightbox-modal" id="lightboxModal" aria-hidden="true">
+  <!-- Lightbox Modal for Gallery Images & Broadcast Cards -->
+  <div class="lightbox-modal" id="lightboxModal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="lightboxTitle">
     <div class="lightbox-overlay" id="lightboxOverlay"></div>
     <div class="lightbox-content">
-      <button class="lightbox-close" id="lightboxClose" aria-label="Close Lightbox">✕</button>
-      <div class="lightbox-header">
+      <div class="lightbox-top-bar">
         <span class="lightbox-tag" id="lightboxTag">V1 · TRACK MAP</span>
-        <h3 class="lightbox-title" id="lightboxTitle">Visual Artifact</h3>
+        <div class="lightbox-actions">
+          <a id="lightboxRawBtn" href="#" target="_blank" rel="noopener" class="lightbox-action-btn" title="Open full resolution in new tab">↗ View Full</a>
+          <button class="lightbox-close" id="lightboxClose" aria-label="Close Lightbox">✕</button>
+        </div>
       </div>
+      <h3 class="lightbox-title" id="lightboxTitle">Visual Artifact</h3>
       <div class="lightbox-body" id="lightboxBody">
+        <button class="lightbox-nav-btn prev" id="lightboxPrevBtn" aria-label="Previous artifact" title="Previous artifact (Left arrow)">‹</button>
         <img id="lightboxImg" src="" alt="F1 Diagnostic Chart" class="lightbox-img">
+        <button class="lightbox-nav-btn next" id="lightboxNextBtn" aria-label="Next artifact" title="Next artifact (Right arrow)">›</button>
       </div>
       <p class="lightbox-caption" id="lightboxCaption">Description of the analytical graphic</p>
     </div>
