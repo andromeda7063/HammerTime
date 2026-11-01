@@ -173,6 +173,10 @@ Aux-enabled prepared cohorts fail closed when these fields are absent or malform
 
 Extended the opt-in GNNv2 season configuration to use a third same-width, same-head spatial attention layer and an independent own-car MLP bypass from the final observed scaled node features. The own-car MLP emits an additive scalar correction; its final layer is zero-initialized by the model implementation and its contribution is zero for nodes inactive in the final input snapshot. The existing feature width, hidden width, attention-head count, temporal window, forecast horizon, target, split, metrics, acceptance gates, and physics thresholds are unchanged. Model defaults remain two spatial layers with the bypass disabled, preserving existing configuration behavior. Configuration validation restricts spatial depth to two or three, requires a boolean bypass flag, and validates a supplied positive hidden dimension. This is an implementation candidate; no tests, imports, training, benchmarks, runtime measurements, or held-out evaluation were run, and no improvement is claimed.
 
+## Native Windows GPU transfer and run guide — 2026-11-01
+
+Added [`hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md`](hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md) with PowerShell instructions for cloning `codex/gnnv2`, setting up Python 3.12 with `uv --frozen`, applying the official PyTorch CUDA wheel and FastF1 3.9.0 per-command overlays, checking RTX 4060 availability, setting FastF1 credentials for one terminal session, optionally reusing verified raw caches from removable media, and running the season workflow. It documents that older normalized/prepared artifacts and checkpoints are not guaranteed portable or resumable across paths, model configs, or devices. No environment setup or project execution was performed for this documentation change.
+
 
 
 

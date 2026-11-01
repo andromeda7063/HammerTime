@@ -54,6 +54,8 @@ uv run --frozen python hammertime_100/run_2023_fastf1_season.py --config hammert
 
 The runner uses the existing season-held-out protocol and unchanged evaluation gates. Do not interpret a successful preparation or training run as a performance result; record the prepared manifest and held-out evaluation before making a research claim.
 
+For native Windows setup on an RTX 4060, PowerShell cache transfer, CUDA readiness check, credentials, and season-runner instructions, see the [Windows GNNv2 GPU runbook](hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md).
+
 Sessions for a different circuit must supply their own positive `lap_length_m`; they cannot inherit Monza's geometry. Repeated source sessions under different IDs and IDs that map to the same directory are rejected.
 
 ### OpenF1 Monza 2023
