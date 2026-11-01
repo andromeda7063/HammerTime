@@ -175,6 +175,49 @@ class TrainResumeTests(unittest.TestCase):
                 train_module.train_model(TinyRegressor(), changed_scaler, TinyLoader(seed=91),
                                          config, torch.device("cpu"), resume_from=last_path)
 
+    def test_resume_after_epoch_budget_or_early_stop_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            budget_dir = Path(temporary) / "budget"
+            budget_dir.mkdir()
+            budget_config = self._config(budget_dir)
+            self._seed(44)
+            budget_model = TinyRegressor()
+            budget_train, budget_val = TinyLoader(), TinyLoader(seed=91)
+            budget_score, budget_history = train_module.train_model(
+                budget_model, budget_train, budget_val, budget_config, torch.device("cpu"))
+            best_path, last_path = budget_dir / "best.pt", budget_dir / "best.last.pt"
+            best_bytes, last_bytes = best_path.read_bytes(), last_path.read_bytes()
+            resumed_score, resumed_history = train_module.train_model(
+                TinyRegressor(), TinyLoader(), TinyLoader(seed=91), budget_config,
+                torch.device("cpu"), resume_from=last_path)
+            self.assertEqual((resumed_score, resumed_history), (budget_score, budget_history))
+            self.assertEqual(best_path.read_bytes(), best_bytes)
+            self.assertEqual(last_path.read_bytes(), last_bytes)
+
+            stop_dir = Path(temporary) / "early_stop"
+            stop_dir.mkdir()
+            stop_config = self._config(stop_dir)
+            stop_config["train"]["early_stopping_patience"] = 1
+            self._seed(45)
+            stop_model = TinyRegressor()
+            stop_train, stop_val = TinyLoader(), TinyLoader(seed=91)
+            with patch.object(train_module, "evaluate_val_mae", side_effect=[0.3, 0.4]):
+                stop_score, stop_history = train_module.train_model(
+                    stop_model, stop_train, stop_val, stop_config, torch.device("cpu"))
+            self.assertEqual(len(stop_history), 2)
+            self.assertEqual(stop_history[-1]["epoch"], 2)
+            early_best_path = stop_dir / "best.pt"
+            early_last_path = stop_dir / "best.last.pt"
+            early_best_bytes, early_last_bytes = early_best_path.read_bytes(), early_last_path.read_bytes()
+            with patch.object(train_module, "evaluate_val_mae",
+                              side_effect=AssertionError("completed early-stop run trained again")):
+                final_score, final_history = train_module.train_model(
+                    TinyRegressor(), TinyLoader(), TinyLoader(seed=91), stop_config,
+                    torch.device("cpu"), resume_from=early_last_path)
+            self.assertEqual((final_score, final_history), (stop_score, stop_history))
+            self.assertEqual(early_best_path.read_bytes(), early_best_bytes)
+            self.assertEqual(early_last_path.read_bytes(), early_last_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
