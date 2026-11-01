@@ -1,7 +1,8 @@
 """
 Module M6: Model Definition
 Responsibility: Define the dynamic Spatio-Temporal Graph Attention Network (ST-GNN).
-Stages: Linear projection -> GATConv x2 -> causal temporal module -> MLP head.
+Stages: Linear projection -> two or three GAT layers -> causal temporal module -> sector head,
+with an optional additive own-car MLP bypass from the final input frame.
 Standard: ASD-STE100 Plain English
 """
 
@@ -50,9 +51,9 @@ class HammerTimeSTGNN(nn.Module):
     """
     Spatio-Temporal Graph Neural Network for F1 Traffic Delay Prediction.
     Stage 1: Input projection (Linear)
-    Stage 2: Spatial graph attention (2x GATConv or GATv2Conv with dynamic edge weights)
+    Stage 2: Two or three GAT/GATv2 spatial layers with dynamic edge weights
     Stage 3: Legacy Conv1d or an optional gated dilated causal residual block stack
-    Stage 4: MLP head predicting delta t_sector per car
+    Stage 4: MLP head predicting delta t_sector per car, with an optional own-car correction
     """
     def __init__(
         self,
@@ -73,6 +74,9 @@ class HammerTimeSTGNN(nn.Module):
         mask_inactive_nodes: bool = False,
         predict_future_speed: bool = False,
         future_speed_horizon_steps: int = 5,
+        spatial_layers: int = 2,
+        own_car_branch: bool = False,
+        own_car_hidden_dim: int = 32,
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
@@ -91,6 +95,14 @@ class HammerTimeSTGNN(nn.Module):
             raise ValueError(f"edge_feature_schema must be one of {list(EDGE_FEATURES_BY_SCHEMA)}.")
         if edge_dim != len(EDGE_FEATURES_BY_SCHEMA[edge_feature_schema]):
             raise ValueError("edge_dim does not match edge_feature_schema width.")
+        if (isinstance(spatial_layers, bool) or not isinstance(spatial_layers, int)
+                or spatial_layers not in (2, 3)):
+            raise ValueError("spatial_layers must be 2 or 3.")
+        if not isinstance(own_car_branch, bool):
+            raise ValueError("own_car_branch must be a boolean.")
+        if (isinstance(own_car_hidden_dim, bool) or not isinstance(own_car_hidden_dim, int)
+                or own_car_hidden_dim <= 0):
+            raise ValueError("own_car_hidden_dim must be a positive integer.")
         self.in_dim = in_dim
         self.hidden_dim = hidden_dim
         self.gat_heads = gat_heads
@@ -103,6 +115,9 @@ class HammerTimeSTGNN(nn.Module):
         self.typed_edge_values = bool(typed_edge_values)
         self.mask_inactive_nodes = bool(mask_inactive_nodes)
         self.predict_future_speed = bool(predict_future_speed)
+        self.spatial_layers = int(spatial_layers)
+        self.own_car_branch_enabled = bool(own_car_branch)
+        self.own_car_hidden_dim = int(own_car_hidden_dim)
         if isinstance(future_speed_horizon_steps, bool) or int(future_speed_horizon_steps) <= 0:
             raise ValueError("future_speed_horizon_steps must be a positive integer.")
         self.future_speed_horizon_steps = int(future_speed_horizon_steps)
@@ -133,6 +148,17 @@ class HammerTimeSTGNN(nn.Module):
             dropout=dropout,
             add_self_loops=False
         )
+        if self.spatial_layers == 3:
+            self.gat3 = gat_cls(
+                in_channels=hidden_dim,
+                out_channels=head_dim,
+                heads=gat_heads,
+                edge_dim=edge_dim,
+                dropout=dropout,
+                add_self_loops=False,
+            )
+        else:
+            self.gat3 = None
 
         # Optional edge-conditioned value propagation. Each physical leader ->
         # follower pair produces two directed relation streams. Edge attributes
@@ -153,9 +179,11 @@ class HammerTimeSTGNN(nn.Module):
             from torch_geometric.nn.norm import GraphNorm
             self.norm1 = GraphNorm(hidden_dim)
             self.norm2 = GraphNorm(hidden_dim)
+            self.norm3 = GraphNorm(hidden_dim) if self.spatial_layers == 3 else None
         else:
             self.norm1 = None
             self.norm2 = None
+            self.norm3 = None
 
         # Stage 3: Legacy convolution stays parameter-identical for old checkpoints.
         self.temporal_mode = temporal_mode
@@ -178,14 +206,33 @@ class HammerTimeSTGNN(nn.Module):
         )
         self.future_speed_head = (nn.Linear(hidden_dim, self.future_speed_horizon_steps)
                                    if self.predict_future_speed else None)
+        if self.own_car_branch_enabled:
+            self.own_car_head = nn.Sequential(
+                nn.Linear(in_dim, self.own_car_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.own_car_hidden_dim, 1),
+            )
+            nn.init.zeros_(self.own_car_head[-1].weight)
+            nn.init.zeros_(self.own_car_head[-1].bias)
+        else:
+            self.own_car_head = None
 
-    def _mask_graph(self, g, device):
-        if not self.mask_inactive_nodes:
-            return torch.ones(g.x.size(0), dtype=torch.bool, device=device)
+    def _actual_node_mask(self, g, device):
         mask = getattr(g, "mask", None)
         if mask is None:
             return torch.ones(g.x.size(0), dtype=torch.bool, device=device)
         return mask.to(device=device, dtype=torch.bool)
+
+    def _mask_graph(self, g, device):
+        if not self.mask_inactive_nodes:
+            return torch.ones(g.x.size(0), dtype=torch.bool, device=device)
+        return self._actual_node_mask(g, device)
+
+    def _own_car_correction(self, last_x, last_mask):
+        if self.own_car_head is None:
+            return last_x.new_zeros(last_x.shape[:-1])
+        correction = self.own_car_head(last_x).squeeze(-1)
+        return correction * last_mask.to(dtype=correction.dtype)
 
     def _typed_messages(self, h, edge_index, edge_attr, active):
         """Aggregate typed, edge-conditioned values over physical pairs."""
@@ -229,6 +276,18 @@ class HammerTimeSTGNN(nn.Module):
         variance = squares / counts.clamp_min(1.0)
         normalized = centered / torch.sqrt(variance[batch] + norm.eps)
         return (normalized * norm.weight + norm.bias) * weights
+
+    def _apply_spatial_layer(self, h, edge_index, edge_attr, active, layer, norm, batch=None):
+        result = layer(h, edge_index, edge_attr)
+        if norm is not None:
+            if self.mask_inactive_nodes:
+                graph_batch = (torch.zeros(h.size(0), dtype=torch.long, device=h.device)
+                               if batch is None else batch)
+                result = self._masked_graph_norm(result, graph_batch, active, norm)
+            else:
+                result = norm(result) if batch is None else norm(result, batch)
+        result = torch.relu(result)
+        return (h + result) if self.residual else result
 
     def _ensure_self_loops(self, num_nodes: int, edge_index: torch.Tensor,
                            edge_attr: torch.Tensor, device, position_coverage=1.0):
@@ -321,22 +380,19 @@ class HammerTimeSTGNN(nn.Module):
                 edge_keep = active[edge_idx[0]] & active[edge_idx[1]]
                 edge_idx, edge_attr = edge_idx[:, edge_keep], edge_attr[edge_keep]
 
-            # 3. Two GAT layers with residual skip and GraphNorm
-            h1 = self.gat1(h, edge_idx, edge_attr)
-            if self.norm1 is not None:
-                h1 = (self._masked_graph_norm(h1, torch.zeros(N, dtype=torch.long, device=device), active, self.norm1)
-                      if self.mask_inactive_nodes else self.norm1(h1))
-            h1 = torch.relu(h1)
-            h = (h + h1) if self.residual else h1
-            h = self._typed_messages(h, typed_edge_index.to(device) if typed_edge_index is not None else edge_idx,
-                                     typed_edge_attr.to(device=device, dtype=h.dtype) if typed_edge_attr is not None else edge_attr, active)
-
-            h2 = self.gat2(h, edge_idx, edge_attr)
-            if self.norm2 is not None:
-                h2 = (self._masked_graph_norm(h2, torch.zeros(N, dtype=torch.long, device=device), active, self.norm2)
-                      if self.mask_inactive_nodes else self.norm2(h2))
-            h2 = torch.relu(h2)
-            h = (h + h2) if self.residual else h2
+            spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
+            if self.spatial_layers == 3:
+                spatial_layers += ((self.gat3, self.norm3),)
+            for layer_index, (layer, norm) in enumerate(spatial_layers):
+                h = self._apply_spatial_layer(h, edge_idx, edge_attr, active, layer, norm)
+                if layer_index == 0:
+                    h = self._typed_messages(
+                        h,
+                        typed_edge_index.to(device) if typed_edge_index is not None else edge_idx,
+                        typed_edge_attr.to(device=device, dtype=h.dtype)
+                        if typed_edge_attr is not None else edge_attr,
+                        active,
+                    )
             # A fixed all-ones token marks an inactive historical slot without
             # adding default-path parameters or changing old checkpoint keys.
             if self.mask_inactive_nodes:
@@ -359,6 +415,11 @@ class HammerTimeSTGNN(nn.Module):
 
         # MLP head -> [N]
         out = self.head(z_last).squeeze(-1)
+        if self.own_car_head is not None:
+            device = self.proj.weight.device
+            last_x = snapshots[-1].x.to(device=device, dtype=self.proj.weight.dtype)
+            last_mask = self._actual_node_mask(snapshots[-1], device)
+            out = out + self._own_car_correction(last_x, last_mask)
         if return_aux:
             aux = {}
             if self.future_speed_head is not None:
@@ -382,14 +443,19 @@ class HammerTimeSTGNN(nn.Module):
         dtype = self.proj.weight.dtype
         graphs = []
         active_rows = []
+        last_x_rows = []
+        last_mask_rows = []
         typed_edges = []
         typed_attrs = []
         node_offset = 0
         for window in batch_windows:
-            for snapshot in window:
+            for time_index, snapshot in enumerate(window):
                 x = snapshot.x.to(device=device, dtype=dtype)
                 active = self._mask_graph(snapshot, device)
                 active_rows.append(active)
+                if time_index == window_size - 1:
+                    last_x_rows.append(x)
+                    last_mask_rows.append(self._actual_node_mask(snapshot, device))
                 raw_edge_index = getattr(snapshot, "edge_index", None)
                 raw_edge_attr = getattr(snapshot, "edge_attr", None)
                 if self.training and self.drop_edge_rate > 0.0 and raw_edge_index is not None and raw_edge_index.size(1) > 0:
@@ -418,21 +484,16 @@ class HammerTimeSTGNN(nn.Module):
         h = torch.relu(self.proj(disjoint.x))
         if self.mask_inactive_nodes:
             h = h * active.unsqueeze(-1)
-        h1 = self.gat1(h, disjoint.edge_index, disjoint.edge_attr)
-        if self.norm1 is not None:
-            h1 = (self._masked_graph_norm(h1, disjoint.batch, active, self.norm1)
-                  if self.mask_inactive_nodes else self.norm1(h1, disjoint.batch))
-        h1 = torch.relu(h1)
-        h = (h + h1) if self.residual else h1
-        if self.typed_edge_values and typed_edges:
-            h = self._typed_messages(h, torch.cat(typed_edges, dim=1), torch.cat(typed_attrs), active)
-
-        h2 = self.gat2(h, disjoint.edge_index, disjoint.edge_attr)
-        if self.norm2 is not None:
-            h2 = (self._masked_graph_norm(h2, disjoint.batch, active, self.norm2)
-                  if self.mask_inactive_nodes else self.norm2(h2, disjoint.batch))
-        h2 = torch.relu(h2)
-        h = (h + h2) if self.residual else h2
+        spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
+        if self.spatial_layers == 3:
+            spatial_layers += ((self.gat3, self.norm3),)
+        for layer_index, (layer, norm) in enumerate(spatial_layers):
+            h = self._apply_spatial_layer(
+                h, disjoint.edge_index, disjoint.edge_attr, active, layer, norm, disjoint.batch
+            )
+            if layer_index == 0 and self.typed_edge_values and typed_edges:
+                h = self._typed_messages(h, torch.cat(typed_edges, dim=1),
+                                         torch.cat(typed_attrs), active)
         if self.mask_inactive_nodes:
             h = torch.where(active.unsqueeze(-1), h, torch.ones_like(h))
 
@@ -448,6 +509,10 @@ class HammerTimeSTGNN(nn.Module):
                 z = temporal_block(z)
         z_last = z[:, :, -1].reshape(batch_size, num_nodes, self.hidden_dim)
         prediction = self.head(z_last).squeeze(-1)
+        if self.own_car_head is not None:
+            last_x = torch.stack(last_x_rows, dim=0)
+            last_mask = torch.stack(last_mask_rows, dim=0)
+            prediction = prediction + self._own_car_correction(last_x, last_mask)
         if return_aux:
             aux = {}
             if self.future_speed_head is not None:
@@ -493,6 +558,9 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         mask_inactive_nodes=bool(m_cfg.get("mask_inactive_nodes", False)),
         predict_future_speed=bool(m_cfg.get("predict_future_speed", False)),
         future_speed_horizon_steps=int(m_cfg.get("future_speed_horizon_steps", 5)),
+        spatial_layers=m_cfg.get("spatial_layers", 2),
+        own_car_branch=bool(m_cfg.get("own_car_branch", False)),
+        own_car_hidden_dim=m_cfg.get("own_car_hidden_dim", 32),
     )
 
 

@@ -1,6 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
 # HAMMERTIME GNNv2: 2023 FASTF1 SEASON CONFIGURATION
-# Typed physical-edge messages with auxiliary future-speed supervision.
+# Three spatial attention layers, an own-car residual branch, typed physical-edge
+# messages, and auxiliary future-speed supervision. These model changes are opt-in.
 # ═══════════════════════════════════════════════════════════════
 
 session:
@@ -59,6 +60,7 @@ model:
   in_dim: 20
   hidden_dim: 64
   gat_heads: 4
+  spatial_layers: 3
   edge_dim: 5
   conv1d_kernel: 3
   temporal_mode: "gated_dilated"
@@ -70,6 +72,8 @@ model:
   dropout: 0.20
   mask_inactive_nodes: true
   typed_edge_values: true
+  own_car_branch: true
+  own_car_hidden_dim: 32
   predict_future_speed: true
   future_speed_horizon_steps: 5
 

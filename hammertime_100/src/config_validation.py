@@ -102,6 +102,15 @@ def validate_config(config: dict) -> None:
         raise ValueError("data.min_valid_targets_per_sample cannot exceed graph.num_nodes.")
     if value("model.hidden_dim") % value("model.gat_heads"):
         raise ValueError("model.hidden_dim must be divisible by model.gat_heads.")
+    spatial_layers = config.get("model", {}).get("spatial_layers", 2)
+    if (isinstance(spatial_layers, bool) or not isinstance(spatial_layers, int)
+            or spatial_layers not in (2, 3)):
+        raise ValueError("model.spatial_layers must be 2 or 3.")
+    own_car_branch = config.get("model", {}).get("own_car_branch", False)
+    if not isinstance(own_car_branch, bool):
+        raise ValueError("model.own_car_branch must be a boolean.")
+    if "own_car_hidden_dim" in config.get("model", {}):
+        number("model.own_car_hidden_dim", minimum=1, integer=True)
     gat_type = config.get("model", {}).get("gat_type", "gat")
     if gat_type not in ("gat", "gatv2"):
         raise ValueError("model.gat_type must be 'gat' or 'gatv2'.")
