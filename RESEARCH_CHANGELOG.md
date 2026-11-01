@@ -1,5 +1,9 @@
 # Research and Change Record
 
+## Windows atomic checkpoint durability — 2026-11-01
+
+The atomic Torch checkpoint writer and season-runner prediction-pickle writer now reopen staged files in read/write mode before `os.fsync`, which supplies Windows' `FlushFileBuffers` with a writable descriptor. Other repository `fsync` call sites already sync the writable stream used to create the staged file. Source-only review and `git diff --check` were used; no project code, tests, imports, compilation, or training were run.
+
 ## Windows prepared-cohort durability — 2026-11-01
 
 Prepared-cohort staging now uses `os.fdatasync` where available and falls back to `os.fsync` on platforms such as Windows where `fdatasync` is not exposed. The flush and file-level durability sync still complete before the staged artifact is finalized. Source-only review and `git diff --check` were used; no project code, tests, imports, compilation, training, or benchmarks were run.

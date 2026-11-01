@@ -769,7 +769,8 @@ def _atomic_pickle(path: Path, value) -> None:
         temporary = Path(stream.name)
     try:
         value.to_pickle(temporary)
-        with temporary.open("rb") as stream:
+        # Windows requires a writable descriptor for fsync/FlushFileBuffers.
+        with temporary.open("rb+") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:

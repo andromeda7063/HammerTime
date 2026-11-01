@@ -173,7 +173,8 @@ def _atomic_torch_save(payload: dict, path: Path) -> None:
     temporary = path.with_name(path.name + ".tmp")
     try:
         torch.save(payload, temporary)
-        with temporary.open("rb") as saved:
+        # Windows requires a writable descriptor for fsync/FlushFileBuffers.
+        with temporary.open("rb+") as saved:
             os.fsync(saved.fileno())
         os.replace(temporary, path)
     finally:
