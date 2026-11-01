@@ -249,8 +249,88 @@ def _read_aligned_source(source_dir: Path, specs: list[dict], provider: str):
     return aligned_tables, labels_tables, records, paths, manifest
 
 
+def _read_normalized_source(source_dir: Path, specs: list[dict], provider: str):
+    """Read a resumable source cache of authentic per-session normalized tables.
+
+    This is deliberately a different manifest type from ``--aligned-source``,
+    which accepts a completed, frozen cohort. It contains no graph snapshots,
+    split, scaler, or prepared-cohort claims.
+    """
+    manifest_path = source_dir / "normalized_source_manifest.json"
+    sidecar = Path(str(manifest_path) + ".sha256")
+    if not manifest_path.is_file() or not sidecar.is_file():
+        raise FileNotFoundError("Normalized source cache requires its JSON manifest and SHA-256 sidecar.")
+    if sidecar.read_text(encoding="utf-8").strip().split()[0] != _sha256_file(manifest_path):
+        raise ValueError("Normalized source manifest bytes do not match its SHA-256 sidecar.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    canonical = _sha256_bytes(_canonical_json(
+        {key: value for key, value in manifest.items() if key != "normalized_source_manifest_sha256"}
+    ))
+    if (manifest.get("artifact_type") != "hammertime-normalized-source-cache"
+            or manifest.get("schema_version") != 1
+            or manifest.get("normalized_source_manifest_sha256") != canonical):
+        raise ValueError("Normalized source manifest type, schema, or canonical hash is invalid.")
+    if manifest.get("provider") != provider or manifest.get("providers") != [provider]:
+        raise ValueError("Normalized source provider must match the configured single-provider cohort.")
+    config_path = Path(manifest.get("config_path", ""))
+    if not config_path.is_file() or _sha256_file(config_path) != manifest.get("config_sha256"):
+        raise ValueError("Normalized source config is missing or disagrees with its recorded hash.")
+    with config_path.open("r", encoding="utf-8") as source:
+        source_config = yaml.safe_load(source)
+    source_specs = _session_specs(source_config)
+    if [str(item["race_id"]) for item in source_specs] != [str(item["race_id"]) for item in specs]:
+        raise ValueError("Normalized source sessions do not exactly match requested session identities/order.")
+    source_sessions = manifest.get("sessions", [])
+    if [str(item.get("race_id")) for item in source_sessions] != [str(item["race_id"]) for item in specs]:
+        raise ValueError("Normalized source manifest session identities/order do not match the request.")
+
+    hashes = manifest.get("source_hashes", {})
+    records, aligned_tables, labels_tables, paths = [], [], [], [str(manifest_path)]
+    for spec, source_spec, record in zip(specs, source_specs, source_sessions):
+        for key in ("provider", "year", "gp", "session_type", "session_key"):
+            expected = (str(spec.get("source", "fastf1")) if key == "provider"
+                        else spec.get(key, "R" if key == "session_type" else None))
+            actual = record.get(key)
+            upstream = source_spec.get("source") if key == "provider" else source_spec.get(key)
+            if actual != expected or upstream != expected:
+                raise ValueError(f"Normalized source session {spec['race_id']} disagrees on {key}.")
+        if float(spec.get("lap_length_m", 0.0)) != float(source_spec.get("lap_length_m", 0.0)):
+            raise ValueError(f"Normalized source circuit length for {spec['race_id']} differs from its config.")
+        if float(spec.get("lap_length_m", 0.0)) != float(record.get("lap_length_m", 0.0)):
+            raise ValueError(f"Normalized source circuit length for {spec['race_id']} differs from its manifest.")
+        source_metadata = record.get("source_metadata", {})
+        if spec.get("circuit_id") and str(spec["circuit_id"]) != str(
+                source_metadata.get("session", {}).get("circuit_key", "")):
+            raise ValueError(f"Configured circuit_id for {spec['race_id']} does not match FastF1 circuit identity.")
+        race_dir = source_dir / "sessions" / _safe_component(str(spec["race_id"]))
+        aligned_path, labels_path = race_dir / "aligned_telemetry.parquet", race_dir / "target_labels.parquet"
+        listed = record.get("source_files", [])
+        required = {str(aligned_path.relative_to(source_dir)), str(labels_path.relative_to(source_dir))}
+        if not required.issubset(set(listed)):
+            raise ValueError(f"Normalized source session {spec['race_id']} omits aligned or target tables.")
+        for relpath in listed:
+            if relpath not in hashes:
+                raise ValueError(f"Normalized source file is absent from the manifest hash table: {relpath}")
+            path = source_dir / relpath
+            expected_hash = hashes[relpath]
+            if (not path.is_file() or path.stat().st_size != expected_hash.get("bytes")
+                    or _sha256_file(path) != expected_hash.get("sha256")):
+                raise ValueError(f"Normalized source file hash is missing or invalid: {path}")
+            paths.append(str(path))
+        aligned, labels = pd.read_parquet(aligned_path), pd.read_parquet(labels_path)
+        if "RaceId" not in aligned or set(aligned["RaceId"].astype(str).unique()) != {str(spec["race_id"])}:
+            raise ValueError(f"Normalized rows do not all belong to configured race {spec['race_id']!r}.")
+        if "RaceId" not in labels or set(labels["RaceId"].astype(str).unique()) != {str(spec["race_id"])}:
+            raise ValueError(f"Normalized target rows do not all belong to configured race {spec['race_id']!r}.")
+        aligned_tables.append(aligned)
+        labels_tables.append(labels)
+        records.append({**record, "source_metadata": source_metadata})
+    return aligned_tables, labels_tables, records, paths, manifest
+
+
 def prepare_cohort(config_path: str | Path, output_dir: str | Path,
-                   aligned_source_dir: str | Path | None = None) -> dict:
+                   aligned_source_dir: str | Path | None = None,
+                   normalized_source_dir: str | Path | None = None) -> dict:
     """Run the configured acquisition/preprocessing path and freeze its graph data.
 
     The destination must not exist. All intermediate race artifacts are written
@@ -263,6 +343,8 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
         raise FileExistsError(f"Cohort output already exists; choose a new directory: {output_dir}")
     if not config_path.is_file():
         raise FileNotFoundError(f"Cohort config does not exist: {config_path}")
+    if aligned_source_dir is not None and normalized_source_dir is not None:
+        raise ValueError("Choose either --aligned-source or --normalized-source, not both.")
 
     with config_path.open("r", encoding="utf-8") as source:
         config = yaml.safe_load(source)
@@ -285,6 +367,10 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
                 source_root = Path(aligned_source_dir).resolve()
                 (aligned_tables, label_tables, session_records, source_files,
                  source_manifest) = _read_aligned_source(source_root, specs, provider)
+            elif normalized_source_dir is not None:
+                source_root = Path(normalized_source_dir).resolve()
+                (aligned_tables, label_tables, session_records, source_files,
+                 source_manifest) = _read_normalized_source(source_root, specs, provider)
             else:
                 for spec in specs:
                     race_id = str(spec["race_id"])
@@ -396,8 +482,12 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             cohort_id = "+".join(spec["race_id"] for spec in specs)
             calibration_hash = _sha256_bytes(_canonical_json(calibration))
             train_key_hash = _sha256_bytes(_canonical_json(train_frame_keys))
-            source_manifest_hash = (_sha256_file(Path(aligned_source_dir).resolve() / "prepared_manifest.json")
-                                   if aligned_source_dir is not None else None)
+            source_manifest_hash = None
+            if aligned_source_dir is not None:
+                source_manifest_hash = _sha256_file(Path(aligned_source_dir).resolve() / "prepared_manifest.json")
+            elif normalized_source_dir is not None:
+                source_manifest_hash = _sha256_file(
+                    Path(normalized_source_dir).resolve() / "normalized_source_manifest.json")
             schema_metadata = feature_schema_metadata(schema, config["graph"]["compound_categories"])
             provenance = {
                 "provider": provider, "providers": [provider], "session_identity": cohort_id,
@@ -532,9 +622,11 @@ def main(argv: list[str] | None = None) -> None:
                         help="New output directory; existing directories are never replaced")
     parser.add_argument("--aligned-source", type=Path,
                         help="Reuse normalized aligned/target tables from a frozen prepared cohort; no source normalization is run")
+    parser.add_argument("--normalized-source", type=Path,
+                        help="Reuse a checksum-verified cache of authentic per-session aligned/target tables")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    manifest = prepare_cohort(args.config, args.output, args.aligned_source)
+    manifest = prepare_cohort(args.config, args.output, args.aligned_source, args.normalized_source)
     print(json.dumps({
         "output_dir": str(Path(args.output).resolve()),
         "provider": manifest["provider"],
