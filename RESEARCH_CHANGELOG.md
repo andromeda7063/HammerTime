@@ -193,6 +193,9 @@ Added `--local-data-only --raw-sessions-dir PATH` to the 2023 FastF1 season runn
 
 Renamed the active frontend branch to `dev/frontend` and the active GNNv2 branch to `dev/gnnv2`, retaining their existing commit histories and separate worktrees. Removed the superseded agent-named remote refs after confirming the new refs matched their previous commits; deleted the merged report branches and redundant local-only aliases whose commits remain reachable. Updated the Windows GPU runbook's clone instructions to use `dev/gnnv2`. No model, dataset, checkpoint, metric, split, or training output was changed.
 
+## Two-person frontend and GNNv2 workflow — 2026-11-03
+
+Added `hammertime_100/docs/GNNV2_DEVELOPMENT_WORKFLOW.md` on `dev/gnnv2`. It documents the isolated ML worktree, locked-environment training and verification, ignored run-artifact storage, provenance handoff to the frontend developer, and combined integration procedure. No model, metric, data, split, threshold, or training output was changed.
 
 
 
