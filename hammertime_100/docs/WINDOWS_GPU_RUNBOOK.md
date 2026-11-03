@@ -22,7 +22,7 @@ The prebuilt CUDA wheel below supplies the CUDA runtime. A separate CUDA toolkit
 
 ## Open the preprocessing branch beside the existing clone
 
-The implementation branch created for this change is `dev/gnnv2-preprocessing`; Git cannot represent `dev/gnnv2/preprocessing` while a `dev/gnnv2` branch already exists. This branch is local until it is published. After it has been pushed to the shared remote, open a separate worktree from your existing clone. This leaves your current checkout and its untracked files alone.
+The implementation branch created for this change is `dev/gnnv2-preprocessing`; Git cannot represent `dev/gnnv2/preprocessing` while a `dev/gnnv2` branch already exists. It is published on `origin`. Open a separate worktree from your existing clone so the current checkout and its untracked files stay in place.
 
 ```powershell
 $ExistingRepo = 'C:\F1\HammerTime' # Change to the path of your already-populated clone.
@@ -34,7 +34,7 @@ Set-Location $Repo
 git branch --show-current
 ```
 
-The last command should print `dev/gnnv2-preprocessing`. The fetch/worktree commands will work only after that branch is published to `origin`; they do not change or delete the original clone. If the branch has not been published yet, stop here rather than substituting another branch.
+The last command should print `dev/gnnv2-preprocessing`. The explicit fetch also works when the old clone was created with single-branch settings. These commands add a separate worktree and do not change or delete the original checkout or its `race_cache` files.
 
 ## Install the locked Python environment
 
