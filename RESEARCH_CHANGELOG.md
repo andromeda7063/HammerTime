@@ -202,12 +202,3 @@ Renamed the active frontend branch to `dev/frontend` and the active GNNv2 branch
 ## Two-person frontend and GNNv2 workflow — 2026-11-03
 
 Added `hammertime_100/docs/GNNV2_DEVELOPMENT_WORKFLOW.md` on `dev/gnnv2`. It documents the isolated ML worktree, locked-environment training and verification, ignored run-artifact storage, provenance handoff to the frontend developer, and combined integration procedure. No model, metric, data, split, threshold, or training output was changed.
-
-
-
-
-# GNNv2 Windows preprocessing memory and runtime instrumentation — 2026-11-03
-
-On the `dev/gnnv2-preprocessing` branch, reduced repeated Pandas work in lap distance and driver-gap preprocessing, released race and per-driver frame references as each race is normalized, and changed graph row iteration to avoid per-row Pandas Series allocation while preserving the feature helper mapping interface. The GNNv2 normalized-source cohort path now graph-builds aligned Parquet tables one race at a time; the legacy `circuit_context_v1` eager two-pass calibration path remains unchanged. The existing coverage summary makes a second sequential read of those aligned tables. Added portable available-memory and parent RSS probes, conservative effective-worker logging, phase elapsed times, and snapshot/window counts. The prior 700 MiB per-worker estimate remains an unmeasured heuristic, not a demonstrated safe maximum. No preprocessing moved to the GPU and no performance gain is claimed.
-
-Kept the existing race inventory, data coverage rules, split/scaler behavior, model, targets, physics gates, and stride settings unchanged. `hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md` now describes using an existing `race_cache/raw_sessions` directory in place from an older checkout and opening the published implementation branch in a separate worktree. Focused offline tests passed for preprocessing, cohort loading/splitting (including eager/path split-membership hash equality), graph contracts, physical/context graph views, normalized-source/resume handling, and checkpoint provenance. No authentic Windows timing, full-season run, or peak process-tree measurement was available; see `hammertime_100/docs/research/windows_preprocessing_implementation.md` for limits and the profiling plan.
