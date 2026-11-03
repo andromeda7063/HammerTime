@@ -2,7 +2,7 @@
 
 ## Scope
 
-This change targets the 2023 GNNv2 season path on a Windows host with limited RAM. It keeps the configured 22-race inventory, normalizer gates, targets, race-held-out split, scaler fit rules, model, training options, and `--window-stride` unchanged. It does not move preprocessing to CUDA or claim a measured speedup. No authentic Windows run logs or full local season profiling were available when these changes were made.
+This change targets the 2023 GNNv2 season path on a Windows host with limited RAM. It keeps the configured 22-race inventory, normalizer gates, targets, race-held-out split, scaler fit rules, model, training options, and `--window-stride` unchanged. It does not move preprocessing to CUDA or claim a measured speedup. No authentic Windows run logs or full local season profiling were available when these changes were made, so the reported OS-library runtime error has no confirmed root cause. The GNNv2 base already opened checkpoint temp files writable before `fsync`; this branch retains that code. The portable cohort `fsync` change also does not establish the cause of the reported failure.
 
 ## Changes
 
