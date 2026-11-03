@@ -158,6 +158,17 @@ def align_driver_telemetry(
         else:
             laps_sorted["LapStartSec"] = np.nan
 
+        # This source table is unchanged for every lap. Prepare it once per
+        # driver instead of copying/coercing/deduplicating all telemetry rows
+        # inside the lap loop below.
+        source_distance = tel_sorted.reindex(columns=["TimeSec", "Distance"]).copy()
+        source_distance["Distance"] = pd.to_numeric(source_distance["Distance"], errors="coerce")
+        source_distance = source_distance.dropna().drop_duplicates(
+            subset=["TimeSec"], keep="first"
+        )
+        source_times = source_distance["TimeSec"].to_numpy(dtype=float)
+        source_values = source_distance["Distance"].to_numpy(dtype=float)
+
         for _, lap in laps_sorted.iterrows():
             lap_num = int(lap.get("LapNumber", 1))
             lap_start = lap.get("LapStartSec", np.nan)
@@ -169,13 +180,6 @@ def align_driver_telemetry(
 
             mask = (resampled["TimeSec"] >= lap_start) & (resampled["TimeSec"] < lap_end)
             if mask.any():
-                source_distance = tel_sorted.reindex(columns=["TimeSec", "Distance"]).copy()
-                source_distance["Distance"] = pd.to_numeric(source_distance["Distance"], errors="coerce")
-                source_distance = source_distance.dropna().drop_duplicates(
-                    subset=["TimeSec"], keep="first"
-                )
-                source_times = source_distance["TimeSec"].to_numpy(dtype=float)
-                source_values = source_distance["Distance"].to_numpy(dtype=float)
                 right = int(np.searchsorted(source_times, lap_start))
                 if right < len(source_times) and np.isclose(source_times[right], lap_start, atol=1e-9, rtol=0):
                     lap_start_distance = source_values[right]
@@ -200,11 +204,11 @@ def align_driver_telemetry(
                 resampled.loc[mask, "TyreLife"] = tyre_age
                 if compound not in ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"] or not np.isfinite(tyre_age) or tyre_age < 0:
                     resampled.loc[mask, "IsValid"] = False
-                
+
                 # Check pit
                 if flag_pit_laps and (pd.notnull(lap.get("PitInTime")) or pd.notnull(lap.get("PitOutTime"))):
                     resampled.loc[mask, "IsPitLap"] = True
-                
+
                 # Check track status for safety car (status 4 = SC, 6 = VSC)
                 status = str(lap.get("TrackStatus", "1"))
                 if flag_safety_car and ("4" in status or "5" in status or "6" in status):
@@ -251,7 +255,12 @@ def compute_time_gaps(
             + active["Distance"].astype(float).mod(lap_length_m)
         )
         active = active.sort_values(by="RaceDistance", ascending=False)
-        active_drivers = active["Driver"].tolist()
+        active_drivers = active["Driver"].to_numpy()
+        race_distances = active["RaceDistance"].to_numpy(dtype=float)
+        speeds_kmh = active["Speed"].to_numpy(dtype=float)
+        first_row_by_driver = {}
+        for row_index, active_driver in enumerate(active_drivers):
+            first_row_by_driver.setdefault(active_driver, row_index)
         
         # Leader of group has no car ahead
         driver_ahead_map = {active_drivers[0]: None}
@@ -260,12 +269,11 @@ def compute_time_gaps(
         for idx in range(1, len(active_drivers)):
             follower = active_drivers[idx]
             leader = active_drivers[idx - 1]
-            
-            fol_row = active[active["Driver"] == follower].iloc[0]
-            lead_row = active[active["Driver"] == leader].iloc[0]
-            
-            dist_diff = lead_row["RaceDistance"] - fol_row["RaceDistance"]
-            fol_speed_ms = max(fol_row["Speed"] / 3.6, 10.0)  # avoid div by zero; km/h to m/s
+
+            follower_row = first_row_by_driver[follower]
+            leader_row = first_row_by_driver[leader]
+            dist_diff = race_distances[leader_row] - race_distances[follower_row]
+            fol_speed_ms = max(speeds_kmh[follower_row] / 3.6, 10.0)  # km/h to m/s
             
             # If distance difference is positive and plausible
             if dist_diff > 0:
@@ -329,7 +337,7 @@ def process_race(session, config: dict) -> pd.DataFrame:
     session_end = max(tel["TimeSec"].max() for _, tel, _ in raw_drivers)
     time_grid = np.arange(session_start, session_end + dt * 1e-6, dt)
     all_driver_dfs = []
-    for d, drv_tel, drv_laps in raw_drivers:
+    for driver_index, (d, drv_tel, drv_laps) in enumerate(raw_drivers):
         try:
             aligned = align_driver_telemetry(
                 d, drv_tel, drv_laps,
@@ -345,11 +353,16 @@ def process_race(session, config: dict) -> pd.DataFrame:
                 all_driver_dfs.append(aligned)
         except Exception as err:
             logger.warning(f"Failed to align driver {d}: {err}")
+        finally:
+            raw_drivers[driver_index] = None
+            del drv_tel, drv_laps
+    del raw_drivers
 
     if not all_driver_dfs:
         raise ValueError("No driver telemetry could be aligned.")
 
     combined = pd.concat(all_driver_dfs, ignore_index=True)
+    del all_driver_dfs
     session_cfg = config.get("session", {})
     race_id = session_cfg.get("race_id") or (
         f"{session_cfg.get('year', 'unknown')}-{session_cfg.get('gp', 'unknown')}-"

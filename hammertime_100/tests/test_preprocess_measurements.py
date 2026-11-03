@@ -11,7 +11,7 @@ import pandas as pd
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
-from preprocess import align_driver_telemetry, process_race
+from preprocess import align_driver_telemetry, compute_time_gaps, process_race
 
 
 def lap_rows(start=100.0, duration=2.0, number=1):
@@ -84,6 +84,56 @@ class LapDistanceTests(unittest.TestCase):
         rows["SessionTime"] = pd.to_timedelta([100.5, 101.0, 102.0], unit="s")
         aligned = align_driver_telemetry("AA", rows, lap_rows(), sample_hz=2)
         self.assertFalse(aligned["IsValid"].any())
+
+
+class TimeGapTests(unittest.TestCase):
+    def test_array_based_predecessor_lookup_preserves_active_and_inactive_rows(self):
+        rows = pd.DataFrame([
+            {"RaceId": "race-a", "TimeSec": 10.0, "Driver": "AA", "LapNumber": 1,
+             "Distance": 1000.0, "Speed": 180.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 10.0, "Driver": "BB", "LapNumber": 1,
+             "Distance": 800.0, "Speed": 180.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 10.0, "Driver": "CC", "LapNumber": 1,
+             "Distance": 500.0, "Speed": 180.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 10.0, "Driver": "DD", "LapNumber": 1,
+             "Distance": 1200.0, "Speed": 200.0, "IsValid": True, "IsPitLap": True},
+        ])
+        result = compute_time_gaps(rows, lap_length_m=2000.0).set_index("Driver")
+        self.assertIsNone(result.loc["AA", "DriverAhead"])
+        self.assertEqual(result.loc["BB", "DriverAhead"], "AA")
+        self.assertEqual(result.loc["CC", "DriverAhead"], "BB")
+        self.assertAlmostEqual(result.loc["BB", "DeltaT"], 4.0)
+        self.assertAlmostEqual(result.loc["CC", "DeltaT"], 6.0)
+        self.assertTrue(pd.isna(result.loc["DD", "DriverAhead"]))
+        self.assertTrue(pd.isna(result.loc["DD", "DeltaT"]))
+
+    def test_duplicate_driver_first_row_and_race_boundaries_match_mapping_contract(self):
+        rows = pd.DataFrame([
+            {"RaceId": "race-a", "TimeSec": 1.0, "Driver": "AA", "LapNumber": 1,
+             "Distance": 900.0, "Speed": 180.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 1.0, "Driver": "BB", "LapNumber": 1,
+             "Distance": 700.0, "Speed": 0.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 1.0, "Driver": "BB", "LapNumber": 1,
+             "Distance": 650.0, "Speed": 900.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-a", "TimeSec": 1.0, "Driver": "PIT", "LapNumber": 1,
+             "Distance": 1200.0, "Speed": 180.0, "IsValid": True, "IsPitLap": True},
+            {"RaceId": "race-b", "TimeSec": 1.0, "Driver": "CC", "LapNumber": 1,
+             "Distance": 900.0, "Speed": 180.0, "IsValid": True, "IsPitLap": False},
+            {"RaceId": "race-b", "TimeSec": 1.0, "Driver": "DD", "LapNumber": 1,
+             "Distance": 700.0, "Speed": float("nan"), "IsValid": True, "IsPitLap": False},
+        ])
+
+        result = compute_time_gaps(rows, lap_length_m=2000.0)
+        self.assertEqual(result[["RaceId", "Driver"]].values.tolist(), [
+            ["race-a", "AA"], ["race-a", "BB"], ["race-a", "BB"],
+            ["race-a", "PIT"], ["race-b", "CC"], ["race-b", "DD"],
+        ])
+        race_a_bb = result[(result["RaceId"] == "race-a") & (result["Driver"] == "BB")]
+        self.assertEqual(race_a_bb["DriverAhead"].tolist(), ["BB", "BB"])
+        self.assertEqual(race_a_bb["DeltaT"].tolist(), [99.0, 99.0])
+        race_b_dd = result[(result["RaceId"] == "race-b") & (result["Driver"] == "DD")].iloc[0]
+        self.assertEqual(race_b_dd["DriverAhead"], "CC")
+        self.assertTrue(pd.isna(race_b_dd["DeltaT"]))
 
 
 if __name__ == "__main__":

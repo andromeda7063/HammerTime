@@ -181,7 +181,12 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
         node_active_by_driver = {}
         pit_by_driver = {}
 
-        for _, row in group.iterrows():
+        row_columns = tuple(group.columns)
+        for values in group.itertuples(index=False, name=None):
+            # Avoid allocating a pandas Series for every driver/timestamp row.
+            # The feature and validity helpers use the mapping ``get`` API, so
+            # keep their input contract with a small ordinary dict.
+            row = dict(zip(row_columns, values))
             drv = row["Driver"]
             if drv in driver_to_idx:
                 idx = driver_to_idx[drv]

@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 import yaml
@@ -24,6 +25,13 @@ def _offline_process_task(task):
 
 
 class FastF1SeasonResumeTests(unittest.TestCase):
+    def test_worker_memory_cap_uses_available_bytes_and_fails_closed(self):
+        gib = 1024 ** 3
+        self.assertEqual(runner._worker_memory_limit(8, available_bytes=3 * gib), 1)
+        self.assertEqual(runner._worker_memory_limit(3, available_bytes=16 * gib), 3)
+        with patch.object(runner, "_available_memory_bytes", return_value=None):
+            self.assertEqual(runner._worker_memory_limit(4), 1)
+
     def test_cached_calendar_location_aliases_resolve_reviewed_circuits(self):
         class FakeFastF1:
             __version__ = "3.9.0"
@@ -181,8 +189,13 @@ class FastF1SeasonResumeTests(unittest.TestCase):
             config_path = Path(tmp) / "source.yaml"
             config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
             aligned_path, labels_path = stage / "aligned_telemetry.parquet", stage / "target_labels.parquet"
-            pd.DataFrame({"RaceId": [event["race_id"]], "value": [1.0]}).to_parquet(aligned_path, index=False)
-            pd.DataFrame({"RaceId": [event["race_id"]], "target": [0.2]}).to_parquet(labels_path, index=False)
+            aligned_frame = pd.DataFrame({"RaceId": [event["race_id"]], "Driver": ["AA"],
+                                          "TimeSec": [0.0], "LapNumber": [1], "IsValid": [True],
+                                          "value": [1.0]})
+            label_frame = pd.DataFrame({"RaceId": [event["race_id"]], "Driver": ["AA"],
+                                        "TimeSec": [0.0], "target": [0.2]})
+            aligned_frame.to_parquet(aligned_path, index=False)
+            label_frame.to_parquet(labels_path, index=False)
             raw_path = raw_stage / "raw_laps.parquet"
             raw_path.write_bytes(b"authentic export fixture")
             files = {path.relative_to(stage).as_posix(): {"bytes": path.stat().st_size,
@@ -203,6 +216,22 @@ class FastF1SeasonResumeTests(unittest.TestCase):
             self.assertEqual(records[0]["source_metadata"]["session"]["circuit_key"], "fixture")
             self.assertEqual(manifest["artifact_type"], "hammertime-normalized-source-cache")
             self.assertNotIn("prepared_cohort.pkl", [Path(path).name for path in paths])
+
+            import prepare_cohort as cohort
+            lazy_aligned, lazy_labels, _, _, _ = _read_normalized_source(
+                source_root, specs, "fastf1", load_aligned=False)
+            self.assertIsInstance(lazy_aligned[0], Path)
+            eager_coverage = cohort._coverage(aligned, labels[0], [])
+            lazy_coverage = cohort._coverage(lazy_aligned, lazy_labels[0], [])
+            self.assertEqual(lazy_coverage, eager_coverage)
+            with patch.object(cohort, "build_race_graph_snapshots",
+                              return_value=([], {"AA": 0})) as build_graphs:
+                snapshots, driver_map = cohort._build_snapshots_by_race(
+                    lazy_aligned, {"session": {}, "track": {}, "graph": {"num_nodes": 20}}, specs)
+            self.assertEqual(snapshots, [])
+            self.assertEqual(driver_map, {"AA": 0})
+            self.assertEqual(build_graphs.call_args.args[0]["RaceId"].unique().tolist(),
+                             [event["race_id"]])
 
     def test_cohort_fingerprint_resolves_all_prepare_code_modules(self):
         config = {"fixture": 1}
@@ -247,5 +276,3 @@ class FastF1SeasonResumeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

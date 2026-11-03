@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import copy
+import ctypes
 import hashlib
 import json
 import logging
@@ -26,6 +27,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 import traceback
 import uuid
 
@@ -348,8 +350,10 @@ def load_local_raw_inventory(raw_root: Path) -> tuple[list[dict], list[dict], st
         raise RuntimeError(
             f"Local-data-only mode requires all {len(EXPECTED_2023_RACE_IDS)} verified 2023 Grand Prix race stages. "
             f"No races were downloaded or skipped. Problems:\n  - {details}\n"
-            "Copy the complete race_cache/raw_sessions directory from the authentic source-data archive, "
-            "then pass its path with --raw-sessions-dir."
+            f"Expected directory: {root} (22 race subdirectories, each with raw_manifest.json, "
+            "raw_laps.parquet, and raw_telemetry.parquet). Inspect it in PowerShell with "
+            f"Get-ChildItem -Force '{root}'. Correct the directory or file layout, then rerun with "
+            f"--raw-sessions-dir '{root}'."
         )
     gp_names = [str(event["gp"]).strip().casefold() for event in events]
     circuit_keys = [str(manifest["source_metadata"]["session"]["circuit_key"]).strip().casefold()
@@ -461,6 +465,9 @@ def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
             drv_tel = drv_tel.dropna(subset=["TimeSec"])
             if not drv_tel.empty:
                 raw_drivers.append((key, drv_tel, drv_laps))
+        # Per-driver frames above are copies. Drop the full race tables before
+        # resampling to avoid keeping both representations live together.
+        del laps, telemetry
         if not raw_drivers:
             raise ValueError("no usable per-driver telemetry in the persisted FastF1 tables")
         sample_hz = float(config["preprocess"]["sample_hz"])
@@ -469,7 +476,7 @@ def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
         t_end = max(frame["TimeSec"].max() for _, frame, _ in raw_drivers)
         time_grid = np.arange(t_start, t_end + interval * 1e-6, interval)
         all_driver_dfs = []
-        for driver, drv_tel, drv_laps in raw_drivers:
+        for driver_index, (driver, drv_tel, drv_laps) in enumerate(raw_drivers):
             try:
                 aligned = align_driver_telemetry(
                     driver, drv_tel, drv_laps, sample_hz=sample_hz,
@@ -482,9 +489,14 @@ def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
                     all_driver_dfs.append(aligned)
             except Exception:
                 continue
+            finally:
+                raw_drivers[driver_index] = None
+                del drv_tel, drv_laps
+        del raw_drivers
         if not all_driver_dfs:
             raise ValueError("no driver telemetry could be aligned")
         combined = pd.concat(all_driver_dfs, ignore_index=True)
+        del all_driver_dfs
         combined["RaceId"] = str(event["race_id"])
         aligned = compute_time_gaps(combined, sample_hz=sample_hz,
                                     lap_length_m=float(event["lap_length_m"]))
@@ -557,22 +569,102 @@ def write_normalized_source(stage_root: Path, source_root: Path,
     return hashlib.sha256(raw).hexdigest()
 
 
-def _worker_memory_limit(requested: int) -> int:
-    """Cap concurrent dataframe workers against available RAM, keeping 2 GiB free."""
-    available = None
+def _available_memory_bytes() -> int | None:
+    """Return currently available physical memory on Windows and Unix hosts."""
+    if os.name == "nt":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        try:
+            memory_status = ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx
+            memory_status.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+            memory_status.restype = ctypes.c_bool
+            if memory_status(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError, TypeError):
+            return None
+        return None
+
     try:
         for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
             if line.startswith("MemAvailable:"):
-                available = int(line.split()[1]) * 1024
-                break
+                return int(line.split()[1]) * 1024
     except (OSError, ValueError):
         pass
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        if page_size > 0 and available_pages >= 0:
+            return page_size * available_pages
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _worker_memory_limit(requested: int, available_bytes: int | None = None) -> int:
+    """Cap dataframe processes by available RAM; fail closed to one if unknown."""
+    available = _available_memory_bytes() if available_bytes is None else int(available_bytes)
     if available is None:
-        return requested
+        return min(requested, 1)
     reserve = 2 * 1024**3
+    # Inherited conservative sizing heuristic; child RSS has not been measured
+    # on the target Windows data and this is not a safety-bound guarantee.
     estimate_per_worker = 700 * 1024**2
     safe_count = max(1, (available - reserve) // estimate_per_worker)
     return min(requested, int(safe_count))
+
+
+def _process_memory_bytes() -> int | None:
+    """Best-effort resident memory for this process, with no optional package."""
+    if os.name == "nt":
+        class PROCESS_MEMORY_COUNTERS_EX(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong), ("PageFaultCount", ctypes.c_ulong),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+                ("PrivateUsage", ctypes.c_size_t),
+            ]
+        counters = PROCESS_MEMORY_COUNTERS_EX()
+        counters.cb = ctypes.sizeof(counters)
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            get_memory_info = psapi.GetProcessMemoryInfo
+            get_memory_info.argtypes = [ctypes.c_void_p,
+                                        ctypes.POINTER(PROCESS_MEMORY_COUNTERS_EX), ctypes.c_ulong]
+            get_memory_info.restype = ctypes.c_int
+            ok = get_memory_info(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb)
+            return int(counters.WorkingSetSize) if ok else None
+        except (AttributeError, OSError, TypeError):
+            return None
+    try:
+        for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _resource_summary() -> str:
+    rss = _process_memory_bytes()
+    available = _available_memory_bytes()
+    fields = []
+    if rss is not None:
+        fields.append(f"process RSS={rss / 1024**3:.2f} GiB")
+    if available is not None:
+        fields.append(f"system available={available / 1024**3:.2f} GiB")
+    return ", ".join(fields) if fields else "memory probe unavailable"
 
 
 def _worker_warmup() -> int:
@@ -868,6 +960,7 @@ def run(args: argparse.Namespace) -> Path:
         cache_root.mkdir(parents=True, exist_ok=True)
         fastf1.Cache.enable_cache(str(cache_root))
     failure_stage = "load template and discover or validate source data"
+    run_started = time.perf_counter()
     try:
         template_path = Path(args.config) if getattr(args, "config", None) is not None else HERE / "configs/supplied_fastf1_monza_2023_gated.yaml"
         with template_path.open(encoding="utf-8") as stream:
@@ -907,7 +1000,10 @@ def run(args: argparse.Namespace) -> Path:
             if raw_root_arg is None:
                 raise ValueError("--local-data-only requires --raw-sessions-dir pointing at the transferred raw_sessions directory.")
             raw_root = Path(raw_root_arg).expanduser().resolve(strict=True)
+            inventory_started = time.perf_counter()
             events, raw_cached, round_scheme = load_local_raw_inventory(raw_root)
+            LOG.info("Verified raw inventory and SHA256 manifests in %.1f seconds.",
+                     time.perf_counter() - inventory_started)
             skips = []
             LOG.info("Verified complete local inventory: %d of %d authentic 2023 race sessions; round scheme %s.",
                      len(events), len(EXPECTED_2023_RACE_IDS), round_scheme)
@@ -934,7 +1030,15 @@ def run(args: argparse.Namespace) -> Path:
         future_to_id = {}
         process_pool = None
         pool_start_failure = None
-        process_workers = _worker_memory_limit(args.processing_workers)
+        available_memory = _available_memory_bytes()
+        process_workers = _worker_memory_limit(args.processing_workers, available_memory)
+        if available_memory is None:
+            LOG.warning("Available-memory probe failed; limiting normalization to one process.")
+        else:
+            LOG.info("Available physical memory=%.1f GiB.", available_memory / 1024**3)
+        LOG.info("Normalization workers requested=%d effective=%d.",
+                 args.processing_workers, process_workers)
+        normalization_started = time.perf_counter()
         try:
             for event, raw_manifest in zip(events, raw_cached):
                 race_id = str(event["race_id"])
@@ -957,8 +1061,11 @@ def run(args: argparse.Namespace) -> Path:
                 if local_data_only:
                     # Recheck immediately before normalization to guard against
                     # changes between inventory validation and worker launch.
+                    raw_check_started = time.perf_counter()
                     raw_manifest = _validate_local_raw_manifest(
                         raw_stage, race_id)
+                    LOG.info("Raw SHA256 verification for %s took %.1f seconds.",
+                             race_id, time.perf_counter() - raw_check_started)
 
                 event_source_version = _normalization_source_version(
                     raw_manifest, local_data_only, source_version if not local_data_only else None)
@@ -1010,10 +1117,14 @@ def run(args: argparse.Namespace) -> Path:
         finally:
             if process_pool is not None:
                 process_pool.shutdown(wait=True, cancel_futures=False)
+        LOG.info("Normalization and initial cache verification completed in %.1f seconds.",
+                 time.perf_counter() - normalization_started)
+        LOG.info("Resources after normalization: %s", _resource_summary())
 
         # A worker can commit its stage and die before returning its result.
         # Revalidate all expected fingerprints so those completed calculations
         # survive a broken pool and failures remain isolated per session.
+        revalidation_started = time.perf_counter()
         for event in events:
             race_id = str(event["race_id"])
             try:
@@ -1030,6 +1141,9 @@ def run(args: argparse.Namespace) -> Path:
             stage_result = _valid_race_stage(stages_root / _safe_id(race_id), fingerprint)
             if stage_result is not None:
                 normalized_by_id[race_id] = {**event, **stage_result["event"]}
+        LOG.info("Post-normalization source and stage verification completed in %.1f seconds.",
+                 time.perf_counter() - revalidation_started)
+        LOG.info("Resources after cache verification: %s", _resource_summary())
         good = [normalized_by_id[event["race_id"]] for event in events
                 if event["race_id"] in normalized_by_id]
         good_ids = set(normalized_by_id)
@@ -1058,6 +1172,7 @@ def run(args: argparse.Namespace) -> Path:
         _align_cohort_num_nodes(base, good, stages_root)
         config_path = out / "season_config.yaml"
         atomic_bytes(config_path, yaml.safe_dump(base, sort_keys=False).encode())
+        cohort_started = time.perf_counter()
         source_root = out / "race_cache"
         source_hash = write_normalized_source(
             stages_root, source_root, config_path, good,
@@ -1073,6 +1188,7 @@ def run(args: argparse.Namespace) -> Path:
             if cached is not None:
                 cohort_dir = candidate
                 break
+        cohort_cache_hit = cached is not None
         if cached is None:
             failure_stage = "prepare graph cohort from normalized race tables"
             if cohort_prefix.exists():
@@ -1087,6 +1203,10 @@ def run(args: argparse.Namespace) -> Path:
             cached = _cohort_cached(cohort_dir, base, source_hash)
             if cached is None:
                 raise RuntimeError("Prepared cohort failed its saved manifest/config/source checks.")
+        LOG.info("Cohort lookup/preparation completed in %.1f seconds (cache %s).",
+                 time.perf_counter() - cohort_started,
+                 "hit" if cohort_cache_hit else "miss")
+        LOG.info("Resources after cohort preparation: %s", _resource_summary())
         payload, manifest = cached
         if manifest["provider"] != "fastf1" or len(manifest["sessions"]) < 3:
             raise ValueError("Prepared cohort provider/session-count invariant failed")
@@ -1152,6 +1272,9 @@ def run(args: argparse.Namespace) -> Path:
             labels_to_load = payload.pop("labels")
             train_loader, val_loader, test_loader, scaler = create_dataloaders(
                 snapshots_to_load, labels_to_load, payload["driver_to_idx"], cfg)
+            LOG.info("Training inputs: %d snapshots; windows train=%d validation=%d test=%d; %s",
+                     len(snapshots_to_load), len(train_loader.dataset), len(val_loader.dataset),
+                     len(test_loader.dataset), _resource_summary())
             del snapshots_to_load, labels_to_load
             import gc
             gc.collect()
@@ -1159,7 +1282,11 @@ def run(args: argparse.Namespace) -> Path:
             torch.manual_seed(args.seed)
             np.random.seed(args.seed)
             resume_from = last_path if last_path.is_file() else None
+            training_started = time.perf_counter()
             best_val, history = train_model(model, train_loader, val_loader, cfg, device, resume_from=resume_from)
+            LOG.info("Model fit/resume completed in %.1f seconds.",
+                     time.perf_counter() - training_started)
+            LOG.info("Resources after model fit: %s", _resource_summary())
             hist = pd.DataFrame(history)
             _atomic_csv(hist, Path(cfg["train"]["history_path"]))
             checkpoint = torch.load(best_path, map_location=device, weights_only=False)
@@ -1265,6 +1392,7 @@ def run(args: argparse.Namespace) -> Path:
         if not _output_is_current(residual_path, plot_fingerprint):
             fig, ax = plt.subplots(); ax.hist(pred-y, bins=50); ax.set_xlabel("Prediction residual (s)"); fig.savefig(residual_path, dpi=140); plt.close(fig)
             _record_output(residual_path, plot_fingerprint)
+        LOG.info("Season runner completed in %.1f seconds.", time.perf_counter() - run_started)
         return out
     except Exception as exc:
         details = _sanitized_error(exc, secrets)

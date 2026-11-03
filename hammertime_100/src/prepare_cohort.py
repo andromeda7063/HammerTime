@@ -135,7 +135,9 @@ def clone_snapshots(snapshots: Sequence) -> list:
     return clones
 
 
-def _build_snapshots_by_race(aligned: pd.DataFrame | Sequence[pd.DataFrame], config: dict, specs: list[dict]):
+def _build_snapshots_by_race(
+    aligned: pd.DataFrame | Sequence[pd.DataFrame | str | Path], config: dict, specs: list[dict],
+):
     snapshots, driver_maps = [], {}
     if isinstance(aligned, pd.DataFrame):
         by_race = {str(k): v for k, v in aligned.groupby("RaceId", sort=False)}
@@ -144,15 +146,23 @@ def _build_snapshots_by_race(aligned: pd.DataFrame | Sequence[pd.DataFrame], con
     else:
         # Sequence of per-race DataFrames
         by_race = {}
-        for item in aligned:
+        for index, item in enumerate(aligned):
             if isinstance(item, pd.DataFrame) and "RaceId" in item.columns and not item.empty:
                 by_race[str(item["RaceId"].iloc[0])] = item
-        if len(by_race) != len(specs) and len(aligned) == len(specs):
+            elif isinstance(item, (str, Path)) and index < len(specs):
+                by_race[str(specs[index]["race_id"])] = Path(item)
+        if len(by_race) != len(specs) and len(aligned) == len(specs) and all(
+                isinstance(item, pd.DataFrame) for item in aligned):
             by_race = {str(spec["race_id"]): df for spec, df in zip(specs, aligned)}
 
     for spec in specs:
         race_id = str(spec["race_id"])
         race_frame = by_race.get(race_id)
+        if isinstance(race_frame, (str, Path)):
+            race_frame = pd.read_parquet(race_frame)
+            if ("RaceId" not in race_frame
+                    or set(race_frame["RaceId"].astype(str).unique()) != {race_id}):
+                raise ValueError(f"Normalized rows do not all belong to configured race {race_id!r}.")
         if race_frame is None or race_frame.empty:
             raise ValueError(f"No aligned rows remain for configured race {race_id!r}.")
         race_config = copy.deepcopy(config)
@@ -163,6 +173,7 @@ def _build_snapshots_by_race(aligned: pd.DataFrame | Sequence[pd.DataFrame], con
         race_snaps, driver_map = build_race_graph_snapshots(race_frame, race_config)
         snapshots.extend(race_snaps)
         driver_maps[race_id] = driver_map
+        del race_snaps, race_frame
     if len(driver_maps) > 1:
         remap_cohort_driver_nodes(snapshots, driver_maps, int(config["graph"]["num_nodes"]))
         all_drivers = sorted({str(driver) for mapping in driver_maps.values() for driver in mapping})
@@ -172,16 +183,21 @@ def _build_snapshots_by_race(aligned: pd.DataFrame | Sequence[pd.DataFrame], con
     return snapshots, driver_to_idx
 
 
-def _coverage(aligned: pd.DataFrame | Sequence[pd.DataFrame], labels: pd.DataFrame, snapshots: list) -> dict:
+def _coverage(
+    aligned: pd.DataFrame | Sequence[pd.DataFrame | str | Path], labels: pd.DataFrame, snapshots: list,
+) -> dict:
     if isinstance(aligned, pd.DataFrame):
         aligned_list = [aligned]
     else:
         aligned_list = list(aligned)
-    total_aligned_rows = sum(len(df) for df in aligned_list)
+    total_aligned_rows = 0
     valid_aligned_rows = 0
     drivers = set()
     total_laps = 0
     for df in aligned_list:
+        if isinstance(df, (str, Path)):
+            df = pd.read_parquet(df)
+        total_aligned_rows += len(df)
         valid = df.get("IsValid", pd.Series(False, index=df.index)).fillna(False).astype(bool)
         valid_rows = df.loc[valid]
         valid_aligned_rows += int(valid.sum())
@@ -189,6 +205,7 @@ def _coverage(aligned: pd.DataFrame | Sequence[pd.DataFrame], labels: pd.DataFra
             drivers.update(df["Driver"].dropna().unique())
         if {"RaceId", "Driver", "LapNumber"}.issubset(valid_rows.columns):
             total_laps += valid_rows.groupby(["RaceId", "Driver", "LapNumber"], dropna=True).ngroups
+        del valid, valid_rows, df
     edge_total = sum(int(snapshot.edge_index.size(1)) for snapshot in snapshots)
     return {
         "aligned_rows": int(total_aligned_rows),
@@ -298,7 +315,8 @@ def _read_aligned_source(source_dir: Path, specs: list[dict], provider: str):
     return aligned_tables, labels_tables, records, paths, manifest
 
 
-def _read_normalized_source(source_dir: Path, specs: list[dict], provider: str):
+def _read_normalized_source(source_dir: Path, specs: list[dict], provider: str,
+                            load_aligned: bool = True):
     """Read a resumable source cache of authentic per-session normalized tables.
 
     This is deliberately a different manifest type from ``--aligned-source``,
@@ -366,8 +384,10 @@ def _read_normalized_source(source_dir: Path, specs: list[dict], provider: str):
                     or _sha256_file(path) != expected_hash.get("sha256")):
                 raise ValueError(f"Normalized source file hash is missing or invalid: {path}")
             paths.append(str(path))
-        aligned, labels = pd.read_parquet(aligned_path), pd.read_parquet(labels_path)
-        if "RaceId" not in aligned or set(aligned["RaceId"].astype(str).unique()) != {str(spec["race_id"])}:
+        aligned = pd.read_parquet(aligned_path) if load_aligned else aligned_path
+        labels = pd.read_parquet(labels_path)
+        if load_aligned and ("RaceId" not in aligned or
+                             set(aligned["RaceId"].astype(str).unique()) != {str(spec["race_id"])}):
             raise ValueError(f"Normalized rows do not all belong to configured race {spec['race_id']!r}.")
         if "RaceId" not in labels or set(labels["RaceId"].astype(str).unique()) != {str(spec["race_id"])}:
             raise ValueError(f"Normalized target rows do not all belong to configured race {spec['race_id']!r}.")
@@ -401,6 +421,7 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
     validate_config(config)
     specs = _session_specs(config)
     provider = _provider_for_specs(specs)
+    schema = node_feature_schema(config)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent) as temp:
         staging_dir = Path(temp)
@@ -419,7 +440,8 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             elif normalized_source_dir is not None:
                 source_root = Path(normalized_source_dir).resolve()
                 (aligned_tables, label_tables, session_records, source_files,
-                 source_manifest) = _read_normalized_source(source_root, specs, provider)
+                 source_manifest) = _read_normalized_source(
+                     source_root, specs, provider, load_aligned=(schema == "circuit_context_v1"))
             else:
                 for spec in specs:
                     race_id = str(spec["race_id"])
@@ -461,7 +483,6 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             labels_all = pd.concat(label_tables, ignore_index=True)
             del label_tables
 
-            schema = node_feature_schema(config)
             if schema == "circuit_context_v1":
                 # Derive the frozen split from the legacy input representation. The
                 # context reference is then fitted only on unique frames actually
@@ -600,9 +621,8 @@ def prepare_cohort(config_path: str | Path, output_dir: str | Path,
             with artifact_staged.open("wb") as output:
                 pickle.dump(payload, output, protocol=pickle.HIGHEST_PROTOCOL)
                 output.flush()
-                # fdatasync is unavailable on Windows; fsync provides the
-                # portable file-level durability fallback there.
-                getattr(os, "fdatasync", os.fsync)(output.fileno())
+                # Keep file durability portable across Windows and Unix.
+                os.fsync(output.fileno())
             del payload, snapshots, labels_all
             gc.collect()
 

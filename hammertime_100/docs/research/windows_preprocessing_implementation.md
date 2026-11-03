@@ -1,0 +1,20 @@
+# Windows preprocessing implementation notes
+
+## Scope
+
+This change targets the 2023 GNNv2 season path on a Windows host with limited RAM. It keeps the configured 22-race inventory, normalizer gates, targets, race-held-out split, scaler fit rules, model, training options, and `--window-stride` unchanged. It does not move preprocessing to CUDA or claim a measured speedup. No authentic Windows run logs or full local season profiling were available when these changes were made.
+
+## Changes
+
+- `src/preprocess.py` constructs the telemetry distance lookup once per driver rather than copying, coercing, and deduplicating the entire source telemetry table once per lap. In `compute_time_gaps`, sorted distances and speeds are held as arrays and the first sorted row for each driver is indexed once. This matches the previous `.iloc[0]` choice for duplicate IDs; driver maps still follow the existing last-write behavior.
+- Both season and single-race preprocessing release full race tables after per-driver copies are made, clear per-driver inputs after alignment, and release the list of aligned per-driver frames after concatenation.
+- `src/graph.py` uses tuple iteration and a small field dictionary instead of a Pandas row Series for each driver/timestamp. Helpers retain their existing mapping interface.
+- For the season runner's `circuit_context_v2` normalized-source path, `prepare_cohort` validates the cache manifest and table hashes, retains aligned-table paths, then reads and graph-builds one race at a time. It performs a second sequential read for the existing coverage summary. `circuit_context_v1` remains on its eager two-pass calibration path. Train-only feature and edge scaler fitting, snapshots, labels, and split membership are unchanged. The graph snapshot inventory still stays in memory for cohort scaling, splitting, and training.
+- Normalization worker sizing now reads available physical memory with Windows `GlobalMemoryStatusEx` and Unix probes. When memory cannot be read, it limits normalization to one process. The inherited 2 GiB reserve and 700 MiB per-worker estimate remain heuristics; they have not been measured as safe maxima for this workload. The runner logs requested/effective worker counts, elapsed times for major phases, parent-process RSS and available system RAM where measurable, and graph snapshot/window counts. It does not collect process-tree peak RSS or hard-fault traces.
+- Cohort artifact persistence uses portable `os.fsync`; checkpoint persistence already opens a writable descriptor before fsync on Windows. The Windows run guide now consumes an existing `<clone>\\race_cache\\raw_sessions` path in place, checks the expected 22 directories and per-race filenames, and explains the separate normalization worker, source-validation worker, and PyTorch thread settings.
+
+## Checks and limits
+
+Focused locked-environment fixture and contract tests passed for preprocessing measurements (9), normalized-source/resume handling (10), cohort preparation and exact eager-versus-path split membership hashes (3), graph contracts (5), physical graphs (10), context graph views (1), context features (5), and checkpoint provenance (1). These fixtures check behavior; they are not race results. The local Python environment had to be reused without syncing because package downloads were unavailable. A full season run, Windows API execution, GPU run, authentic-data timing, and child-process peak-memory measurement were not performed.
+
+Use Performance Monitor or an equivalent process-tree sampler during a future full run to capture per-process working set, available RAM and system commit, page reads/hard faults, CPU per core, disk activity, and GPU utilization. Record elapsed time and output fingerprints for the raw validation, normalization, graph/cohort, and training phases. Compare only runs with the same authentic source manifests, config, race coverage, window stride, split, and model settings. Do not infer speedup from the source edits or fixture timings.

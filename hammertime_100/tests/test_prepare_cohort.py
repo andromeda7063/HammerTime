@@ -18,6 +18,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import prepare_cohort
+from dataset import create_dataloaders
 from graph import remap_cohort_driver_nodes
 
 
@@ -42,6 +43,72 @@ def make_graphs(race_id, drivers, times=20, num_nodes=20):
 
 
 class PrepareCohortTests(unittest.TestCase):
+    def test_path_backed_context_v2_build_preserves_coverage_and_split_hashes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with (Path(__file__).resolve().parents[1] / "configs" / "default.yaml").open() as source:
+                config = yaml.safe_load(source)
+            config["graph"]["node_feature_schema"] = "circuit_context_v2"
+            config["data"].update(window_size=2, horizon=1, train_ratio=0.6,
+                                  val_ratio=0.2, test_ratio=0.2,
+                                  split_method="race", random_seed=42)
+            specs = [{"year": 2023 + index, "gp": f"Race {index}",
+                      "race_id": f"race-{index}"} for index in range(3)]
+            aligned_by_race, labels = [], []
+            paths = []
+            for spec in specs:
+                race_id = spec["race_id"]
+                aligned = pd.DataFrame([
+                    {"RaceId": race_id, "Driver": driver, "LapNumber": 1,
+                     "TimeSec": time_sec, "IsValid": True}
+                    for time_sec in (index * 0.25 for index in range(32))
+                    for driver in ("AA", "BB")
+                ])
+                aligned_by_race.append(aligned)
+                labels.extend({"RaceId": race_id, "Driver": driver,
+                               "TimeSec": index * 0.25, "DeltaT_Sector": index / 100.0}
+                              for index in range(2, 31) for driver in ("AA", "BB"))
+                path = root / f"{race_id}.parquet"
+                aligned.to_parquet(path, index=False)
+                paths.append(path)
+
+            def fake_snapshots(frame, race_config):
+                race_id = frame["RaceId"].iloc[0]
+                return make_graphs(race_id, ["AA", "BB"], times=32,
+                                   num_nodes=race_config["graph"]["num_nodes"])
+
+            with patch.object(prepare_cohort, "build_race_graph_snapshots", side_effect=fake_snapshots):
+                eager_snapshots, eager_drivers = prepare_cohort._build_snapshots_by_race(
+                    aligned_by_race, config, specs)
+                path_snapshots, path_drivers = prepare_cohort._build_snapshots_by_race(
+                    paths, config, specs)
+                empty_path = root / "empty.parquet"
+                pd.DataFrame(columns=["RaceId", "Driver", "TimeSec"]).to_parquet(
+                    empty_path, index=False)
+                with self.assertRaisesRegex(ValueError, "do not all belong"):
+                    prepare_cohort._build_snapshots_by_race(
+                        [empty_path, *paths[1:]], config, specs)
+
+            self.assertEqual(eager_drivers, path_drivers)
+            self.assertEqual(prepare_cohort._coverage(aligned_by_race, pd.DataFrame(labels), eager_snapshots),
+                             prepare_cohort._coverage(paths, pd.DataFrame(labels), path_snapshots))
+            eager_loaders = create_dataloaders(
+                prepare_cohort.clone_snapshots(eager_snapshots), pd.DataFrame(labels),
+                eager_drivers, config)
+            path_loaders = create_dataloaders(
+                prepare_cohort.clone_snapshots(path_snapshots), pd.DataFrame(labels),
+                path_drivers, config)
+            self.assertEqual(eager_loaders[0].dataset.split_metadata["method"], "race")
+            self.assertEqual(path_loaders[0].dataset.split_metadata["method"], "race")
+            eager_memberships = [prepare_cohort._membership(loader) for loader in eager_loaders[:3]]
+            path_memberships = [prepare_cohort._membership(loader) for loader in path_loaders[:3]]
+            self.assertEqual(eager_memberships, path_memberships)
+            eager_hashes = [prepare_cohort._sha256_bytes(prepare_cohort._canonical_json(rows))
+                            for rows in eager_memberships]
+            path_hashes = [prepare_cohort._sha256_bytes(prepare_cohort._canonical_json(rows))
+                           for rows in path_memberships]
+            self.assertEqual(eager_hashes, path_hashes)
+
     def test_preparation_freezes_multirace_artifact_and_global_driver_indices(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

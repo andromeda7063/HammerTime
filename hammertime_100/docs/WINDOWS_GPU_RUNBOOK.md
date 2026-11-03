@@ -1,8 +1,8 @@
 # Run GNNv2 on native Windows with an RTX 4060
 
-This runbook transfers the pushed `dev/gnnv2` branch and authentic raw race tables to a native Windows laptop, then runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
+This runbook uses an existing Windows clone that already contains the authentic 2023 raw race tables under `race_cache`. It opens the preprocessing implementation in a separate Git worktree, reuses those raw files in place, and runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
 
-Clone the current `dev/gnnv2` branch. The GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.
+The explicit GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.
 
 ## Install the Windows tools
 
@@ -20,20 +20,21 @@ nvidia-smi
 
 The prebuilt CUDA wheel below supplies the CUDA runtime. A separate CUDA toolkit installation is not needed for this run. See NVIDIA's [CUDA minor-version compatibility table](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
 
-## Clone the pushed branch
+## Open the preprocessing branch beside the existing clone
 
-Use a short local path to keep generated file paths manageable. From PowerShell:
+The implementation branch created for this change is `dev/gnnv2-preprocessing`; Git cannot represent `dev/gnnv2/preprocessing` while a `dev/gnnv2` branch already exists. This branch is local until it is published. After it has been pushed to the shared remote, open a separate worktree from your existing clone. This leaves your current checkout and its untracked files alone.
 
 ```powershell
-New-Item -ItemType Directory -Force -Path 'C:\F1' | Out-Null
-$Repo = 'C:\F1\HammerTime'
-git clone --branch dev/gnnv2 --single-branch https://github.com/andromeda7063/HammerTime.git $Repo
+$ExistingRepo = 'C:\F1\HammerTime' # Change to the path of your already-populated clone.
+$Repo = 'C:\F1\HammerTime-gnnv2-preprocessing'
+git -C $ExistingRepo status --short
+git -C $ExistingRepo fetch origin refs/heads/dev/gnnv2-preprocessing:refs/remotes/origin/dev/gnnv2-preprocessing
+git -C $ExistingRepo worktree add --track -b dev/gnnv2-preprocessing $Repo origin/dev/gnnv2-preprocessing
 Set-Location $Repo
-$RunOut = Join-Path $Repo '.local\research-history\2023-fastf1-gnnv2-windows'
 git branch --show-current
 ```
 
-The last command should print `dev/gnnv2`.
+The last command should print `dev/gnnv2-preprocessing`. The fetch/worktree commands will work only after that branch is published to `origin`; they do not change or delete the original clone. If the branch has not been published yet, stop here rather than substituting another branch.
 
 ## Install the locked Python environment
 
@@ -82,24 +83,34 @@ if ($LASTEXITCODE -ne 0) { throw 'GPU readiness check failed; do not start train
 
 Continue only if it reports CUDA available and names the RTX 4060. If it fails, stop before the long season run and resolve the driver or wheel issue first. This check imports the third-party libraries only; it does not import or run HammerTime.
 
-## Transfer the authentic raw race tables
+## Point to the existing authentic raw race tables
 
-Only the raw-session archive is needed from the source laptop. It contains about 1.1 GB of per-race Parquet tables and `raw_manifest.json` files. Do not copy `.env`, credentials, the FastF1 HTTP cache, old prepared cohorts, or old checkpoints. Copy this archive from a trusted source run: the runner checks manifest FastF1 provenance, event identity, round-number scheme, byte counts, and SHA256 hashes to detect transfer corruption, but the manifests are not cryptographic attestations of data origin. The raw tables must cover every race in the 22-race registry. It accepts the source archive's consistent completed-race rounds 1–22 or a consistent published-calendar numbering (1–5, then 7–23). Missing, corrupt, duplicate/inconsistent, or unregistered sessions stop the run; the program never falls back to a FastF1 request.
-
-Set `$UsbRoot` to the pendrive folder containing the old `.local` directory, then copy raw sessions into this run's output tree:
+The runner expects `$RawSessions` to point directly to a directory containing one subdirectory per registered race. Each race subdirectory must contain `raw_manifest.json`, `raw_laps.parquet`, and `raw_telemetry.parquet`. For the common layout where files are already under `<existing clone>\race_cache\raw_sessions`, use:
 
 ```powershell
-$UsbRoot = 'E:\HammerTime' # Change this to the pendrive path.
-$RawSource = Join-Path $UsbRoot '.local\research-history\2023-fastf1-season\race_cache\raw_sessions'
-$RawTarget = Join-Path $RunOut 'race_cache\raw_sessions'
-if (-not (Test-Path $RawSource)) { throw "Raw source directory is missing: $RawSource" }
-robocopy $RawSource $RawTarget /E /COPY:DAT /DCOPY:DAT /R:1 /W:1
-if ($LASTEXITCODE -ge 8) { throw "Raw-session copy failed with robocopy exit code $LASTEXITCODE" }
+$RawSessions = Join-Path $ExistingRepo 'race_cache\raw_sessions'
+if (-not (Test-Path $RawSessions -PathType Container)) {
+    throw "Expected raw_sessions directory is missing: $RawSessions. Inspect race_cache with: Get-ChildItem (Join-Path $ExistingRepo 'race_cache') -Force"
+}
+$RaceDirs = @(Get-ChildItem $RawSessions -Directory | Where-Object { -not $_.Name.StartsWith('.') })
+"Raw race directories found: $($RaceDirs.Count)"
+if ($RaceDirs.Count -ne 22) { throw "Expected 22 race directories; found $($RaceDirs.Count) under $RawSessions. Inspect this directory and verify the raw_sessions path." }
+Get-ChildItem $RawSessions -Directory | Select-Object -First 3 -ExpandProperty FullName
+Get-ChildItem (Join-Path $RaceDirs[0].FullName 'raw_manifest.json'), `
+              (Join-Path $RaceDirs[0].FullName 'raw_laps.parquet'), `
+              (Join-Path $RaceDirs[0].FullName 'raw_telemetry.parquet') | Select-Object FullName, Length
 ```
 
-`robocopy` exit codes 0–7 are success/informational. If the pendrive backup has a different root, change `$UsbRoot`. A complete raw archive is required; the run will not proceed with partial coverage.
+The count command should report 22 race directories. If the files are under a different `race_cache` subdirectory, set `$RawSessions` to that exact `raw_sessions` directory; do not point to its parent and do not rename or copy the files. The runner verifies all 22 registered sessions, event identity, consistent round numbering, byte counts, and SHA256 hashes. Missing, corrupt, duplicate/inconsistent, or unregistered sessions stop the run with the expected race and manifest problem; the program never falls back to a FastF1 request. SHA256 verifies transfer integrity, not data origin.
 
-The target creates new normalized tables, prepared cohort, checkpoints, and reports under `$RunOut`. Do not transfer old prepared cohorts or checkpoints; their absolute paths and earlier model/configuration signatures do not match this run. Do not use the tracked historical `hammertime_100/best.pt` as the GNNv2 checkpoint. No FastF1 account credentials are needed in local-data-only mode.
+```powershell
+$RunOut = Join-Path $Repo '.local\research-history\2023-fastf1-gnnv2-preprocessing-windows'
+New-Item -ItemType Directory -Force -Path $RunOut | Out-Null
+$RunLog = Join-Path $RunOut 'runner.log'
+"Repo: $Repo`nRaw sessions: $RawSessions`nOutput: $RunOut" | Set-Content -Encoding utf8 (Join-Path $RunOut 'run_inputs.txt')
+```
+
+The new worktree writes normalized tables, a prepared cohort, checkpoints, logs, and reports under `$RunOut`. The raw tables remain in the old clone. Do not copy old prepared cohorts or checkpoints into this output: their source/configuration signatures may not match. Do not use the tracked historical `hammertime_100/best.pt` as the GNNv2 checkpoint. No FastF1 account credentials are needed in local-data-only mode.
 
 ## Run the 2023 FastF1 season workflow
 
@@ -117,11 +128,12 @@ $env:PYTHONUTF8 = '1' # Optional: helps Windows terminals handle Unicode race/se
     --processing-workers 1 `
     --torch-threads 1 `
     --local-data-only `
-    --raw-sessions-dir $RawTarget `
-    --log-every-batches 10
+    --raw-sessions-dir $RawSessions `
+    --log-every-batches 10 2>&1 | Tee-Object -FilePath $RunLog
+if ($LASTEXITCODE -ne 0) { throw "Season run failed; inspect $RunLog and $(Join-Path $RunOut 'run_failure.json')" }
 ```
 
-The config's batch size of 256 is used because `--batch-size` is omitted. If training reports CUDA out-of-memory, retry with `--batch-size 128`, then 64 if needed. A changed batch size creates a different training fingerprint and a distinct output under `training`; record the value used. The conservative worker counts keep CPU preprocessing/export parallelism low while the model trains on the GPU.
+The config's batch size of 256 is used because `--batch-size` is omitted. `--processing-workers 1` controls independent CPU normalization processes; `--workers 1` controls source validation/export in online mode (FastF1 acquisition is serialized); `--torch-threads 1` controls PyTorch CPU intra-op math. These are separate controls. The GNNv2 runbook uses one normalization process as the conservative starting point for a 16 GB host. The new code logs requested/effective normalization workers and available RAM; on Windows it caps processes using current free physical memory and defaults to one process if the probe fails. Do not raise the worker count while RAM is exhausted. If training reports CUDA out-of-memory, retry with `--batch-size 128`, then 64 if needed. A changed batch size creates a different training fingerprint and a distinct output under `training`; record the value used.
 
 The runner verifies all 22 local source manifests, preprocesses the raw tables, applies existing coverage checks, prepares the graph cohort, trains, evaluates on the existing held-out split, and exports artifacts. It makes no FastF1 source requests in local-data-only mode. The first full run can take substantial time, particularly during season-data preparation; no duration or score is guaranteed. Training progress is logged on the first batch and every 10 batches after that. Check the run log and then inspect:
 
@@ -131,6 +143,8 @@ The runner verifies all 22 local source manifests, preprocesses the raw tables, 
 - `$RunOut\run_failure.json` if the run stops with a recorded failure.
 
 There is no `--resume` flag. An interrupted run resumes automatically from `best.last.pt` only when the config, implementation, data, scaler, device type, thread count, and checkpoint path all match. Re-run the same command with the same `$RunOut` to continue it. Changing CPU to CUDA, changing output path or training flags, or using an older checkpoint creates a different training identity; the runner will not resume an incompatible checkpoint.
+
+Reuse is checked separately at each stage. The runner still hashes and verifies the raw inventory. A normalized race stage is reused only if its recorded source and normalization fingerprints validate. Graph/cohort preparation is skipped only when the prepared artifact and manifest match the effective season config and normalized-source hash; an invalid older artifact is retained and a new rebuild directory is used. Training resumes from its last checkpoint only for a matching training fingerprint, while a verified completed run skips fitting. A changed stride, schema, config, source, device, or other fingerprinted option may require rebuilding one or more later stages. Use this season runner with the same validated GNNv2 config and protocol; a standalone ablation or arbitrary-config training command is not an equivalent continuation path.
 
 This runbook does not report a completed RTX 4060 training run or measured performance. The GNNv2 model and config are implementation candidates; interpret the authentic held-out results only after the run completes and its coverage and acceptance gates are reviewed.
 
