@@ -1,5 +1,9 @@
 # Research and Change Record
 
+## Numba feasibility for preprocessing — 2026-11-03
+
+Profiled source-level Numba candidates and compared a temporary Numba 0.68 typed-array prototype with the full physical-circuit edge-builder wrapper on synthetic 20-car fixtures. Exact outputs matched across packed and sparse fixtures, but warm timings varied by edge density and differed by only a few microseconds per frame; first-call compilation cost about 0.55 s. No authentic Windows race data or run logs were available. Numba was not added to runtime dependencies or `uv.lock`, and production code was unchanged. The benchmark script, compatibility evidence, results, and limitations are documented in `hammertime_100/docs/research/numba_preprocessing_assessment.md` and `hammertime_100/tools/benchmarks/numba_physical_graph_microbenchmark.py`; raw output is in ignored `.local/research-history/`.
+
 ## GNNv2 Windows preprocessing memory and runtime instrumentation — 2026-11-03
 
 On the `dev/gnnv2-preprocessing` branch, reduced repeated Pandas work in lap distance and driver-gap preprocessing, released race and per-driver frame references as each race is normalized, and changed graph row iteration to avoid per-row Pandas Series allocation while preserving the feature helper mapping interface. The GNNv2 normalized-source cohort path now graph-builds aligned Parquet tables one race at a time; the legacy `circuit_context_v1` eager two-pass calibration path remains unchanged. The existing coverage summary makes a second sequential read of those aligned tables. Added portable available-memory and parent RSS probes, conservative effective-worker logging, phase elapsed times, and snapshot/window counts. The prior 700 MiB per-worker estimate remains an unmeasured heuristic, not a demonstrated safe maximum. No preprocessing moved to the GPU and no performance gain is claimed.
