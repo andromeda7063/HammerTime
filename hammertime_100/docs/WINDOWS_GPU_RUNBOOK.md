@@ -1,8 +1,8 @@
 # Run GNNv2 on native Windows with an RTX 4060
 
-This runbook transfers the pushed `codex/gnnv2` branch and authentic raw race tables to a native Windows laptop, then runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
+This runbook transfers the pushed `dev/gnnv2` branch and authentic raw race tables to a native Windows laptop, then runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
 
-Clone the current `codex/gnnv2` branch. The GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.
+Clone the current `dev/gnnv2` branch. The GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.
 
 ## Install the Windows tools
 
@@ -27,13 +27,13 @@ Use a short local path to keep generated file paths manageable. From PowerShell:
 ```powershell
 New-Item -ItemType Directory -Force -Path 'C:\F1' | Out-Null
 $Repo = 'C:\F1\HammerTime'
-git clone --branch codex/gnnv2 --single-branch https://github.com/andromeda7063/HammerTime.git $Repo
+git clone --branch dev/gnnv2 --single-branch https://github.com/andromeda7063/HammerTime.git $Repo
 Set-Location $Repo
 $RunOut = Join-Path $Repo '.local\research-history\2023-fastf1-gnnv2-windows'
 git branch --show-current
 ```
 
-The last command should print `codex/gnnv2`.
+The last command should print `dev/gnnv2`.
 
 ## Install the locked Python environment
 

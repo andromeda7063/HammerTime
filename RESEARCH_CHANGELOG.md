@@ -189,6 +189,9 @@ Added [`hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md`](hammertime_100/docs/WINDOWS
 
 Added `--local-data-only --raw-sessions-dir PATH` to the 2023 FastF1 season runner. This branch is selected before credential loading, FastF1 import/cache setup, or calendar discovery. It requires hash-verified raw lap and telemetry tables plus FastF1 provenance for all 22 registered 2023 race IDs, rejects missing/corrupt tables and incomplete or inconsistent round numbering, and does not fall back to source requests. The verified source fingerprints, file hashes, and available FastF1 version provenance are retained in normalized-source metadata; legacy manifests without version fields are labelled `unrecorded` instead of being assigned a guessed version. The actual transferred source cache uses completed-race rounds 1–22; a complete consistent published-calendar numbering scheme is also accepted and recorded. No coverage, preprocessing, target, split, physics, or acceptance gates were changed. Added a configurable `train.log_every_batches` interval (default 10, CLI override `--log-every-batches`); it is excluded from model/data cache and resume identity because it changes only progress reporting. Updated README and Windows runbook with a raw-only transfer and run path. Source-only review was performed; no tests, imports, training, or benchmarks were run.
 
+## Two-worktree collaboration branches — 2026-11-03
+
+Renamed the active frontend branch to `dev/frontend` and the active GNNv2 branch to `dev/gnnv2`, retaining their existing commit histories and separate worktrees. Removed the superseded agent-named remote refs after confirming the new refs matched their previous commits; deleted the merged report branches and redundant local-only aliases whose commits remain reachable. Updated the Windows GPU runbook's clone instructions to use `dev/gnnv2`. No model, dataset, checkpoint, metric, split, or training output was changed.
 
 
 
