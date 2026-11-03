@@ -1,5 +1,53 @@
 # Run GNNv2 on native Windows with an RTX 4060
 
+## Run the GNNv3 candidate from an older Windows clone
+
+These instructions add the published `dev/gnnv3` branch beside an existing Windows clone, preserving that checkout and all of its race caches. They target the GNNv3 attention-free edge-temporal candidate, reuse an already-prepared cohort only when every existing fingerprint and artifact check matches, and stop if the cached cohort is incompatible. They never rebuild or modify the source cohort. There is no production checkpoint in this Windows clone; the launcher records that explicitly. Any source `best.pt` files are listed and left untouched. Pass `-ProductionCheckpoint` only if you have a specific production `best.pt` to back up.
+
+From PowerShell, set paths for your existing clone, the new worktree, its raw race cache, and the run directory containing `race_cache` plus `cohorts`:
+
+```powershell
+$ExistingRepo = 'C:\F1\HammerTime' # Existing populated clone; leave it in place.
+$Repo = 'C:\F1\HammerTime-gnnv3' # New, unused path.
+$RawSessions = Join-Path $ExistingRepo 'race_cache\raw_sessions'
+$PreparedRun = 'C:\F1\HammerTime\path\to\existing\run' # Contains race_cache and cohorts.
+git -C $ExistingRepo status --short
+git -C $ExistingRepo remote set-branches --add origin dev/gnnv3
+git -C $ExistingRepo fetch origin refs/heads/dev/gnnv3:refs/remotes/origin/dev/gnnv3
+git -C $ExistingRepo worktree add --track -b dev/gnnv3 $Repo origin/dev/gnnv3
+Set-Location $Repo
+git branch --show-current
+```
+
+The final command should print `dev/gnnv3`. Use a new, nonexistent `$Repo` path. These commands do not reset the existing clone, remove files, or change its `race_cache`.
+
+The prepared run directory must contain `race_cache/normalized_source_manifest.json`, `race_cache/sessions`, and `cohorts`. `$RawSessions` must contain all 22 authenticated raw race directories. Set `$PreparedRun` to the directory that owns those prepared artifacts, rather than the clone root if the cohort is nested under a run output.
+
+Run the preflight first:
+
+```powershell
+& .\hammertime_100\tools\train_gnnv3_rtx4060.ps1 `
+    -RawSessions $RawSessions `
+    -ReusePreparedFrom $PreparedRun `
+    -PreflightOnly
+```
+
+The launcher creates or syncs a dedicated `.venv-gnnv3-win` in the new worktree, installs the official PyTorch 2.14.1 CUDA 13.0 Windows wheel there, and checks actual CUDA allocation/device execution before touching the run workflow. It does not use or replace an environment in the old clone. The exact cp312 wheel URL was checked and returned HTTP 200 during preparation. Each later Python invocation uses `uv run --frozen --no-sync` so it will not replace the CUDA build with the CPU wheel from `uv.lock`. It fails if CUDA is unavailable; it never falls back to CPU.
+
+The preflight verifies the raw manifests, normalized cache hashes, prepared cohort artifact/checksum, original config and split/scaler signatures, then constructs the candidate model. It does not unpickle the 2.9 GB prepared cohort, preprocess data, or train. If any signature/path is incompatible, the command exits with an error and does not rebuild the cohort. Resolve the original manifest/cache path or use a prepared cohort produced with the exact configuration; do not remove the cache requirement to force preparation.
+
+Once preflight passes, run the same command without `-PreflightOnly`:
+
+```powershell
+& .\hammertime_100\tools\train_gnnv3_rtx4060.ps1 `
+    -RawSessions $RawSessions `
+    -ReusePreparedFrom $PreparedRun
+```
+
+The script repeats the cache check before training, writes all new logs and checkpoints under the new worktree's ignored `.local\research-history\`, sets `--device cuda`, and never writes into the old clone or its source cache. The candidate uses the GNNv3 model/train override (edge-temporal encoder, batch size 128, 45-epoch cap, patience 12). These settings are a single combined experiment, not a sweep. The script reports the available VRAM but does not assume a benchmarked runtime or guarantee that the candidate fits every 4060 system configuration.
+
+`-ProductionCheckpoint 'C:\path\to\best.pt'` is optional. When supplied, the runner copies and SHA256-verifies it and its sibling `best.last.pt` before any cache work. Without it, the launcher passes `--no-production-checkpoint` explicitly and reports any source best checkpoints while leaving them unchanged.
+
 This runbook uses an existing Windows clone that already contains the authentic 2023 raw race tables under `race_cache`. It opens the preprocessing implementation in a separate Git worktree, reuses those raw files in place, and runs the 2023 GNNv2 season workflow with an RTX 4060. It uses PowerShell and `uv`. Package installation may use internet access; the local-data-only run does not authenticate to FastF1, discover the calendar, or request race data.
 
 The explicit GNNv2 YAML sets `spatial_layers: 3`, `own_car_branch: true`, `own_car_hidden_dim: 32`, and batch size 256. The season runner defaults to 25 epochs and window stride 1, so the command below passes `--epochs 30 --window-stride 2` to match the config.

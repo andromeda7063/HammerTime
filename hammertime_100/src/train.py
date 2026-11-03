@@ -421,6 +421,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         num_batches = 0
         primary_loss_sum = 0.0
         primary_valid_count = 0
+        online_abs_error_sum = 0.0
+        online_target_count = 0
         aux_loss_sum = 0.0
         aux_valid_count = 0
 
@@ -468,6 +470,12 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                     f"NaN or Inf loss encountered at epoch {epoch}! Check feature scaling in M5."
                 )
 
+            valid_primary = masks.to(device).bool() & torch.isfinite(targets.to(device))
+            online_abs = torch.where(
+                valid_primary, (preds - targets.to(device)).abs(), torch.zeros_like(preds)
+            ).sum()
+            online_count = valid_primary.sum().to(dtype=loss.dtype)
+
             loss.backward()
             for name, parameter in model.named_parameters():
                 if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
@@ -482,6 +490,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             num_batches += 1
             primary_loss_sum += batch_primary_loss * int(batch_primary_count)
             primary_valid_count += int(batch_primary_count)
+            online_abs_error_sum += float(online_abs.detach().cpu())
+            online_target_count += int(online_count.detach().cpu())
             if aux_enabled:
                 batch_aux_loss, batch_aux_count = stats[3:]
                 aux_loss_sum += batch_aux_loss * int(batch_aux_count)
@@ -520,6 +530,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                 logger.info(progress)
 
         avg_train_loss = epoch_loss / max(num_batches, 1)
+        train_online_mae = online_abs_error_sum / max(online_target_count, 1)
         train_elapsed = time.perf_counter() - epoch_started_at
         logger.info("Epoch %03d/%03d validation started after %.1fs of training.",
                     epoch, max_epochs, train_elapsed)
@@ -535,6 +546,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         history_entry = {
             "epoch": epoch,
             "train_loss": avg_train_loss,
+            "train_online_mae": train_online_mae,
             "val_mae": val_mae,
         }
         if lr_scheduler_type != "none":
@@ -545,7 +557,9 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                       ("s" if loss_name in ("mae", "smooth_l1", "huber") else "s²"))
         train_label = "SmoothL1" if loss_name in ("smooth_l1", "huber") else ("L1" if loss_name == "mae" else "MSE")
         lr_suffix = f" | LR: {current_lr:.6f}" if lr_scheduler_type != "none" else ""
-        logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit} | Val MAE: {val_mae:.4f} s{lr_suffix}")
+        logger.info(f"Epoch {epoch:03d} | Train {train_label}: {avg_train_loss:.4f} {train_unit}"
+                    f" | train-mode online MAE: {train_online_mae:.4f} s"
+                    f" | Val MAE: {val_mae:.4f} s{lr_suffix}")
 
         # Early stopping and checkpointing
         if val_mae < best_val_mae:
@@ -626,7 +640,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     history_path = Path(t_cfg.get("history_path", ckpt_path.parent / "training_history.csv"))
     history_path.parent.mkdir(parents=True, exist_ok=True)
     if history:
-        fieldnames = ["epoch", "train_loss", "val_mae"]
+        fieldnames = ["epoch", "train_loss", "train_online_mae", "val_mae"]
         if any("lr" in row for row in history):
             fieldnames.append("lr")
         with history_path.open("w", newline="", encoding="utf-8") as f:

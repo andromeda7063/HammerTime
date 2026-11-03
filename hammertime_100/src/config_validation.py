@@ -102,10 +102,14 @@ def validate_config(config: dict) -> None:
         raise ValueError("data.min_valid_targets_per_sample cannot exceed graph.num_nodes.")
     if value("model.hidden_dim") % value("model.gat_heads"):
         raise ValueError("model.hidden_dim must be divisible by model.gat_heads.")
+    spatial_encoder = config.get("model", {}).get("spatial_encoder", "gat")
+    if spatial_encoder not in ("gat", "edge_temporal"):
+        raise ValueError("model.spatial_encoder must be 'gat' or 'edge_temporal'.")
     spatial_layers = config.get("model", {}).get("spatial_layers", 2)
+    allowed_spatial_layers = (2, 3) if spatial_encoder == "gat" else (0,)
     if (isinstance(spatial_layers, bool) or not isinstance(spatial_layers, int)
-            or spatial_layers not in (2, 3)):
-        raise ValueError("model.spatial_layers must be 2 or 3.")
+            or spatial_layers not in allowed_spatial_layers):
+        raise ValueError(f"model.spatial_layers must be one of {allowed_spatial_layers} for {spatial_encoder}.")
     own_car_branch = config.get("model", {}).get("own_car_branch", False)
     if not isinstance(own_car_branch, bool):
         raise ValueError("model.own_car_branch must be a boolean.")
@@ -126,6 +130,11 @@ def validate_config(config: dict) -> None:
     if config.get("model", {}).get("typed_edge_values", False) and not config.get("model", {}).get(
             "mask_inactive_nodes", False):
         raise ValueError("model.typed_edge_values requires model.mask_inactive_nodes=true.")
+    if spatial_encoder == "edge_temporal" and (
+            not config.get("model", {}).get("typed_edge_values", False)
+            or typed_edge_schema != "physical_v2"
+            or not config.get("model", {}).get("mask_inactive_nodes", False)):
+        raise ValueError("edge_temporal requires typed_edge_values, physical_v2 edges, and inactive-node masking.")
     if "predict_future_speed" in config.get("model", {}) and not isinstance(
             config["model"]["predict_future_speed"], bool):
         raise ValueError("model.predict_future_speed must be a boolean.")

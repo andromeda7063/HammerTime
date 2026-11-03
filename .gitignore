@@ -11,6 +11,7 @@ __pycache__/
 # Virtual Environments & Package Managers
 # ==========================================
 .venv/
+.venv-gnnv3-win/
 venv/
 env/
 ENV/

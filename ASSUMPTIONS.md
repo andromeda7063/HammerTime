@@ -64,3 +64,13 @@ The user's explicit OpenF1 adapter request extends the earlier FastF1-only scope
 ## Windows resource-profile limits — 2026-11-03
 
 The season worker cap retains a 2 GiB reserve and an estimated 700 MiB per normalization child as an inherited sizing heuristic. It has not been measured as a safe maximum for the 2023 race tables or on Windows. The context-v2 path releases normalized aligned tables race by race while constructing snapshots, but retains the complete graph-snapshot list for split/scaler fitting and training. These are implementation/resource assumptions only; they do not alter scientific feature or data assumptions. See [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) item 17 for the required authentic Windows profile before changing the heuristic or claiming a measured improvement.
+
+## GNNv3 edge-temporal candidate — 2026-11-03
+
+| ID | Parameter or contract | Chosen behavior | Rationale |
+|---|---|---|---|
+| A33 | Attention-free physical edge temporal encoder | Per input frame, apply one existing typed edge-conditioned message pass after node projection; preserve frame-specific physical-v2 edges, causal temporal stack, active masks, own-car branch and auxiliary head | Test whether edge-conditioned pair messages plus temporal modeling work better and cheaper than three GATv2 spatial passes. This is an implementation hypothesis only; no result or runtime gain is measured. |
+| A34 | CPU overnight training profile | 64 hidden channels; batch 128; dropout 0.10; edge dropout 0; LR 5e-4; weight decay 1e-4; max 45 epochs; patience 12 | Conservative one-run settings for the reported 16 GiB/12-thread CPU. They are not selected hyperparameters. The prior model reportedly selected epoch 18, so more epochs are not assumed to cure its score. |
+| A35 | GNNv3 source/output preservation | Verify exact existing cache read-only; train in a separate empty run directory; require explicit production best-checkpoint path and record a SHA256-verified copy before fitting | Avoid rewriting production checkpoints, prepared caches or reports. No production checkpoint path is inferred. |
+
+All data, target, split, metric, coverage, acceptance, and physics contracts remain unchanged. See [`hammertime_100/docs/GNNV3_CPU_OVERNIGHT_RUNBOOK.md`](hammertime_100/docs/GNNV3_CPU_OVERNIGHT_RUNBOOK.md) and [`hammertime_100/docs/research/gnnv3_underperformance_and_cpu_candidate.md`](hammertime_100/docs/research/gnnv3_underperformance_and_cpu_candidate.md). These are proposed settings; no authentic GNNv3 training or score is claimed.

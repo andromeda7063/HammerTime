@@ -1,7 +1,7 @@
 """
 Module M6: Model Definition
-Responsibility: Define the dynamic Spatio-Temporal Graph Attention Network (ST-GNN).
-Stages: Linear projection -> two or three GAT layers -> causal temporal module -> sector head,
+Responsibility: Define the dynamic Spatio-Temporal Graph Network (ST-GNN).
+Stages: Linear projection -> configured GAT stack or typed physical-edge pass -> causal temporal module -> sector head,
 with an optional additive own-car MLP bypass from the final input frame.
 Standard: ASD-STE100 Plain English
 """
@@ -75,6 +75,7 @@ class HammerTimeSTGNN(nn.Module):
         predict_future_speed: bool = False,
         future_speed_horizon_steps: int = 5,
         spatial_layers: int = 2,
+        spatial_encoder: str = "gat",
         own_car_branch: bool = False,
         own_car_hidden_dim: int = 32,
     ):
@@ -95,9 +96,12 @@ class HammerTimeSTGNN(nn.Module):
             raise ValueError(f"edge_feature_schema must be one of {list(EDGE_FEATURES_BY_SCHEMA)}.")
         if edge_dim != len(EDGE_FEATURES_BY_SCHEMA[edge_feature_schema]):
             raise ValueError("edge_dim does not match edge_feature_schema width.")
+        if spatial_encoder not in ("gat", "edge_temporal"):
+            raise ValueError("spatial_encoder must be 'gat' or 'edge_temporal'.")
+        valid_layers = (2, 3) if spatial_encoder == "gat" else (0,)
         if (isinstance(spatial_layers, bool) or not isinstance(spatial_layers, int)
-                or spatial_layers not in (2, 3)):
-            raise ValueError("spatial_layers must be 2 or 3.")
+                or spatial_layers not in valid_layers):
+            raise ValueError(f"spatial_layers must be one of {valid_layers} for {spatial_encoder}.")
         if not isinstance(own_car_branch, bool):
             raise ValueError("own_car_branch must be a boolean.")
         if (isinstance(own_car_hidden_dim, bool) or not isinstance(own_car_hidden_dim, int)
@@ -116,6 +120,7 @@ class HammerTimeSTGNN(nn.Module):
         self.mask_inactive_nodes = bool(mask_inactive_nodes)
         self.predict_future_speed = bool(predict_future_speed)
         self.spatial_layers = int(spatial_layers)
+        self.spatial_encoder = spatial_encoder
         self.own_car_branch_enabled = bool(own_car_branch)
         self.own_car_hidden_dim = int(own_car_hidden_dim)
         if isinstance(future_speed_horizon_steps, bool) or int(future_speed_horizon_steps) <= 0:
@@ -125,6 +130,10 @@ class HammerTimeSTGNN(nn.Module):
             raise ValueError("typed_edge_values requires graph.edge_feature_schema=physical_v2.")
         if self.typed_edge_values and not self.mask_inactive_nodes:
             raise ValueError("typed_edge_values requires mask_inactive_nodes=True.")
+        if self.spatial_encoder == "edge_temporal" and (
+                not self.typed_edge_values or edge_feature_schema != "physical_v2"
+                or not self.mask_inactive_nodes):
+            raise ValueError("edge_temporal requires typed_edge_values, physical_v2 edges, and inactive-node masking.")
         head_dim = hidden_dim // gat_heads
 
         # Stage 1: Linear Input Projection
@@ -132,24 +141,8 @@ class HammerTimeSTGNN(nn.Module):
 
         # Stage 2: Spatial Message Passing (GAT or GATv2 with edge features)
         gat_cls = GATv2Conv if gat_type == "gatv2" else GATConv
-        self.gat1 = gat_cls(
-            in_channels=hidden_dim,
-            out_channels=head_dim,
-            heads=gat_heads,
-            edge_dim=edge_dim,
-            dropout=dropout,
-            add_self_loops=False
-        )
-        self.gat2 = gat_cls(
-            in_channels=hidden_dim,
-            out_channels=head_dim,
-            heads=gat_heads,
-            edge_dim=edge_dim,
-            dropout=dropout,
-            add_self_loops=False
-        )
-        if self.spatial_layers == 3:
-            self.gat3 = gat_cls(
+        if self.spatial_encoder == "gat":
+            self.gat1 = gat_cls(
                 in_channels=hidden_dim,
                 out_channels=head_dim,
                 heads=gat_heads,
@@ -157,7 +150,24 @@ class HammerTimeSTGNN(nn.Module):
                 dropout=dropout,
                 add_self_loops=False,
             )
+            self.gat2 = gat_cls(
+                in_channels=hidden_dim,
+                out_channels=head_dim,
+                heads=gat_heads,
+                edge_dim=edge_dim,
+                dropout=dropout,
+                add_self_loops=False,
+            )
+            self.gat3 = (gat_cls(
+                in_channels=hidden_dim,
+                out_channels=head_dim,
+                heads=gat_heads,
+                edge_dim=edge_dim,
+                dropout=dropout,
+                add_self_loops=False,
+            ) if self.spatial_layers == 3 else None)
         else:
+            self.gat1 = self.gat2 = None
             self.gat3 = None
 
         # Optional edge-conditioned value propagation. Each physical leader ->
@@ -175,7 +185,7 @@ class HammerTimeSTGNN(nn.Module):
         else:
             self.typed_value = None
 
-        if self.use_graph_norm:
+        if self.use_graph_norm and self.spatial_encoder == "gat":
             from torch_geometric.nn.norm import GraphNorm
             self.norm1 = GraphNorm(hidden_dim)
             self.norm2 = GraphNorm(hidden_dim)
@@ -234,7 +244,7 @@ class HammerTimeSTGNN(nn.Module):
         correction = self.own_car_head(last_x).squeeze(-1)
         return correction * last_mask.to(dtype=correction.dtype)
 
-    def _typed_messages(self, h, edge_index, edge_attr, active):
+    def _typed_messages(self, h, edge_index, edge_attr, active, normalize_empty: bool = False):
         """Aggregate typed, edge-conditioned values over physical pairs."""
         if not self.typed_edge_values:
             return h
@@ -244,7 +254,7 @@ class HammerTimeSTGNN(nn.Module):
         keep = active[src] & active[dst] & (src != dst)
         src, dst, attrs = src[keep], dst[keep], edge_attr[keep]
         if src.numel() == 0:
-            return h
+            return (self.typed_norm(h) * active.unsqueeze(-1)) if normalize_empty else h
         output = h.new_zeros(h.shape)
         for relation, (relation_src, relation_dst, relation_attr) in enumerate((
                 (src, dst, attrs), (dst, src, attrs))):
@@ -370,29 +380,40 @@ class HammerTimeSTGNN(nn.Module):
                     raw_edge_attr = raw_edge_attr[edge_mask]
             typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
 
-            edge_idx, edge_attr = self._ensure_self_loops(
-                N, raw_edge_index, raw_edge_attr, device,
-                getattr(g, "position_coverage", 1.0),
-            )
-            edge_idx = edge_idx.to(device)
-            edge_attr = edge_attr.to(device=device, dtype=h.dtype)
-            if self.mask_inactive_nodes:
-                edge_keep = active[edge_idx[0]] & active[edge_idx[1]]
-                edge_idx, edge_attr = edge_idx[:, edge_keep], edge_attr[edge_keep]
+            if self.spatial_encoder == "edge_temporal":
+                if typed_edge_index is None:
+                    typed_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+                if typed_edge_attr is None:
+                    typed_edge_attr = torch.empty((0, self.edge_dim), dtype=h.dtype, device=device)
+                h = self._typed_messages(
+                    h, typed_edge_index.to(device),
+                    typed_edge_attr.to(device=device, dtype=h.dtype), active,
+                    normalize_empty=True,
+                )
+            else:
+                edge_idx, edge_attr = self._ensure_self_loops(
+                    N, raw_edge_index, raw_edge_attr, device,
+                    getattr(g, "position_coverage", 1.0),
+                )
+                edge_idx = edge_idx.to(device)
+                edge_attr = edge_attr.to(device=device, dtype=h.dtype)
+                if self.mask_inactive_nodes:
+                    edge_keep = active[edge_idx[0]] & active[edge_idx[1]]
+                    edge_idx, edge_attr = edge_idx[:, edge_keep], edge_attr[edge_keep]
 
-            spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
-            if self.spatial_layers == 3:
-                spatial_layers += ((self.gat3, self.norm3),)
-            for layer_index, (layer, norm) in enumerate(spatial_layers):
-                h = self._apply_spatial_layer(h, edge_idx, edge_attr, active, layer, norm)
-                if layer_index == 0:
-                    h = self._typed_messages(
-                        h,
-                        typed_edge_index.to(device) if typed_edge_index is not None else edge_idx,
-                        typed_edge_attr.to(device=device, dtype=h.dtype)
-                        if typed_edge_attr is not None else edge_attr,
-                        active,
-                    )
+                spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
+                if self.spatial_layers == 3:
+                    spatial_layers += ((self.gat3, self.norm3),)
+                for layer_index, (layer, norm) in enumerate(spatial_layers):
+                    h = self._apply_spatial_layer(h, edge_idx, edge_attr, active, layer, norm)
+                    if layer_index == 0:
+                        h = self._typed_messages(
+                            h,
+                            typed_edge_index.to(device) if typed_edge_index is not None else edge_idx,
+                            typed_edge_attr.to(device=device, dtype=h.dtype)
+                            if typed_edge_attr is not None else edge_attr,
+                            active,
+                        )
             # A fixed all-ones token marks an inactive historical slot without
             # adding default-path parameters or changing old checkpoint keys.
             if self.mask_inactive_nodes:
@@ -464,13 +485,17 @@ class HammerTimeSTGNN(nn.Module):
                     if raw_edge_attr is not None:
                         raw_edge_attr = raw_edge_attr[edge_mask]
                 typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
-                edge_index, edge_attr = self._ensure_self_loops(
-                    num_nodes, raw_edge_index, raw_edge_attr, device,
-                    getattr(snapshot, "position_coverage", 1.0),
-                )
-                if self.mask_inactive_nodes:
-                    edge_keep = active[edge_index[0]] & active[edge_index[1]]
-                    edge_index, edge_attr = edge_index[:, edge_keep], edge_attr[edge_keep]
+                if self.spatial_encoder == "edge_temporal":
+                    edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+                    edge_attr = torch.empty((0, self.edge_dim), dtype=dtype, device=device)
+                else:
+                    edge_index, edge_attr = self._ensure_self_loops(
+                        num_nodes, raw_edge_index, raw_edge_attr, device,
+                        getattr(snapshot, "position_coverage", 1.0),
+                    )
+                    if self.mask_inactive_nodes:
+                        edge_keep = active[edge_index[0]] & active[edge_index[1]]
+                        edge_index, edge_attr = edge_index[:, edge_keep], edge_attr[edge_keep]
                 if (self.typed_edge_values and typed_edge_index is not None
                         and typed_edge_attr is not None):
                     typed_edges.append(typed_edge_index.to(device) + node_offset)
@@ -484,16 +509,23 @@ class HammerTimeSTGNN(nn.Module):
         h = torch.relu(self.proj(disjoint.x))
         if self.mask_inactive_nodes:
             h = h * active.unsqueeze(-1)
-        spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
-        if self.spatial_layers == 3:
-            spatial_layers += ((self.gat3, self.norm3),)
-        for layer_index, (layer, norm) in enumerate(spatial_layers):
-            h = self._apply_spatial_layer(
-                h, disjoint.edge_index, disjoint.edge_attr, active, layer, norm, disjoint.batch
-            )
-            if layer_index == 0 and self.typed_edge_values and typed_edges:
-                h = self._typed_messages(h, torch.cat(typed_edges, dim=1),
-                                         torch.cat(typed_attrs), active)
+        if self.spatial_encoder == "edge_temporal":
+            edge_index = (torch.cat(typed_edges, dim=1) if typed_edges else
+                          torch.empty((2, 0), dtype=torch.long, device=device))
+            edge_attr = (torch.cat(typed_attrs) if typed_attrs else
+                         torch.empty((0, self.edge_dim), dtype=dtype, device=device))
+            h = self._typed_messages(h, edge_index, edge_attr, active, normalize_empty=True)
+        else:
+            spatial_layers = ((self.gat1, self.norm1), (self.gat2, self.norm2))
+            if self.spatial_layers == 3:
+                spatial_layers += ((self.gat3, self.norm3),)
+            for layer_index, (layer, norm) in enumerate(spatial_layers):
+                h = self._apply_spatial_layer(
+                    h, disjoint.edge_index, disjoint.edge_attr, active, layer, norm, disjoint.batch
+                )
+                if layer_index == 0 and self.typed_edge_values and typed_edges:
+                    h = self._typed_messages(h, torch.cat(typed_edges, dim=1),
+                                             torch.cat(typed_attrs), active)
         if self.mask_inactive_nodes:
             h = torch.where(active.unsqueeze(-1), h, torch.ones_like(h))
 
@@ -559,6 +591,7 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         predict_future_speed=bool(m_cfg.get("predict_future_speed", False)),
         future_speed_horizon_steps=int(m_cfg.get("future_speed_horizon_steps", 5)),
         spatial_layers=m_cfg.get("spatial_layers", 2),
+        spatial_encoder=m_cfg.get("spatial_encoder", "gat"),
         own_car_branch=bool(m_cfg.get("own_car_branch", False)),
         own_car_hidden_dim=m_cfg.get("own_car_hidden_dim", 32),
     )

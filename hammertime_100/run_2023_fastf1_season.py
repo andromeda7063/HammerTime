@@ -530,7 +530,8 @@ def normalize_race_worker(task: dict) -> tuple[dict | None, str | None]:
 
 def write_normalized_source(stage_root: Path, source_root: Path,
                             config_path: Path, events: list[dict],
-                            cache_root: Path | None = None) -> str:
+                            cache_root: Path | None = None,
+                            persist: bool = True) -> str:
     """Write an authenticated normalized-source cache manifest, not a cohort manifest."""
     from prepare_cohort import _canonical_json, _sha256_bytes
 
@@ -563,9 +564,10 @@ def write_normalized_source(stage_root: Path, source_root: Path,
     manifest["normalized_source_manifest_sha256"] = _sha256_bytes(_canonical_json(
         {key: value for key, value in manifest.items() if key != "normalized_source_manifest_sha256"}))
     raw = (json.dumps(manifest, indent=2, allow_nan=False) + "\n").encode()
-    atomic_bytes(source_root / "normalized_source_manifest.json", raw)
-    atomic_bytes(source_root / "normalized_source_manifest.json.sha256",
-                 f"{hashlib.sha256(raw).hexdigest()}  normalized_source_manifest.json\n".encode())
+    if persist:
+        atomic_bytes(source_root / "normalized_source_manifest.json", raw)
+        atomic_bytes(source_root / "normalized_source_manifest.json.sha256",
+                     f"{hashlib.sha256(raw).hexdigest()}  normalized_source_manifest.json\n".encode())
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -831,6 +833,106 @@ def _cohort_cached(cohort_dir: Path, config: dict, source_hash: str):
         return None
 
 
+def _cohort_manifest_cached(cohort_dir: Path, config: dict, source_hash: str):
+    """Verify a prepared cohort's manifest and artifact bytes without unpickling it."""
+    from prepare_cohort import _canonical_json, _sha256_bytes
+
+    artifact = cohort_dir / "prepared_cohort.pkl"
+    manifest_path = cohort_dir / "prepared_manifest.json"
+    sidecar = Path(str(manifest_path) + ".sha256")
+    try:
+        if not artifact.is_file() or not manifest_path.is_file() or not sidecar.is_file():
+            return None
+        manifest_bytes = manifest_path.read_bytes()
+        exact_hash = hashlib.sha256(manifest_bytes).hexdigest()
+        if sidecar.read_text(encoding="utf-8").strip().split()[0] != exact_hash:
+            return None
+        manifest = json.loads(manifest_bytes)
+        canonical_hash = _sha256_bytes(_canonical_json(
+            {key: value for key, value in manifest.items() if key != "prepared_manifest_sha256"}))
+        expected_config = _sha256_bytes(_canonical_json(config))
+        if (manifest.get("prepared_manifest_sha256") != canonical_hash
+                or manifest.get("prepared_manifest_path") != str(manifest_path.resolve())
+                or manifest.get("prepared_artifact_path") != str(artifact.resolve())
+                or manifest.get("prepared_artifact_bytes") != artifact.stat().st_size
+                or manifest.get("prepared_artifact_sha256") != sha256(artifact)
+                or manifest.get("provider") != "fastf1"
+                or manifest.get("effective_config_sha256") != expected_config
+                or manifest.get("aligned_source_manifest_sha256") != source_hash):
+            return None
+        return manifest
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def _load_training_overrides(config: dict, path: Path) -> dict:
+    """Apply a small training/model-only overlay after immutable cohort loading."""
+    with path.open(encoding="utf-8") as stream:
+        overrides = yaml.safe_load(stream)
+    if not isinstance(overrides, dict) or set(overrides) - {"model", "train"}:
+        raise ValueError("Training override YAML may contain only model and train mappings.")
+    allowed = {
+        "model": {"spatial_encoder", "spatial_layers", "dropout", "drop_edge_rate"},
+        "train": {"batch_size", "lr", "weight_decay", "max_epochs",
+                  "early_stopping_patience"},
+    }
+    effective = copy.deepcopy(config)
+    for section, values in overrides.items():
+        if not isinstance(values, dict) or set(values) - allowed[section]:
+            raise ValueError(f"Unsupported keys in {section} training override.")
+        effective.setdefault(section, {}).update(values)
+    from config_validation import validate_config
+    validate_config(effective)
+    return effective
+
+
+def _archive_production_checkpoints(paths: list[Path], output: Path) -> None:
+    """Copy explicit production checkpoints to the new run before any work starts."""
+    if not paths:
+        raise ValueError("GNNv3 training requires an explicit production best checkpoint path.")
+    output_resolved = output.resolve()
+    archive = output_resolved / "production_model_backup"
+    records = []
+    for index, requested in enumerate(paths, start=1):
+        source = requested.expanduser().resolve(strict=True)
+        if not source.is_file() or output_resolved == source or output_resolved in source.parents:
+            raise ValueError(f"Invalid production checkpoint path: {requested}")
+        digest = sha256(source)
+        destination = archive / f"{index:02d}-{source.name}"
+        if destination.exists():
+            if sha256(destination) != digest:
+                raise RuntimeError(f"Existing production backup differs from source: {destination}")
+        else:
+            archive.mkdir(parents=True, exist_ok=True)
+            atomic_bytes(destination, source.read_bytes())
+            if sha256(destination) != digest:
+                raise RuntimeError(f"Production checkpoint copy failed SHA256 verification: {destination}")
+        related = []
+        metadata_dir = archive / f"{index:02d}-metadata"
+        related_candidates = [source.parent / filename for filename in (
+            "effective_config.yaml", "resume_manifest.json", "training_complete.json",
+            "training_history.csv", "test_metrics.json", "edge_scaler.json")]
+        related_candidates.append(source.parent.parent.parent / "season_config.yaml")
+        for related_source in related_candidates:
+            if not related_source.is_file():
+                continue
+            related_destination = metadata_dir / related_source.name
+            related_hash = sha256(related_source)
+            if related_destination.exists():
+                if sha256(related_destination) != related_hash:
+                    raise RuntimeError(f"Existing production metadata backup differs: {related_destination}")
+            else:
+                metadata_dir.mkdir(parents=True, exist_ok=True)
+                atomic_bytes(related_destination, related_source.read_bytes())
+            related.append({"source": str(related_source), "backup": str(related_destination),
+                            "sha256": related_hash, "bytes": related_source.stat().st_size})
+        records.append({"source": str(source), "backup": str(destination),
+                        "sha256": digest, "bytes": source.stat().st_size,
+                        "related_metadata": related})
+    atomic_json(archive / "production_checkpoint_manifest.json",
+                {"schema_version": 1, "checkpoints": records})
+
+
 def _cache_predictions(path: Path, fingerprint: str) -> pd.DataFrame | None:
     if not path.is_file():
         return None
@@ -924,6 +1026,32 @@ def aggregate(frame: pd.DataFrame, group: str) -> list[dict]:
 
 
 def run(args: argparse.Namespace) -> Path:
+    out = args.output.expanduser().resolve() if args.output else ROOT / ".local/research-history/2023-fastf1-season"
+    no_production_checkpoint = False
+    reuse_arg = getattr(args, "reuse_prepared_from", None)
+    if reuse_arg is not None:
+        source_root_arg = reuse_arg.expanduser().resolve(strict=True)
+        if out == source_root_arg or out in source_root_arg.parents or source_root_arg in out.parents:
+            raise ValueError("GNNv3 output and reused source run must be separate, disjoint directories.")
+        if out.exists() and any(out.iterdir()):
+            raise ValueError("GNNv3 output must be new or empty to protect existing run artifacts.")
+    if getattr(args, "training_overrides", None) is not None:
+        if reuse_arg is None:
+            raise ValueError("GNNv3 training requires --reuse-prepared-from and a separate new --output.")
+        best_checkpoint = getattr(args, "preserve_production_checkpoint", None)
+        no_production_checkpoint = bool(getattr(args, "no_production_checkpoint", False))
+        if best_checkpoint is None and not no_production_checkpoint:
+            raise ValueError("Select --preserve-production-checkpoint or explicitly confirm --no-production-checkpoint.")
+        production_paths = [getattr(args, "preserve_production_checkpoint", None),
+                            getattr(args, "preserve_production_last_checkpoint", None)]
+        best_path = production_paths[0]
+        if best_path is not None and production_paths[1] is None:
+            sibling_last = best_path.expanduser().with_name("best.last.pt")
+            if sibling_last.is_file():
+                production_paths[1] = sibling_last
+        paths_to_archive = [path for path in production_paths if path is not None]
+        if paths_to_archive:
+            _archive_production_checkpoints(paths_to_archive, out)
     local_data_only = bool(getattr(args, "local_data_only", False))
     secrets = ("", "") if local_data_only else load_credentials()
     # Keep credentials out of worker environments in either source mode. The
@@ -940,18 +1068,24 @@ def run(args: argparse.Namespace) -> Path:
         source_version = fastf1.__version__
     else:
         source_version = "local-data-only"
-    out = args.output.expanduser().resolve() if args.output else ROOT / ".local/research-history/2023-fastf1-season"
+    reuse_root = (args.reuse_prepared_from.expanduser().resolve(strict=True)
+                  if getattr(args, "reuse_prepared_from", None) is not None else out)
+    if reuse_root == out or out in reuse_root.parents:
+        raise ValueError("Training output must be separate from and outside the reused cache root.")
     out.mkdir(parents=True, exist_ok=True)
     global ACTIVE_OUTPUT
     ACTIVE_OUTPUT = out
-    output_dirs = ["race_cache/sessions", "cohorts", "training"]
-    if not local_data_only:
-        output_dirs.append("race_cache/raw_sessions")
-    for name in output_dirs:
-        (out / name).mkdir(parents=True, exist_ok=True)
+    (out / "training").mkdir(parents=True, exist_ok=True)
+    if reuse_root == out:
+        (out / "race_cache/sessions").mkdir(parents=True, exist_ok=True)
+        (out / "cohorts").mkdir(parents=True, exist_ok=True)
+        if not local_data_only:
+            (out / "race_cache/raw_sessions").mkdir(parents=True, exist_ok=True)
     log_path = out / "run.log"
     logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
                         format="%(asctime)s %(levelname)s %(message)s")
+    if no_production_checkpoint:
+        LOG.info("No production checkpoint was supplied for preservation; run explicitly marked --no-production-checkpoint.")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     if not local_data_only:
         logging.getLogger("fastf1").setLevel(logging.INFO)
@@ -1016,9 +1150,9 @@ def run(args: argparse.Namespace) -> Path:
                 os.environ.pop("F1_USERNAME", None)
                 os.environ.pop("F1_PASSWORD", None)
                 os.environ.pop("FASTF1_AUTH_METHOD", None)
-            raw_root = out / "race_cache/raw_sessions"
+            raw_root = reuse_root / "race_cache/raw_sessions"
         failure_stage = "acquire and normalize race sessions"
-        stages_root = out / "race_cache/sessions"
+        stages_root = reuse_root / "race_cache/sessions"
         if not local_data_only:
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
                 raw_cached = list(pool.map(
@@ -1038,6 +1172,27 @@ def run(args: argparse.Namespace) -> Path:
             LOG.info("Available physical memory=%.1f GiB.", available_memory / 1024**3)
         LOG.info("Normalization workers requested=%d effective=%d.",
                  args.processing_workers, process_workers)
+        require_cache_hit = (getattr(args, "require_existing_caches", False)
+                             or reuse_root != out)
+        if require_cache_hit:
+            missing = []
+            for event, raw_manifest in zip(events, raw_cached):
+                race_id = str(event["race_id"])
+                if raw_manifest is None:
+                    missing.append(race_id + " (raw stage)")
+                    continue
+                merged_event = {**event, **raw_manifest["event"]}
+                source_version_for_cache = _normalization_source_version(
+                    raw_manifest, local_data_only,
+                    source_version if not local_data_only else None)
+                expected = _normalization_fingerprint(
+                    merged_event, raw_manifest, base, source_version_for_cache,
+                    sha256(raw_root / _safe_id(race_id) / "raw_manifest.json"))
+                if _valid_race_stage(stages_root / _safe_id(race_id), expected) is None:
+                    missing.append(race_id + " (normalized stage)")
+            if missing:
+                raise RuntimeError("--require-existing-caches: exact prepared inputs are missing: "
+                                   + ", ".join(missing))
         normalization_started = time.perf_counter()
         try:
             for event, raw_manifest in zip(events, raw_cached):
@@ -1165,39 +1320,53 @@ def run(args: argparse.Namespace) -> Path:
         base["session"]["race_id"] = good[0]["race_id"]
         if not local_data_only:
             base["session"]["cache_dir"] = str(cache_root)
-        base["session"]["processed_dir"] = str(out / "race_cache/processed")
+        base["session"]["processed_dir"] = str(reuse_root / "race_cache/processed")
         base["track"]["lap_length_m"] = good[0]["lap_length_m"]
-        base["train"]["checkpoint_path"] = str(out / "training" / "pending" / "best.pt")
-        base["train"]["history_path"] = str(out / "training" / "pending" / "training_history.csv")
+        base["train"]["checkpoint_path"] = str(reuse_root / "training" / "pending" / "best.pt")
+        base["train"]["history_path"] = str(reuse_root / "training" / "pending" / "training_history.csv")
         _align_cohort_num_nodes(base, good, stages_root)
         config_path = out / "season_config.yaml"
         atomic_bytes(config_path, yaml.safe_dump(base, sort_keys=False).encode())
         cohort_started = time.perf_counter()
-        source_root = out / "race_cache"
+        source_root = reuse_root / "race_cache"
+        source_config_path = config_path
+        if reuse_root != out:
+            old_source_manifest = json.loads((source_root / "normalized_source_manifest.json").read_text(encoding="utf-8"))
+            source_config_path = Path(old_source_manifest["config_path"]).expanduser().resolve(strict=True)
+            if sha256(source_config_path) != old_source_manifest.get("config_sha256"):
+                raise RuntimeError("Reused source config no longer matches its normalized-source manifest.")
         source_hash = write_normalized_source(
-            stages_root, source_root, config_path, good,
-            cache_root if not local_data_only else None)
+            stages_root, source_root, source_config_path, good,
+            cache_root if not local_data_only else None, persist=(reuse_root == out))
+        if reuse_root != out and sha256(source_root / "normalized_source_manifest.json") != source_hash:
+            raise RuntimeError("Read-only normalized-source verification failed; source cache changed or is incompatible.")
         failure_stage = "validate or prepare graph cohort"
         cohort_fingerprint = _cohort_fingerprint(base, source_hash)
-        cohort_prefix = out / "cohorts" / cohort_fingerprint[:20]
-        candidates = [cohort_prefix, *sorted((out / "cohorts").glob(f"{cohort_fingerprint[:20]}-rebuild*"))]
+        cohort_prefix = reuse_root / "cohorts" / cohort_fingerprint[:20]
+        candidates = [cohort_prefix, *sorted((reuse_root / "cohorts").glob(f"{cohort_fingerprint[:20]}-rebuild*"))]
         cached = None
         cohort_dir = cohort_prefix
         for candidate in candidates:
-            cached = _cohort_cached(candidate, base, source_hash)
+            if getattr(args, "preflight_only", False):
+                cached = _cohort_manifest_cached(candidate, base, source_hash)
+            else:
+                cached = _cohort_cached(candidate, base, source_hash)
             if cached is not None:
                 cohort_dir = candidate
                 break
         cohort_cache_hit = cached is not None
+        if cached is None and (getattr(args, "require_existing_caches", False)
+                               or reuse_root != out):
+            raise RuntimeError("--require-existing-caches: exact prepared cohort is absent; refusing preparation.")
         if cached is None:
             failure_stage = "prepare graph cohort from normalized race tables"
             if cohort_prefix.exists():
                 # Keep a corrupt/incompatible artifact for investigation and
                 # build a new immutable output directory.
                 suffix = 1
-                while (out / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}").exists():
+                while (reuse_root / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}").exists():
                     suffix += 1
-                cohort_dir = out / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}"
+                cohort_dir = reuse_root / "cohorts" / f"{cohort_fingerprint[:20]}-rebuild{suffix}"
             from prepare_cohort import prepare_cohort
             prepare_cohort(config_path, cohort_dir, normalized_source_dir=source_root)
             cached = _cohort_cached(cohort_dir, base, source_hash)
@@ -1207,6 +1376,27 @@ def run(args: argparse.Namespace) -> Path:
                  time.perf_counter() - cohort_started,
                  "hit" if cohort_cache_hit else "miss")
         LOG.info("Resources after cohort preparation: %s", _resource_summary())
+        if getattr(args, "preflight_only", False):
+            manifest = cached
+            if manifest["provider"] != "fastf1" or len(manifest.get("sessions", [])) != len(EXPECTED_2023_RACE_IDS):
+                raise ValueError("Prepared cohort preflight requires the complete verified 22-race FastF1 cohort.")
+            import torch
+            from model import create_model
+
+            cfg = copy.deepcopy(base)
+            if getattr(args, "training_overrides", None) is not None:
+                cfg = _load_training_overrides(cfg, args.training_overrides.expanduser().resolve(strict=True))
+            torch.set_num_threads(args.threads)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
+            model = create_model(cfg)
+            LOG.info("PRE-FLIGHT PASSED (no cohort unpickle, no training, no preprocessing): "
+                     "source manifests and normalized tables verified; prepared artifact SHA256 verified; "
+                     "22-race cohort config/split/scalers match; candidate model constructed (%d parameters).",
+                     sum(parameter.numel() for parameter in model.parameters()))
+            return out
         payload, manifest = cached
         if manifest["provider"] != "fastf1" or len(manifest["sessions"]) < 3:
             raise ValueError("Prepared cohort provider/session-count invariant failed")
@@ -1219,11 +1409,19 @@ def run(args: argparse.Namespace) -> Path:
         from train import train_model
 
         cfg = copy.deepcopy(payload["config"])
+        if getattr(args, "training_overrides", None) is not None:
+            cfg = _load_training_overrides(cfg, args.training_overrides.expanduser().resolve(strict=True))
+            LOG.info("Applied training-only overlay after verified prepared-cohort load: %s",
+                     args.training_overrides)
         cfg["train"]["log_every_batches"] = log_every_batches
         cfg["train"]["checkpoint_path"] = str(out / "training" / "_path_placeholder" / "best.pt")
         cfg["train"]["history_path"] = str(out / "training" / "_path_placeholder" / "training_history.csv")
         device = torch.device(args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
         torch.set_num_threads(args.threads)
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            LOG.warning("PyTorch inter-op threads were already initialized; retaining their current setting.")
         code_inputs = {name: sha256(HERE / "src" / name) for name in ("train.py", "model.py", "dataset.py")}
         train_fingerprint = canonical_hash({"cohort_artifact": manifest["prepared_artifact_sha256"],
                                             "config": _training_identity_config(cfg), "code": code_inputs,
@@ -1235,6 +1433,8 @@ def run(args: argparse.Namespace) -> Path:
         cfg["train"]["checkpoint_path"] = str(training_dir / "best.pt")
         cfg["train"]["last_checkpoint_path"] = str(training_dir / "best.last.pt")
         cfg["train"]["history_path"] = str(training_dir / "training_history.csv")
+        atomic_bytes(training_dir / "effective_config.yaml",
+                     yaml.safe_dump(cfg, sort_keys=False).encode())
         expected_resume_manifest = {
             "fingerprint": train_fingerprint,
             "prepared_artifact_sha256": manifest["prepared_artifact_sha256"],
@@ -1425,6 +1625,21 @@ def main() -> int:
                         help="Temporal window subsampling stride (default: 1; e.g. 2 for 0.5s stride).")
     parser.add_argument("--config", type=Path, default=None,
                         help="Optional YAML config path override (default: configs/supplied_fastf1_monza_2023_gated.yaml).")
+    parser.add_argument("--training-overrides", type=Path, default=None,
+                        help="Model/train-only YAML applied after loading the exact base-config cohort cache.")
+    parser.add_argument("--reuse-prepared-from", type=Path, default=None,
+                        help="Read-only root of a prior run's exact raw/normalized/prepared cache tree.")
+    production_group = parser.add_mutually_exclusive_group()
+    production_group.add_argument("--preserve-production-checkpoint", type=Path, default=None,
+                                  help="Explicit production best.pt to copy and SHA256-verify before GNNv3 work.")
+    production_group.add_argument("--no-production-checkpoint", action="store_true",
+                                  help="Explicitly state that this isolated candidate run has no production checkpoint to preserve.")
+    parser.add_argument("--preserve-production-last-checkpoint", type=Path, default=None,
+                        help="Optional sibling best.last.pt checkpoint to preserve as well.")
+    parser.add_argument("--require-existing-caches", action="store_true",
+                        help="Fail before preparation/training if exact normalized race caches or cohort are missing.")
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="Verify exact source/cohort artifacts and construct the selected model, then exit without unpickling the cohort or training.")
     parser.add_argument("--patience", type=int, default=None,
                         help="Early stopping patience in epochs.")
     parser.add_argument("--gat-type", choices=("gat", "gatv2"), default=None,
