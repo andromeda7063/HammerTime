@@ -28,13 +28,14 @@ The implementation branch created for this change is `dev/gnnv2-preprocessing`; 
 $ExistingRepo = 'C:\F1\HammerTime' # Change to the path of your already-populated clone.
 $Repo = 'C:\F1\HammerTime-gnnv2-preprocessing'
 git -C $ExistingRepo status --short
+git -C $ExistingRepo remote set-branches --add origin dev/gnnv2-preprocessing
 git -C $ExistingRepo fetch origin refs/heads/dev/gnnv2-preprocessing:refs/remotes/origin/dev/gnnv2-preprocessing
 git -C $ExistingRepo worktree add --track -b dev/gnnv2-preprocessing $Repo origin/dev/gnnv2-preprocessing
 Set-Location $Repo
 git branch --show-current
 ```
 
-The last command should print `dev/gnnv2-preprocessing`. The explicit fetch also works when the old clone was created with single-branch settings. These commands add a separate worktree and do not change or delete the original checkout or its `race_cache` files.
+The last command should print `dev/gnnv2-preprocessing`. Adding the branch to the origin fetch settings supports clones created with `--single-branch` and lets later pulls fetch updates. These commands add a separate worktree and do not change or delete the original checkout or its `race_cache` files.
 
 ## Install the locked Python environment
 
@@ -106,7 +107,8 @@ The count command should report 22 race directories. If the files are under a di
 ```powershell
 $RunOut = Join-Path $Repo '.local\research-history\2023-fastf1-gnnv2-preprocessing-windows'
 New-Item -ItemType Directory -Force -Path $RunOut | Out-Null
-$RunLog = Join-Path $RunOut 'runner.log'
+$RunTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+$RunLog = Join-Path $RunOut "runner-$RunTimestamp.log"
 "Repo: $Repo`nRaw sessions: $RawSessions`nOutput: $RunOut" | Set-Content -Encoding utf8 (Join-Path $RunOut 'run_inputs.txt')
 ```
 
