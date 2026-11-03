@@ -256,3 +256,6 @@ The full-session inference exporter no longer adds 14 synthesized stationary sta
 
 Added a current Singapore dashboard smoke check for scope/split provenance, physics status, recorded source data, Chromium rendering, and 1440/390/320 px overflow. Registry and archived replay/visual smoke checks pass. The former season-dashboard and point-inspection smoke expectations still describe the superseded four-race page and are not current verification instructions.
 
+## Two-person frontend and GNNv2 workflow — 2026-11-03
+
+Added `hammertime_100/frontend/DEVELOPMENT_WORKFLOW.md` on `dev/frontend`. It documents the isolated frontend worktree, verified static-data handoff from ML runs, current exporter run selection, browser checks, and joint integration procedure. The instructions do not change model metrics, data, thresholds, or frontend behavior.
