@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c1115">
+  <title>Experiment registry · HammerTime</title>
+  <link rel="stylesheet" href="experiments.css">
+  <script src="experiments.js" defer></script>
+</head>
+<body>
+  <a class="ex-skip" href="#page-content">Skip to experiment results</a>
+  <header class="ex-topbar">
+    <a class="ex-brand" href="index.html" aria-label="HammerTime model evaluation home"><span class="ex-mark">HT</span><span>HAMMERTIME <small>RESEARCH</small></span></a>
+    <nav aria-label="Project pages"><a href="index.html">Season dashboard</a><span aria-current="page">Experiments</span></nav>
+  </header>
+  <main class="ex-shell" id="page-content" tabindex="-1">
+    <section class="ex-intro" aria-labelledby="page-title">
+      <p class="ex-eyebrow">MODEL EVIDENCE / ARCHIVE</p>
+      <h1 id="page-title">Experiment registry</h1>
+      <p class="ex-lede">A source-linked index of recorded model results, pilots and report-only figures. Each dataset and evaluation protocol stays in its own group.</p>
+      <div class="ex-rule"></div>
+      <p class="ex-caution"><strong>Read scores within a group.</strong> Targets, telemetry providers, splits and sample units differ. This page does not produce an overall ranking.</p>
+    </section>
+    <section class="ex-controls" aria-label="Registry filters and export">
+      <label>Model family<select id="family-filter"><option value="all">All families</option></select></label>
+      <label>Evidence class<select id="status-filter"><option value="all">All evidence</option></select></label>
+      <label>Evaluation group<select id="group-filter"><option value="all">All evaluation groups</option></select></label>
+      <label>Sort within each evidence group<select id="sort-filter"><option value="source">Source order</option><option value="mae-asc">MAE · lowest first</option><option value="r2-desc">R² · highest first</option></select></label>
+      <label class="ex-search-label">Search<input id="search-filter" type="search" placeholder="Model, variant or dataset" autocomplete="off"></label>
+      <div class="ex-control-actions"><p id="result-count" role="status" aria-live="polite">Loading registry…</p><button id="reset-filters" type="button">Reset filters</button><button id="download-csv" type="button" disabled>Download filtered CSV</button><span>Groups stay in source order; sorting applies within each group.</span></div>
+      <p id="filter-message" role="status" aria-live="polite" hidden></p>
+    </section>
+    <section id="registry" aria-label="Experiment results" aria-live="polite">
+      <p class="ex-loading">Loading archived source records…</p>
+    </section>
+    <section class="ex-method" aria-labelledby="method-title">
+      <h2 id="method-title">Evidence notes</h2>
+      <ul>
+        <li><strong>Held-out test</strong> means a test split is identified in archived evaluation data.</li>
+        <li><strong>Validation</strong> and <strong>pilot</strong> scores are development evidence, not test performance. Incomplete pilots can contain partial training runs.</li>
+        <li><strong>Report-only</strong> values are transcribed from a report or legacy payload; they are not independently recomputed here.</li>
+        <li>Sample counts are labeled by unit. A graph-window count is not interchangeable with valid target predictions.</li>
+      </ul>
+      <p class="ex-built">Registry is generated from archived local source records by <code>data/export_experiments.py</code>. Source paths and SHA-256 fingerprints appear with each evidence group.</p>
+    </section>
+    <footer>HAMMERTIME · RESEARCH EVIDENCE INDEX <span>Static archive · no live inference</span></footer>
+  </main>
+</body>
+</html>

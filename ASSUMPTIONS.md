@@ -1,7 +1,7 @@
 # HammerTime — Assumption Ledger
 
-**Document Standard:** ASD-STE100  
-**Authority:** Law 10 (Master Directive)  
+**Document Standard:** ASD-STE100
+**Authority:** Law 10 (Master Directive)
 
 Every parameter tuned or assumed from `claude.md` and `claude_arc.md` is recorded in this ledger.
 
@@ -58,3 +58,5 @@ The user's explicit OpenF1 adapter request extends the earlier FastF1-only scope
 | A28 | Acquisition policy | 300-second windows, 30-second timeout, three attempts, 2.1-second request spacing, verified response cache | These are explicit client reliability settings, not model or physics thresholds. Optional channel transport failures remain visible; wrong-session rows and required-data failures remain fatal. |
 | A29 | Study evidence | Persist declarations before fitting and update completed trials/failure context atomically | An interrupted search must retain its protocol and partial evidence without inventing a selected candidate. |
 | A30 | Dashboard source configuration | Optional `HAMMERTIME_CONFIG` and configured evaluation-report path | Display the requested run's artifacts and validate reports even when their filename differs from the default. |
+| A31 | OpenF1 pilot target-mask comparability | Treat the multi-session pilot and Hungary screen as separate evidence groups; a shared recorded validation-membership digest or equal sample count does not establish identical valid target rows | Both preregistrations record the same validation-membership digest. The Hungary screen's `results.json` records `validation_target_mask_sha256`, but the multi-session pilot's `results.json` has no corresponding target-mask digest or exact valid target IDs. The mask relationship therefore remains unresolved. Sources: `.local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-seed42/{preregistration,results}.json` and `.local/research-history/2026-10-31/circuit-physics-v1-validation/{preregistration,results}.json`. |
+| A32 | Recorded feature history for bounded lap 1 inference | Use only the cached aligned telemetry rows; do not pad the timeline with inferred or synthesized grid frames | The first Singapore lap target has no recorded 10-frame W10/K5 history and remains unavailable. The remaining predictions use the current aligned cache, whose SHA differs from the original prepared-cohort source; exact feature equivalence remains unresolved in `OPEN_QUESTIONS.md`. |

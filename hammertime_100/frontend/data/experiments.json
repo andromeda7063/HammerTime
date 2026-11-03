@@ -1,0 +1,540 @@
+{
+  "schema_version": 1,
+  "title": "HammerTime experiment registry",
+  "generated_by": "export_experiments.py",
+  "policy": "Evidence is grouped by data source, target and split. Metrics must not be ranked across groups.",
+  "groups": [
+    {
+      "id": "fastf1-season-test",
+      "title": "FastF1 · 2023 season held-out test",
+      "provider": "FastF1",
+      "evaluation": "Test · 4 unseen races",
+      "protocol": "15 train / 3 validation / 4 test races; target is a retrospective full-session calibrated residual.",
+      "evidence": "held-out test",
+      "note": "37,956 valid node-target predictions (25,129 graph windows; different count unit). Matched zero baseline uses the same target rows. MAE gate passes; R² gate fails. Clean-air check passes (0.01275 s over 15,736); DRS is unmeasurable (0 complete held-out laps). Test races: Abu Dhabi, Las Vegas, Mexico, São Paulo.",
+      "sources": [
+        {
+          "path": ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/test_metrics.json",
+          "sha256": "0166b9bdfbbcdca8a44e9913ee34fde9f26512367d5f2663eb4ef04d6dd9bc5b"
+        },
+        {
+          "path": ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/training_complete.json",
+          "sha256": "7a87fedfcd9e72fadcc899831376b1ee0cf89ff2a3562b63e6b11c14da6823e0"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN · season run 769a76aab164b514cc0a",
+          "family": "ST-GNN",
+          "variant": "FastF1 2023 race-held-out test",
+          "status": "held-out test",
+          "status_note": "",
+          "mae_sec": 0.09046091190235958,
+          "rmse_sec": 0.17977888357838245,
+          "r2_score": 0.03314459531514202,
+          "sample_count": 37956,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/test_metrics.json",
+            ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/training_complete.json"
+          ]
+        },
+        {
+          "model": "Zero predictor",
+          "family": "Baseline",
+          "variant": "Matched zero predictor",
+          "status": "held-out test",
+          "status_note": "",
+          "mae_sec": 0.09247102479374178,
+          "rmse_sec": null,
+          "r2_score": -0.011940766893703936,
+          "sample_count": 37956,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/test_metrics.json",
+            ".local/research-history/2023-fastf1-season/training/769a76aab164b514cc0a/training_complete.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openf1-hungary-circuit-screen",
+      "title": "OpenF1 · Hungary 2023 validation screen",
+      "provider": "OpenF1",
+      "evaluation": "Validation · fixed Hungary split",
+      "protocol": "Seed 42 candidate screen; n=3,068 valid targets per scored model.",
+      "evidence": "validation",
+      "note": "Five distinct ST-GNN variants and four same-suite baselines. Suite marked inconclusive; no candidate selected. Not comparable to the FastF1 season test.",
+      "sources": [
+        {
+          "path": ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv",
+          "sha256": "94ec5e1737d3551df78131577aeea9bf64f85b18017bd6f400203f95d9120711"
+        },
+        {
+          "path": ".local/research-history/2026-10-31/circuit-physics-v1-validation/results.json",
+          "sha256": "6fa9ebbc865c979bb8b44aff362c3f04a75d736353b43011102f667964b762c2"
+        }
+      ],
+      "runs": [
+        {
+          "model": "legacy_input_legacy_graph",
+          "family": "ST-GNN",
+          "variant": "Seed 42 · candidate seed screen",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06277317084534297,
+          "rmse_sec": null,
+          "r2_score": -0.043482144930282685,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "circuit_context_legacy_graph",
+          "family": "ST-GNN",
+          "variant": "Seed 42 · candidate seed screen",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06537414129763475,
+          "rmse_sec": null,
+          "r2_score": -0.08335737647303443,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "circuit_context_physical_scalar",
+          "family": "ST-GNN",
+          "variant": "Seed 42 · candidate seed screen",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06817676183521582,
+          "rmse_sec": null,
+          "r2_score": -0.1643775326806587,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "circuit_context_physical_v1",
+          "family": "ST-GNN",
+          "variant": "Seed 42 · candidate seed screen",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.064087357210044,
+          "rmse_sec": null,
+          "r2_score": -0.03823550248923202,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "circuit_context_self_loop_only",
+          "family": "ST-GNN",
+          "variant": "Seed 42 · candidate seed screen",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06963345161136288,
+          "rmse_sec": null,
+          "r2_score": -0.12725660050268806,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "mean_train_constant",
+          "family": "Baseline",
+          "variant": "Seed 42 · comparison baseline",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.0628507137298584,
+          "rmse_sec": null,
+          "r2_score": -0.0008723735809326172,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "xgboost",
+          "family": "Baseline",
+          "variant": "Seed 42 · comparison baseline",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.08439286053180695,
+          "rmse_sec": null,
+          "r2_score": -0.5372891426086426,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "lstm",
+          "family": "Baseline",
+          "variant": "Seed 42 · comparison baseline",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06536457687616348,
+          "rmse_sec": null,
+          "r2_score": -0.05003809928894043,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        },
+        {
+          "model": "zero_prediction_baseline",
+          "family": "Baseline",
+          "variant": "Seed 42 · preregistration baseline",
+          "status": "validation",
+          "status_note": "Candidate screen; suite outcome inconclusive; not a test result.",
+          "mae_sec": 0.06427145963214267,
+          "rmse_sec": null,
+          "r2_score": -0.1051881735469884,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/circuit-physics-v1-validation/exports_222520/aggregate_metrics.csv"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "fastf1-monza-pilots",
+      "title": "FastF1 · Monza validation pilots",
+      "provider": "FastF1",
+      "evaluation": "Validation · Monza prepared data",
+      "protocol": "Seed 42; same prepared data and train/validation target mask; pilot runs are incomplete.",
+      "evidence": "pilot",
+      "note": "One completed epoch each. Validation scores only; these are distinct model variants and not final or held-out test results.",
+      "sources": [
+        {
+          "path": ".local/research-history/2026-10-31/ablation-pilot-2026-10-31-current-k3-seed42/results.json",
+          "sha256": "d2f216f54999f5d23d83c3a887078d7a190f74c4c68dfc2ea24a44ca6420edc2"
+        },
+        {
+          "path": ".local/research-history/2026-10-31/gated-dilated-pilot-2026-10-31-seed42-retry1/results.json",
+          "sha256": "b4f084c40653ba46a29c8bb86436fcdd8b0c0a6776f53be8e68f8ddb9d97b808"
+        },
+        {
+          "path": ".local/research-history/2026-10-31/ablation-pilot-2026-10-31-current-k3-seed42/preregistration.json",
+          "sha256": "2a11c3487f136b35309cf75ac5a435124139703592f1746f78a98ce59a6eb5b8"
+        },
+        {
+          "path": ".local/research-history/2026-10-31/gated-dilated-pilot-2026-10-31-seed42-retry1/preregistration.json",
+          "sha256": "bf4725b6585f08d95bf8d56a58a83a7542de08350788e94c1e2cf4bf2ff9fbd0"
+        }
+      ],
+      "runs": [
+        {
+          "model": "current_k3",
+          "family": "ST-GNN",
+          "variant": "Monza FastF1 · current k=3 pilot",
+          "status": "pilot · incomplete",
+          "status_note": "1 epoch completed; incomplete pilot, validation only.",
+          "mae_sec": 0.05405878034522411,
+          "rmse_sec": null,
+          "r2_score": 0.013489583782195003,
+          "sample_count": 2513,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/ablation-pilot-2026-10-31-current-k3-seed42/results.json"
+          ]
+        },
+        {
+          "model": "gated_dilated_full_history",
+          "family": "ST-GNN",
+          "variant": "Monza FastF1 · gated dilated retry pilot",
+          "status": "pilot · incomplete",
+          "status_note": "1 epoch completed; incomplete pilot, validation only.",
+          "mae_sec": 0.054960091277807245,
+          "rmse_sec": null,
+          "r2_score": 0.00420273990462372,
+          "sample_count": 2513,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/gated-dilated-pilot-2026-10-31-seed42-retry1/results.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openf1-multisession-pilot",
+      "title": "OpenF1 · 2023 multi-session temporal pilot",
+      "provider": "OpenF1",
+      "evaluation": "Validation · Monza / Silverstone / Hungary cohort",
+      "protocol": "Seed 42; separately prepared incomplete pilot. The preregistration shares the recorded validation-membership hash with the Hungary candidate screen, but no target-mask digest was saved, so target-mask equivalence is unverified.",
+      "evidence": "pilot",
+      "note": "Incomplete pilot; n=3,068 valid targets. The same sample count does not establish that the effective target mask or sampled targets match. Do not compare directly to the Hungary screen.",
+      "sources": [
+        {
+          "path": ".local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-seed42/results.json",
+          "sha256": "d76bc9705df203dac0625c549595669fc742b493a8e5be90340d1ac6e1c34bcd"
+        },
+        {
+          "path": ".local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-seed42/preregistration.json",
+          "sha256": "2612a2cff8f19b5eed25c5e30848b84f3a6db6ff85e7a731dd6cfd760a9d6c92"
+        }
+      ],
+      "runs": [
+        {
+          "model": "gated_dilated_full_history",
+          "family": "ST-GNN",
+          "variant": "OpenF1 3-session gated temporal · seed 42",
+          "status": "pilot · incomplete",
+          "status_note": "15 epochs; incomplete pilot, validation only.",
+          "mae_sec": 0.06246647788873465,
+          "rmse_sec": null,
+          "r2_score": -0.02837201665820155,
+          "sample_count": 3068,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-seed42/results.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "failed-gated-dilated-pilot-2026-10-31-seed42",
+      "title": "Monza gated dilated pilot · failed before metrics",
+      "provider": "FastF1",
+      "evaluation": "Validation pilot setup; no metric evaluation",
+      "protocol": "No completed evaluation record.",
+      "evidence": "failed",
+      "note": "Run status: failed; error: AttributeError. No score is shown.",
+      "sources": [
+        {
+          "path": ".local/research-history/2026-10-31/gated-dilated-pilot-2026-10-31-seed42/results.json",
+          "sha256": "365ce0bb866241b456f986d37c2d7c19eec3a21da5d8d9d81373d3c37c525251"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN attempt",
+          "family": "ST-GNN",
+          "variant": "Gated-dilated pilot attempt · no completed score",
+          "status": "failed · no score",
+          "status_note": "AttributeError",
+          "mae_sec": null,
+          "rmse_sec": null,
+          "r2_score": null,
+          "sample_count": null,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/gated-dilated-pilot-2026-10-31-seed42/results.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "failed-openf1-2023-multi-session-temporal-gated-mse-seed42",
+      "title": "OpenF1 multi-session gated MSE · interrupted",
+      "provider": "OpenF1",
+      "evaluation": "Validation pilot; no metric evaluation",
+      "protocol": "No completed evaluation record.",
+      "evidence": "failed",
+      "note": "Run status: failed; error: KeyboardInterrupt. No score is shown.",
+      "sources": [
+        {
+          "path": ".local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-mse-seed42/results.json",
+          "sha256": "95849e513029e959659341530f99824e80f9ffcbe69d2ee14b45fdc365c18919"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN attempt",
+          "family": "ST-GNN",
+          "variant": "Gated-dilated pilot attempt · no completed score",
+          "status": "failed · no score",
+          "status_note": "KeyboardInterrupt",
+          "mae_sec": null,
+          "rmse_sec": null,
+          "r2_score": null,
+          "sample_count": null,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            ".local/research-history/2026-10-31/openf1-2023-multi-session-temporal-gated-mse-seed42/results.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "legacy-monza-payload",
+      "title": "Monza · legacy frontend metric payload",
+      "provider": "Unresolved legacy pipeline",
+      "evaluation": "Reported evaluation · split unknown",
+      "protocol": "Legacy static metrics JSON; no reproducible run bundle located.",
+      "evidence": "report-only",
+      "note": "Historical payload only. ST-GNN sample count 984 conflicts with report text (983); no independent recomputation possible. Do not compare to current season test.",
+      "sources": [
+        {
+          "path": "hammertime_100/frontend/data/metrics.json",
+          "sha256": "ab847c226976d606adaa246e4231d437505c211b22fc84f0a7565ae287fde50e"
+        },
+        {
+          "path": "reports/HammerTime_100_LaTeX/main.tex",
+          "sha256": "084c40371c4f7640c61efbe9b612fa9bf82f652c39aea43006cf17c362432ccc"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN",
+          "family": "ST-GNN",
+          "variant": "Legacy Monza frontend payload",
+          "status": "report-only · unverified",
+          "status_note": "Payload says source=pipeline but lacks run ID, prediction rows and split metadata; the report gives 983 observations versus payload 984.",
+          "mae_sec": 0.016248015374062598,
+          "rmse_sec": null,
+          "r2_score": -0.09447168899650227,
+          "sample_count": 984,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            "hammertime_100/frontend/data/metrics.json"
+          ]
+        },
+        {
+          "model": "XGBoost",
+          "family": "XGBoost",
+          "variant": "Legacy Monza frontend payload",
+          "status": "report-only · unverified",
+          "status_note": "Legacy payload; split/sample count unavailable.",
+          "mae_sec": 0.017224373295903206,
+          "rmse_sec": null,
+          "r2_score": 0.12261438369750977,
+          "sample_count": null,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            "hammertime_100/frontend/data/metrics.json"
+          ]
+        },
+        {
+          "model": "LSTM",
+          "family": "LSTM",
+          "variant": "Legacy Monza frontend payload",
+          "status": "report-only · unverified",
+          "status_note": "Legacy payload; split/sample count unavailable.",
+          "mae_sec": 0.016222169622778893,
+          "rmse_sec": null,
+          "r2_score": -0.09094798564910889,
+          "sample_count": null,
+          "sample_unit": "valid target rows",
+          "source_paths": [
+            "hammertime_100/frontend/data/metrics.json"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "latex-report-saved-results",
+      "title": "HammerTime 100 · final report saved-result table",
+      "provider": "Report-only",
+      "evaluation": "Evaluation scope unspecified in saved table",
+      "protocol": "Values transcribed from report; no associated canonical evaluation artifact located.",
+      "evidence": "report-only",
+      "note": "Do not compare to the Monza legacy payload or season test. Final report describes 983 observations, while legacy payload says 984.",
+      "sources": [
+        {
+          "path": "reports/HammerTime_100_LaTeX/main.tex",
+          "sha256": "084c40371c4f7640c61efbe9b612fa9bf82f652c39aea43006cf17c362432ccc"
+        },
+        {
+          "path": "hammertime_100/frontend/data/metrics.json",
+          "sha256": "ab847c226976d606adaa246e4231d437505c211b22fc84f0a7565ae287fde50e"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN",
+          "family": "ST-GNN",
+          "variant": "Saved-result table in final report",
+          "status": "report-only · unverified",
+          "status_note": "Report says n=983; metric artifact/predictions and split metadata unavailable.",
+          "mae_sec": 0.046294644,
+          "rmse_sec": null,
+          "r2_score": -0.057058828,
+          "sample_count": null,
+          "sample_unit": "not independently verified",
+          "source_paths": [
+            "reports/HammerTime_100_LaTeX/main.tex"
+          ]
+        },
+        {
+          "model": "LSTM",
+          "family": "LSTM",
+          "variant": "Saved-result table in final report",
+          "status": "report-only · unverified",
+          "status_note": "Report table only; no matched run artifacts or split metadata.",
+          "mae_sec": 0.046343371,
+          "rmse_sec": null,
+          "r2_score": -0.057039857,
+          "sample_count": null,
+          "sample_unit": "not reported",
+          "source_paths": [
+            "reports/HammerTime_100_LaTeX/main.tex"
+          ]
+        },
+        {
+          "model": "XGBoost",
+          "family": "XGBoost",
+          "variant": "Saved-result table in final report",
+          "status": "report-only · unverified",
+          "status_note": "Report table only; no matched run artifacts or split metadata.",
+          "mae_sec": 0.066571377,
+          "rmse_sec": null,
+          "r2_score": -0.0126369,
+          "sample_count": null,
+          "sample_unit": "not reported",
+          "source_paths": [
+            "reports/HammerTime_100_LaTeX/main.tex"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "hammertime50-report",
+      "title": "HammerTime 50 · 2021 Abu Dhabi report",
+      "provider": "FastF1 (report attribution)",
+      "evaluation": "Reported test · historical session",
+      "protocol": "Report describes laps 44–58; test window count and target differ from 100-tier evaluations.",
+      "evidence": "report-only",
+      "note": "MAE 1.1407 s and R² 0.2943 are transcribed from the 50-tier report; no matching run artifact was verified. Not a directly comparable before/after score.",
+      "sources": [
+        {
+          "path": "hammertime_50/REPORT.md",
+          "sha256": "67341d8009a863e400333f6db06685b8e1331878549be406a221fd1d514ce936"
+        }
+      ],
+      "runs": [
+        {
+          "model": "ST-GNN · 50-tier report",
+          "family": "ST-GNN",
+          "variant": "Historical report score",
+          "status": "report-only · unverified",
+          "status_note": "Report states 1,371 test windows; score is report-only and unit differs from valid target rows.",
+          "mae_sec": 1.1407,
+          "rmse_sec": null,
+          "r2_score": 0.2943,
+          "sample_count": 1371,
+          "sample_unit": "test graph windows",
+          "source_paths": [
+            "hammertime_50/REPORT.md"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,1890 +1,1277 @@
-/**
- * HAMMERTIME 100 — F1 BROADCAST CONTROL ROOM
- * High-Precision Spatio-Temporal Graph Neural Network Visualization
- * Pure Vanilla JavaScript (ES2022)
- *
- * Fully Audited & Authenticated Production Implementation
- */
+'use strict';
 
-// ==========================================================================
-// 1. 2023 MONZA F1 GRID & OFFICIAL CONSTANTS
-// ==========================================================================
-
-const MONZA_GRID = [
-  { pos: 1,  code: 'VER', num: 1,  name: 'Max Verstappen',   team: 'Red Bull Racing', color: '#3671C6', compound: 'MEDIUM', tyreAge: 18, gap: 'LEADER', gapSec: 0.0,   topSpeed: 348 },
-  { pos: 2,  code: 'LEC', num: 16, name: 'Charles Leclerc',  team: 'Ferrari',         color: '#E8002D', compound: 'HARD',   tyreAge: 22, gap: '+2.145s', gapSec: 2.145, topSpeed: 351 },
-  { pos: 3,  code: 'SAI', num: 55, name: 'Carlos Sainz',     team: 'Ferrari',         color: '#E8002D', compound: 'HARD',   tyreAge: 22, gap: '+2.628s', gapSec: 2.628, topSpeed: 352 },
-  { pos: 4,  code: 'NOR', num: 4,  name: 'Lando Norris',     team: 'McLaren',         color: '#FF8000', compound: 'MEDIUM', tyreAge: 15, gap: '+4.819s', gapSec: 4.819, topSpeed: 344 },
-  { pos: 5,  code: 'PIA', num: 81, name: 'Oscar Piastri',    team: 'McLaren',         color: '#FF8000', compound: 'HARD',   tyreAge: 24, gap: '+5.412s', gapSec: 5.412, topSpeed: 343 },
-  { pos: 6,  code: 'HAM', num: 44, name: 'Lewis Hamilton',   team: 'Mercedes-AMG',    color: '#6CD3BF', compound: 'MEDIUM', tyreAge: 14, gap: '+6.105s', gapSec: 6.105, topSpeed: 346 },
-  { pos: 7,  code: 'RUS', num: 63, name: 'George Russell',   team: 'Mercedes-AMG',    color: '#6CD3BF', compound: 'HARD',   tyreAge: 25, gap: '+6.732s', gapSec: 6.732, topSpeed: 345 },
-  { pos: 8,  code: 'GAS', num: 10, name: 'Pierre Gasly',     team: 'Alpine',          color: '#FF87BC', compound: 'HARD',   tyreAge: 26, gap: '+8.341s', gapSec: 8.341, topSpeed: 341 },
-  { pos: 9,  code: 'ALO', num: 14, name: 'Fernando Alonso',  team: 'Aston Martin',    color: '#358C75', compound: 'MEDIUM', tyreAge: 19, gap: '+9.120s', gapSec: 9.120, topSpeed: 343 },
-  { pos: 10, code: 'STR', num: 18, name: 'Lance Stroll',     team: 'Aston Martin',    color: '#358C75', compound: 'HARD',   tyreAge: 27, gap: '+10.518s', gapSec: 10.518, topSpeed: 342 },
-  { pos: 11, code: 'BOT', num: 77, name: 'Valtteri Bottas',  team: 'Alfa Romeo',      color: '#900000', compound: 'MEDIUM', tyreAge: 17, gap: '+11.890s', gapSec: 11.890, topSpeed: 340 },
-  { pos: 12, code: 'ZHO', num: 24, name: 'Guanyu Zhou',      team: 'Alfa Romeo',      color: '#900000', compound: 'HARD',   tyreAge: 23, gap: '+12.441s', gapSec: 12.441, topSpeed: 339 },
-  { pos: 13, code: 'TSU', num: 22, name: 'Yuki Tsunoda',     team: 'AlphaTauri',      color: '#5E8FAA', compound: 'HARD',   tyreAge: 28, gap: '+13.912s', gapSec: 13.912, topSpeed: 338 },
-  { pos: 14, code: 'LAW', num: 40, name: 'Liam Lawson',      team: 'AlphaTauri',      color: '#5E8FAA', compound: 'MEDIUM', tyreAge: 16, gap: '+14.650s', gapSec: 14.650, topSpeed: 339 },
-  { pos: 15, code: 'OCO', num: 31, name: 'Esteban Ocon',      team: 'Alpine',          color: '#FF87BC', compound: 'HARD',   tyreAge: 26, gap: '+15.220s', gapSec: 15.220, topSpeed: 340 },
-  { pos: 16, code: 'MAG', num: 20, name: 'Kevin Magnussen',  team: 'Haas F1 Team',    color: '#B6BABD', compound: 'MEDIUM', tyreAge: 20, gap: '+16.890s', gapSec: 16.890, topSpeed: 341 },
-  { pos: 17, code: 'HUL', num: 27, name: 'Nico Hülkenberg',  team: 'Haas F1 Team',    color: '#B6BABD', compound: 'HARD',   tyreAge: 29, gap: '+17.410s', gapSec: 17.410, topSpeed: 342 },
-  { pos: 18, code: 'ALB', num: 23, name: 'Alexander Albon',  team: 'Williams Racing', color: '#64C4FF', compound: 'HARD',   tyreAge: 31, gap: '+18.150s', gapSec: 18.150, topSpeed: 353 },
-  { pos: 19, code: 'SAR', num: 2,  name: 'Logan Sargeant',   team: 'Williams Racing', color: '#64C4FF', compound: 'MEDIUM', tyreAge: 18, gap: '+19.670s', gapSec: 19.670, topSpeed: 349 },
-  { pos: 20, code: 'PER', num: 11, name: 'Sergio Pérez',     team: 'Red Bull Racing', color: '#3671C6', compound: 'HARD',   tyreAge: 25, gap: '+21.340s', gapSec: 21.340, topSpeed: 350 }
-];
-
-const DRIVER_LOGOS = {
-  'VER': 'assets/teams/rb.jpg',
-  'PER': 'assets/teams/rb.jpg',
-  'LEC': 'assets/teams/sf.jpg',
-  'SAI': 'assets/teams/sf.jpg',
-  'HAM': 'assets/teams/amg.jpg',
-  'RUS': 'assets/teams/amg.jpg',
-  'NOR': 'assets/teams/mcl.jpg',
-  'PIA': 'assets/teams/mcl.jpg',
-  'ALO': 'assets/teams/amr.jpg',
-  'STR': 'assets/teams/amr.jpg',
-  'GAS': 'assets/teams/alp.jpg',
-  'OCO': 'assets/teams/alp.jpg',
-  'BOT': 'assets/teams/ar.jpg',
-  'ZHO': 'assets/teams/ar.jpg',
-  'TSU': 'assets/teams/sat.jpg',
-  'LAW': 'assets/teams/sat.jpg',
-  'MAG': 'assets/teams/tgr.jpg',
-  'HUL': 'assets/teams/tgr.jpg',
-  'ALB': 'assets/teams/wil.jpg',
-  'SAR': 'assets/teams/wil.jpg'
+const DATA_URL = 'data/season_model.json?v=singapore-1';
+const MARINA_BAY_REPLAY_URL = 'data/marina_bay_replay.json';
+const MARINA_BAY_INFERENCE_URL = 'data/marina_bay_inference.json?v=singapore-1';
+// Official 2023 team palette from the source-backed Singapore driver-asset manifest.
+const MARINA_BAY_TEAM_COLORS_2023 = Object.freeze({
+  'Red Bull Racing': '#3671c6',
+  Williams: '#37bedd',
+  McLaren: '#f58020',
+  Alpine: '#2293d1',
+  'Aston Martin': '#358c75',
+  Ferrari: '#f91536',
+  'Haas F1 Team': '#B6BABD',
+  AlphaTauri: '#5e8faa',
+  'Alfa Romeo': '#c92d4b',
+  Mercedes: '#6cd3bf',
+});
+const CHART_HIT_RADIUS_PX = 11;
+const state = { run: null, raceId: 'all', driver: 'all', sampleOrder: 'source', breakdown: 'driver', chartHitTest: null, selectedPoint: null };
+const replayState = { data: null, frameIndex: 0, elapsedSeconds: 0, focusDriver: 'all', speed: 1, playing: false, lastAnimationTime: null, animationId: null, resizeObserver: null };
+let marinaBayDriverAssetMap = null;
+const $ = (id) => document.getElementById(id);
+const number = (value, digits = 5) => Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : '—';
+const integer = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-US') : '—';
+const raceName = (value) => String(value || '').replace(/^2023-/, '').replace(/-R$/, '').replaceAll('-', ' ');
+const cell = (tag, text, className) => {
+  const element = document.createElement(tag);
+  if (text !== undefined && text !== null) element.textContent = String(text);
+  if (className) element.className = className;
+  return element;
 };
 
-const PIPELINE_VISUALS_DATA = [
-  { id: 'v1', file: 'v1_track_map.png', tag: 'V1 · SPATIAL GRAPH', title: 'Dynamic Track Map & Directed Edges', desc: 'Spatial car positions on Monza circuit with directed Gaussian RBF aerodynamic interference edges.' },
-  { id: 'v2', file: 'v2_pred_vs_actual.png', tag: 'V2 · TEST SCATTER', title: 'Predicted vs Actual Aerodynamic Delta-T', desc: 'Held-out test set scatter plot (y_pred vs y_true) validating tight linear regression fit along 45° ideal axis.' },
-  { id: 'v3', file: 'v3_delay_heatmap.png', tag: 'V3 · SPATIAL MATRIX', title: 'Driver × Mini-Sector Aerodynamic Loss', desc: 'Complete 20-driver by 20-mini-sector dirty air deficit heatmap identifying critical DRS train chicanes.' },
-  { id: 'v4', file: 'v4_drs_timeline.png', tag: 'V4 · RACE HORIZON', title: 'Lap-by-Lap DRS Aerodynamic Penalty Timeline', desc: 'Race-long cumulative aero deficit across 53 Monza laps, validating convergence inside [0.4s, 0.8s] band.' },
-  { id: 'v5', file: 'v5_baseline_duel.png', tag: 'V5 · BENCHMARK DUEL', title: 'HammerTime ST-GNN vs XGBoost vs LSTM', desc: 'Held-out benchmark comparison illustrating 36.8% MAE error reduction over temporal baseline models.' },
-  { id: 'v6', file: 'v6_physics_cards.png', tag: 'V6 · PHYSICS GATES', title: 'Inductive Aerodynamic Law Validation Cards', desc: 'Production physics test cards for Clean Air Zero-Loss and DRS Train Aerodynamic Deficit constraints.' },
-  { id: 'v7', file: 'v7_blockers.png', tag: 'V7 · WAKE DRILLDOWN', title: 'Blocker Vehicle Drilldown & Dirty Air Blame', desc: 'Leading blocker car decomposition calculating cumulative seconds lost behind specific defensive drivers.' },
-  { id: 'v8', file: 'v8_residuals.png', tag: 'V8 · RESIDUAL SANITY', title: 'Residual Error vs Tyre Degradation & Gap', desc: 'Homoscedasticity residual diagnostics against tyre compound age and distance to the leader.' },
-  { id: 'v9', file: 'v9_clean_air_cal.png', tag: 'V9 · CALIBRATION', title: 'Clean Air Baseline Distribution & Calibration', desc: 'Kernel density estimation of predicted aerodynamic penalty distribution in clear air (gap > 3.0s).' }
-];
+function resultRaceIds(run = state.run) {
+  return run?.race_metrics?.map((row) => row.race_id) || [];
+}
 
-const OFFICIAL_BROADCAST_CARDS = [
-  { id: 'card_01', file: 'broadcast/rendered/card_01.png', tag: 'DIRTY AIR', title: 'TRAFFIC ALERT', lead: 'HAM', chase: 'VER', gap: '0.70s', penalty: '+0.42s/lap', barPct: 85, badgeColor: '#E10600', scenario: 'DRS Train: 4 cars · Sector 2 · Lap 31' },
-  { id: 'card_02', file: 'broadcast/rendered/card_02.png', tag: 'DRS TRAIN ACCUMULATION', title: 'TRAFFIC BOTTLENECK', lead: 'SAI', chase: 'LEC', gap: '0.55s', penalty: '+0.68s/lap', barPct: 92, badgeColor: '#E10600', scenario: 'Chain: SAI -> LEC -> NOR -> PIA · Sector 1 · Lap 24' },
-  { id: 'card_03', file: 'broadcast/rendered/card_03.png', tag: 'CLEAN AIR WINDOW', title: 'OVERCUT OPPORTUNITY', lead: 'CLEAR', chase: 'NOR', gap: '8.40s', penalty: '0.00s/lap', barPct: 0, badgeColor: '#00D2BE', scenario: 'Pit Window Clear · Delta loss: 0.00 s · Lap 38' },
-  { id: 'card_04', file: 'broadcast/rendered/card_04.png', tag: 'BLUE FLAG INTERFERENCE', title: 'BACKMARKER CONGESTION', lead: 'BOT', chase: 'HAM', gap: '1.10s', penalty: '+0.28s/lap', barPct: 45, badgeColor: '#FF9900', scenario: 'Lapped Traffic: BOT · Parabolica braking · Lap 42' },
-  { id: 'card_05', file: 'broadcast/rendered/card_05.png', tag: 'SLIPSTREAM ADVANTAGE', title: 'STRAIGHTAWAY TOW', lead: 'VER', chase: 'RUS', gap: '0.85s', penalty: '-0.15s gain', barPct: 75, badgeColor: '#00E676', scenario: 'Curva del Serraglio DRS · Max tow speed 348 km/h' },
-  { id: 'card_06', file: 'broadcast/rendered/card_06.png', tag: 'WAKE INTENSITY', title: 'CORNER WASH HAZARD', lead: 'LEC', chase: 'ALO', gap: '0.62s', penalty: '+0.52s/lap', barPct: 78, badgeColor: '#FF9900', scenario: 'Variante Ascari Chicane · Aerodynamic front-wing slide' },
-  { id: 'card_07', file: 'broadcast/rendered/card_07.png', tag: 'THERMAL DEGRADATION', title: 'BRAKE OVERHEATING', lead: 'RUS', chase: 'SAI', gap: '0.48s', penalty: '+0.74s/lap', barPct: 95, badgeColor: '#E10600', scenario: 'Rettifilo braking · Brake duct temperature warning' },
-  { id: 'card_08', file: 'broadcast/rendered/card_08.png', tag: 'STRATEGIC CLEAN AIR', title: 'UNDERCUT WINDOW', lead: 'PACK', chase: 'GAS', gap: '5.20s', penalty: '+0.05s/lap', barPct: 10, badgeColor: '#00D2BE', scenario: 'Stint 2 Out-Lap · Optimal clean air acceleration profile' },
-  { id: 'card_09', file: 'broadcast/rendered/card_09.png', tag: 'AERODYNAMIC PENALTY', title: 'LESMO CONGESTION', lead: 'GAS', chase: 'PIA', gap: '0.58s', penalty: '+0.61s/lap', barPct: 84, badgeColor: '#E10600', scenario: 'Lesmo 1 & 2 High-speed cornering aerodynamic deficit' },
-  { id: 'card_10', file: 'broadcast/rendered/card_10.png', tag: 'DRS TRAIN LOCK', title: 'MIDFIELD ACCORDION', lead: 'PIA', chase: 'STR', gap: '0.51s', penalty: '+0.64s/lap', barPct: 88, badgeColor: '#FF9900', scenario: 'Accordion Compression · Ascari Entry · Lap 19' }
-];
+function populationDescription(run = state.run) {
+  return run?.inference_scope?.held_out_test === false
+    ? 'in-sample inference population'
+    : 'held-out evaluation population';
+}
 
-// ==========================================================================
-// 2. DATA LOADER (AUTHENTIC DATA PIPELINE)
-// ==========================================================================
+function validRun(run) {
+  const numeric = (value) => (typeof value === 'number'
+    || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value));
+  const count = (value) => numeric(value) && Number.isInteger(Number(value)) && Number(value) >= 0;
+  const sha256 = (value) => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
+  const gateFieldsValid = (row) => (typeof row.target_mae_pass === 'boolean'
+    && typeof row.target_r2_pass === 'boolean')
+    || (run?.inference_scope?.held_out_test === false
+      && row.target_mae_pass === null && row.target_r2_pass === null);
+  const metricRow = (row) => row && numeric(row.mae_sec) && numeric(row.rmse_sec)
+    && numeric(row.r2_score) && count(row.sample_count) && Number(row.sample_count) > 0
+    && gateFieldsValid(row);
+  const metrics = run?.metrics;
+  const races = resultRaceIds(run);
+  const physicsTests = metrics?.physics_tests;
+  const errorDistribution = run?.error_distribution;
+  const racesValid = Array.isArray(races) && races.length > 0
+    && races.every((race) => typeof race === 'string')
+    && new Set(races).size === races.length
+    && Array.isArray(run?.race_metrics) && run.race_metrics.length === races.length
+    && run.race_metrics.every((row) => metricRow(row) && typeof row.race_id === 'string')
+    && races.every((race) => run.race_metrics.some((row) => row.race_id === race));
+  const groupsCoverTargets = (rows) => rows.reduce((sum, row) => sum + Number(row.sample_count), 0)
+    === Number(metrics?.sample_count);
+  const distributionValid = errorDistribution && count(errorDistribution.population_count)
+    && Number(errorDistribution.population_count) === Number(metrics?.sample_count)
+    && typeof errorDistribution.population === 'string' && typeof errorDistribution.method === 'string'
+    && typeof errorDistribution.unit === 'string'
+    && errorDistribution.observed_range_sec
+    && ['stgnn', 'zero_predictor'].every((series) => errorDistribution.observed_range_sec[series]
+      && numeric(errorDistribution.observed_range_sec[series].min_sec)
+      && numeric(errorDistribution.observed_range_sec[series].max_sec)
+      && Number(errorDistribution.observed_range_sec[series].min_sec) <= Number(errorDistribution.observed_range_sec[series].max_sec))
+    && Array.isArray(errorDistribution.bins) && errorDistribution.bins.length > 0
+    && errorDistribution.bins.every((bin) => bin && typeof bin.label === 'string'
+      && count(bin.stgnn_count) && count(bin.zero_predictor_count))
+    && errorDistribution.bins.reduce((sum, bin) => sum + Number(bin.stgnn_count), 0)
+      === Number(errorDistribution.population_count)
+    && errorDistribution.bins.reduce((sum, bin) => sum + Number(bin.zero_predictor_count), 0)
+      === Number(errorDistribution.population_count);
+  return Boolean(run && typeof run.run_id === 'string' && run.run_id
+    && typeof run.source === 'string' && typeof run.model === 'string' && typeof run.target === 'string'
+    && metrics && numeric(metrics.mae_sec) && numeric(metrics.rmse_sec)
+    && numeric(metrics.r2_score) && count(metrics.sample_count) && Number(metrics.sample_count) > 0
+    && gateFieldsValid(metrics)
+    && metrics.zero_baseline && numeric(metrics.zero_baseline.mae_sec)
+    && numeric(metrics.zero_baseline.r2_score) && count(metrics.zero_baseline.sample_count)
+    && Number(metrics.zero_baseline.sample_count) === Number(metrics.sample_count)
+    && gateFieldsValid(metrics.zero_baseline)
+    && Array.isArray(physicsTests) && physicsTests.length > 0 && physicsTests.every((test) =>
+      test && typeof test.test === 'string' && typeof test.expected === 'string'
+      && (typeof test.passed === 'boolean' || test.passed === null))
+    && racesValid
+    && Array.isArray(run.driver_metrics) && run.driver_metrics.length > 0 && run.driver_metrics.every((row) =>
+      metricRow(row) && (typeof row.driver === 'string' || numeric(row.driver)))
+    && Array.isArray(run.mini_sector_metrics) && run.mini_sector_metrics.length > 0
+    && run.mini_sector_metrics.every((row) => metricRow(row) && count(row.mini_sector)
+      && Number(row.mini_sector) < 20)
+    && groupsCoverTargets(run.race_metrics) && groupsCoverTargets(run.driver_metrics)
+    && groupsCoverTargets(run.mini_sector_metrics) && distributionValid
+    && count(run.split?.train_window_count) && count(run.split?.validation_window_count)
+    && count(run.split?.test_window_count) && Array.isArray(run.split?.test_races)
+    && (run.inference_scope?.held_out_test !== false
+      || (typeof run.inference_scope.race_id === 'string'
+        && run.inference_scope.split_role === 'training'
+        && count(run.inference_scope.inference_window_count)
+        && !run.split.test_races.includes(run.inference_scope.race_id)))
+    && run.prediction_sample && count(run.prediction_sample.source_rows)
+    && Number(run.prediction_sample.source_rows) === Number(run.metrics.sample_count)
+    && Array.isArray(run.prediction_sample.points) && run.prediction_sample.points.length > 0
+    && run.prediction_sample.points.length <= Number(run.prediction_sample.source_rows)
+    && run.prediction_sample.points.every((point) => point && typeof point.race_id === 'string'
+      && races.includes(point.race_id)
+      && (typeof point.driver === 'string' || numeric(point.driver)) && count(point.lap)
+      && numeric(point.time_sec) && count(point.mini_sector) && Number(point.mini_sector) < 20
+      && numeric(point.actual) && numeric(point.predicted))
+    && run.checkpoint && sha256(run.checkpoint.sha256)
+    && numeric(run.checkpoint.selected_epoch) && numeric(run.checkpoint.best_validation_mae_sec)
+    && run.provenance && typeof run.provenance.fingerprint === 'string'
+    && sha256(run.provenance.config_sha256) && sha256(run.provenance.prepared_artifact_sha256)
+    && run.provenance.implementation_sha256 && typeof run.provenance.implementation_sha256 === 'object'
+    && Object.keys(run.provenance.implementation_sha256).length > 0
+    && Object.values(run.provenance.implementation_sha256).every(sha256)
+    && run.provenance.source_artifact_sha256 && typeof run.provenance.source_artifact_sha256 === 'object'
+    && Object.keys(run.provenance.source_artifact_sha256).length > 0
+    && Object.values(run.provenance.source_artifact_sha256).every(sha256)
+    && typeof run.count_note === 'string' && typeof run.prediction_sample.method === 'string');
+}
 
-async function loadAllData() {
-  const fetchJson = async (path, fallback) => {
-    try {
-      const res = await fetch(path);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return await res.json();
-    } catch {
-      return fallback;
+function gateLabel(passed, assessed = true) {
+  if (!assessed) return ['NOT ASSESSED', 'unknown'];
+  return passed === true ? ['PASS', 'pass'] : passed === false ? ['FAIL', 'fail'] : ['NOT REPORTED', 'unknown'];
+}
+
+function renderMetricSummary() {
+  const run = state.run;
+  const m = run.metrics;
+  $('metricMae').textContent = `${number(m.mae_sec)} s`;
+  $('metricRmse').textContent = `${number(m.rmse_sec)} s`;
+  $('metricR2').textContent = number(m.r2_score);
+  $('metricN').textContent = integer(m.sample_count);
+  const gatesAssessed = state.run.inference_scope?.held_out_test !== false;
+  for (const [id, passed] of [['maeGate', m.target_mae_pass], ['r2Gate', m.target_r2_pass]]) {
+    const [label, klass] = gateLabel(passed, gatesAssessed);
+    $(id).textContent = label;
+    $(id).className = `gate-pill ${klass}`;
+  }
+  $('metricGrid').setAttribute('aria-busy', 'false');
+  $('loadStatus').textContent = 'Run loaded · archived metrics';
+  $('runIdShort').textContent = run.run_id.slice(0, 12);
+  $('runIdFull').textContent = run.run_id;
+  $('countNote').textContent = run.count_note;
+  $('splitStrip').replaceChildren();
+  for (const [label, value] of [
+    ['Train windows', run.split.train_window_count],
+    ['Validation windows', run.split.validation_window_count],
+    ['Held-out test windows', run.split.test_window_count],
+  ]) {
+    const item = cell('div', undefined, 'split-item');
+    item.append(cell('span', label), cell('strong', integer(value)));
+    $('splitStrip').append(item);
+  }
+}
+
+function fillRaceSelector() {
+  const select = $('raceFilter');
+  select.replaceChildren();
+  const races = resultRaceIds();
+  if (races.length > 1) {
+    select.append(new Option('All races', 'all'));
+  }
+  for (const raceId of races) {
+    select.append(new Option(`${raceName(raceId)} Grand Prix`, raceId));
+  }
+  if (races.length === 1) {
+    select.value = races[0];
+    select.disabled = true;
+  } else {
+    select.disabled = false;
+  }
+  const drivers = state.run.driver_metrics.map((row) => String(row.driver)).sort((a, b) => Number(a) - Number(b));
+  const driverSelect = $('driverFilter');
+  driverSelect.replaceChildren(new Option('All drivers', 'all'));
+  for (const driver of drivers) driverSelect.append(new Option(`#${driver}`, driver));
+  driverSelect.disabled = false;
+  $('sampleOrderFilter').disabled = false;
+  $('downloadViewProvenance').disabled = false;
+}
+
+function renderRaceMetrics() {
+  const all = state.raceId === 'all';
+  const race = all ? (state.run.race_metrics[0] || state.run.metrics) : (state.run.race_metrics.find((row) => row.race_id === state.raceId) || state.run.metrics);
+  const m = race;
+  const displayName = raceName(race?.race_id || (all ? state.run.split.test_races[0] : state.raceId));
+  $('selectedRaceTitle').textContent = `${displayName} Grand Prix`;
+  $('raceMae').textContent = `${number(m?.mae_sec)} s`;
+  $('raceRmse').textContent = `${number(m?.rmse_sec)} s`;
+  $('raceR2').textContent = number(m?.r2_score);
+  $('raceN').textContent = integer(m?.sample_count);
+}
+
+function renderRaceTable() {
+  const tbody = $('raceTableBody');
+  tbody.replaceChildren();
+  for (const race of state.run.race_metrics) {
+    const row = document.createElement('tr');
+    const raceCell = document.createElement('th');
+    raceCell.scope = 'row';
+    const button = cell('button', raceName(race.race_id), 'table-select');
+    button.type = 'button';
+    button.setAttribute('aria-label', `Show ${raceName(race.race_id)} prediction sample`);
+    button.addEventListener('click', () => {
+      $('raceFilter').value = race.race_id;
+      updateExplorer();
+      $('explorer').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    raceCell.append(button);
+    row.append(raceCell, cell('td', integer(race.sample_count)), cell('td', number(race.mae_sec)),
+      cell('td', number(race.rmse_sec)), cell('td', number(race.r2_score)));
+    const resultCell = document.createElement('td');
+    const [label, klass] = gateLabel(race.target_mae_pass);
+    resultCell.append(cell('span', label, `gate-pill ${klass}`));
+    row.append(resultCell);
+    tbody.append(row);
+  }
+}
+
+function renderBaseline() {
+  const baseline = state.run.metrics.zero_baseline;
+  if (!baseline) {
+    $('baselineCompare').replaceChildren(cell('p', 'No matched baseline was recorded for this run.', 'muted-note'));
+    return;
+  }
+  const rows = [
+    ['HammerTime ST-GNN', state.run.metrics.mae_sec, state.run.metrics.r2_score, 'model-bar'],
+    ['Zero prediction', baseline.mae_sec, baseline.r2_score, 'baseline-bar'],
+  ];
+  const root = $('baselineCompare');
+  root.replaceChildren();
+  const max = Math.max(...rows.map((row) => row[1]));
+  for (const [name, mae, r2, color] of rows) {
+    const wrapper = cell('div', undefined, 'baseline-row');
+    const heading = cell('div', undefined, 'baseline-heading');
+    heading.append(cell('span', name), cell('strong', `${number(mae)} s MAE · R² ${number(r2)}`));
+    const track = cell('div', undefined, 'bar-track');
+    track.setAttribute('role', 'img');
+    track.setAttribute('aria-label', `${name} mean absolute error ${number(mae)} seconds`);
+    const bar = cell('span', undefined, `bar-fill ${color}`);
+    bar.style.width = `${Math.max(2, (mae / max) * 100)}%`;
+    track.append(bar);
+    wrapper.append(heading, track);
+    root.append(wrapper);
+  }
+}
+
+function renderErrorDistribution() {
+  const distribution = state.run.error_distribution;
+  const bins = distribution.bins;
+  const sharedMaximum = Math.max(...bins.flatMap((bin) =>
+    [Number(bin.stgnn_count), Number(bin.zero_predictor_count)]), 1);
+  $('errorPopulation').textContent = `${integer(distribution.population_count)} targets · full ${populationDescription()}`;
+  const stgnnRange = distribution.observed_range_sec.stgnn;
+  const zeroRange = distribution.observed_range_sec.zero_predictor;
+  $('errorDistributionNote').textContent = `${distribution.population} · ${distribution.unit}. ${distribution.method} Maximum absolute error: ST-GNN ${number(stgnnRange.max_sec)} s; zero predictor ${number(zeroRange.max_sec)} s.`;
+  const body = $('errorDistributionBody');
+  body.replaceChildren();
+  for (const bin of bins) {
+    const row = document.createElement('tr');
+    const label = document.createElement('th');
+    label.scope = 'row'; label.textContent = bin.label;
+    row.append(label);
+    for (const [key, maximum, color] of [
+      ['stgnn_count', sharedMaximum, ''], ['zero_predictor_count', sharedMaximum, ' zero'],
+    ]) {
+      const count = Number(bin[key]);
+      const wrapper = cell('div', undefined, 'error-count');
+      wrapper.append(cell('strong', integer(count)));
+      const track = cell('span', undefined, 'error-count-track');
+      track.setAttribute('aria-hidden', 'true');
+      const fill = cell('span', undefined, `error-count-fill${color}`);
+      fill.style.width = `${(count / maximum) * 100}%`;
+      track.append(fill); wrapper.append(track);
+      const dataCell = cell('td');
+      dataCell.append(wrapper);
+      row.append(dataCell);
     }
+    body.append(row);
+  }
+}
+
+function renderPhysics() {
+  const root = $('physicsList');
+  root.replaceChildren();
+  for (const test of state.run.metrics.physics_tests || []) {
+    const unmeasurable = test.passed === false && /no complete/i.test(test.notes || '');
+    const notAssessed = test.passed === null && /not assessed/i.test(test.notes || '');
+    const status = test.passed === true ? 'PASS' : unmeasurable ? 'UNMEASURABLE' : test.passed === false ? 'FAIL' : notAssessed ? 'NOT ASSESSED' : 'NOT REPORTED';
+    const statusClass = test.passed === true ? 'pass' : unmeasurable ? 'unmeasurable' : test.passed === false ? 'fail' : 'unknown';
+    const measured = test.observed_mae != null ? `${number(test.observed_mae)} s MAE`
+      : test.observed_lap_delay != null ? `${number(test.observed_lap_delay)} s/lap` : '—';
+    const evidence = test.sample_count != null ? `${integer(test.sample_count)} observations`
+      : test.complete_laps != null ? `${integer(test.complete_laps)} complete laps` : 'No count recorded';
+    const item = cell('article', undefined, 'physics-item');
+    const header = cell('div', undefined, 'physics-header');
+    header.append(cell('h4', test.test), cell('span', status, `gate-pill ${statusClass}`));
+    const details = cell('p', undefined, 'physics-result');
+    details.append(cell('span', `Observed ${measured}`), cell('span', `Expected ${test.expected}`), cell('span', evidence));
+    item.append(header, details, cell('p', test.notes || '', 'muted-note'));
+    root.append(item);
+  }
+}
+
+function matchingPoints() {
+  return state.run.prediction_sample.points.filter((point) =>
+    (state.raceId === 'all' || point.race_id === state.raceId)
+    && (state.driver === 'all' || String(point.driver) === state.driver));
+}
+
+function orderedSamplePoints(points = matchingPoints()) {
+  if (state.sampleOrder === 'source') return points;
+  const descending = state.sampleOrder === 'largest-error';
+  return points.map((point, sourceIndex) => {
+    const absoluteError = point.actual == null || point.predicted == null
+      ? Number.NaN : Math.abs(Number(point.predicted) - Number(point.actual));
+    return { point, sourceIndex, absoluteError: Number.isFinite(absoluteError) ? absoluteError : null };
+  }).sort((a, b) => {
+    if (a.absoluteError === null || b.absoluteError === null) {
+      if (a.absoluteError === null && b.absoluteError !== null) return 1;
+      if (a.absoluteError !== null && b.absoluteError === null) return -1;
+      return a.sourceIndex - b.sourceIndex;
+    }
+    const difference = descending ? b.absoluteError - a.absoluteError : a.absoluteError - b.absoluteError;
+    return difference || a.sourceIndex - b.sourceIndex;
+  }).map((entry) => entry.point);
+}
+
+function sampleOrderLabel(order = state.sampleOrder) {
+  if (order === 'largest-error') return 'largest absolute residual error first';
+  if (order === 'smallest-error') return 'smallest absolute residual error first';
+  return 'source order';
+}
+
+function drawScatter() {
+  const canvas = $('predictionChart');
+  const context = canvas.getContext('2d');
+  if (!context) return;
+  hidePointTooltip();
+  state.chartHitTest = null;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width) return;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(rect.width * ratio);
+  canvas.height = Math.round(390 * ratio);
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const width = rect.width;
+  const height = 390;
+  const margin = { top: 25, right: 22, bottom: 58, left: 65 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const points = matchingPoints();
+  if (state.selectedPoint && !points.includes(state.selectedPoint)) state.selectedPoint = null;
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = '#121a20';
+  context.fillRect(0, 0, width, height);
+  if (!points.length) {
+    context.fillStyle = '#b3bdc2'; context.font = '14px sans-serif';
+    context.fillText('No sampled points match these filters.', margin.left, margin.top + 25);
+    $('sampleLabel').textContent = 'Chart sample: 0 points';
+    renderPredictionTable(points);
+    canvas.setAttribute('aria-label', `No sampled predictions match the selected filters; this does not mean the full ${populationDescription()} is empty`);
+    return;
+  }
+  const values = points.flatMap((point) => [point.actual, point.predicted]);
+  let min = Math.min(...values); let max = Math.max(...values);
+  const span = Math.max(max - min, 0.001);
+  min -= span * 0.05; max += span * 0.05;
+  const x = (value) => margin.left + ((value - min) / (max - min)) * plotWidth;
+  const y = (value) => margin.top + plotHeight - ((value - min) / (max - min)) * plotHeight;
+  state.chartHitTest = { points, x, y };
+  context.strokeStyle = '#29363e'; context.lineWidth = 1; context.fillStyle = '#9aa8af';
+  context.font = '11px ui-monospace, monospace'; context.textAlign = 'right'; context.textBaseline = 'middle';
+  for (let tick = 0; tick <= 4; tick++) {
+    const value = min + ((max - min) * tick) / 4;
+    const yy = y(value);
+    context.beginPath(); context.moveTo(margin.left, yy); context.lineTo(width - margin.right, yy); context.stroke();
+    context.fillText(value.toFixed(2), margin.left - 9, yy);
+  }
+  context.strokeStyle = '#f0f3ed'; context.setLineDash([5, 5]); context.lineWidth = 1.25;
+  context.beginPath(); context.moveTo(x(min), y(min)); context.lineTo(x(max), y(max)); context.stroke(); context.setLineDash([]);
+  context.fillStyle = '#4ad3c0'; context.globalAlpha = 0.72;
+  for (const point of points) {
+    context.beginPath(); context.arc(x(point.actual), y(point.predicted), 2.6, 0, Math.PI * 2); context.fill();
+  }
+  context.globalAlpha = 1; context.fillStyle = '#dce4e4'; context.font = '12px sans-serif'; context.textAlign = 'center'; context.textBaseline = 'alphabetic';
+  context.textBaseline = 'top';
+  for (let tick = 0; tick <= 4; tick++) {
+    const value = min + ((max - min) * tick) / 4;
+    context.fillText(value.toFixed(2), x(value), height - margin.bottom + 10);
+  }
+  context.fillStyle = '#dce4e4'; context.font = '12px sans-serif';
+  context.fillText('Actual residual (seconds)', margin.left + plotWidth / 2, height - 13);
+  context.save(); context.translate(16, margin.top + plotHeight / 2); context.rotate(-Math.PI / 2);
+  context.fillText('Predicted residual (seconds)', 0, 0); context.restore();
+  const raceText = state.raceId === 'all'
+    ? (resultRaceIds().length === 1 ? `${raceName(resultRaceIds()[0])} Grand Prix` : 'all races')
+    : `${raceName(state.raceId)} Grand Prix`;
+  const driverText = state.driver === 'all' ? 'all drivers' : `driver ${state.driver}`;
+  $('sampleLabel').textContent = `Chart sample: ${integer(points.length)} / ${integer(state.run.prediction_sample.source_rows)} · ${raceText} · ${driverText}`;
+  renderPredictionTable(orderedSamplePoints(points));
+  canvas.setAttribute('aria-label', `Actual versus predicted residuals for ${points.length} archived sampled predictions, ${raceText}, ${driverText}`);
+}
+
+function hidePointTooltip() {
+  const tooltip = $('pointTooltip');
+  if (!tooltip) return;
+  tooltip.hidden = true;
+  tooltip.setAttribute('aria-hidden', 'true');
+}
+
+function nearestScatterPoint(event) {
+  const geometry = state.chartHitTest;
+  if (!geometry) return null;
+  const bounds = $('predictionChart').getBoundingClientRect();
+  const px = event.clientX - bounds.left;
+  const py = event.clientY - bounds.top;
+  let nearest = null;
+  let nearestDistance = CHART_HIT_RADIUS_PX ** 2;
+  let nearbyCount = 0;
+  for (const point of geometry.points) {
+    const dx = geometry.x(Number(point.actual)) - px;
+    const dy = geometry.y(Number(point.predicted)) - py;
+    const distance = dx * dx + dy * dy;
+    if (distance <= CHART_HIT_RADIUS_PX ** 2) nearbyCount += 1;
+    if (distance <= nearestDistance) { nearest = point; nearestDistance = distance; }
+  }
+  return nearest ? { point: nearest, nearbyCount } : null;
+}
+
+function inspectScatterPoint(event) {
+  if (event.pointerType === 'touch') return hidePointTooltip();
+  const tooltip = $('pointTooltip');
+  const nearest = nearestScatterPoint(event);
+  $('predictionChart').style.cursor = nearest ? 'pointer' : 'default';
+  if (!nearest || !tooltip) return hidePointTooltip();
+  const point = nearest.point;
+  const error = Number(point.predicted) - Number(point.actual);
+  const crowded = nearest.nearbyCount > 1 ? ` · ${nearest.nearbyCount} sampled points within ${CHART_HIT_RADIUS_PX} px` : '';
+  tooltip.textContent = `Nearest sampled prediction${crowded} | ${raceName(point.race_id)} · driver ${point.driver} · lap ${point.lap} · mini-sector ${Number(point.mini_sector) + 1} | Actual residual ${number(point.actual, 5)} s · predicted ${number(point.predicted, 5)} s · error ${number(error, 5)} s`;
+  tooltip.hidden = false;
+  tooltip.setAttribute('aria-hidden', 'false');
+  const chartRect = $('predictionChart').getBoundingClientRect();
+  const wrapRect = $('predictionChart').parentElement.getBoundingClientRect();
+  const tipRect = tooltip.getBoundingClientRect();
+  const left = Math.max(8, Math.min(event.clientX - wrapRect.left + 12, Math.max(8, wrapRect.width - tipRect.width - 8)));
+  const top = Math.max(8, Math.min(event.clientY - chartRect.top + 12, Math.max(8, chartRect.height - tipRect.height - 8)));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function selectScatterPoint(event) {
+  // Native click fires after a tap but not a scroll gesture; leave touch defaults intact.
+  const nearest = nearestScatterPoint(event);
+  const point = nearest?.point;
+  if (!point) return;
+  hidePointTooltip();
+  state.selectedPoint = point;
+  const ordered = orderedSamplePoints();
+  const index = ordered.indexOf(point);
+  if (index < 0) return;
+  const pageSize = 40;
+  state.predictionPage = Math.floor(index / pageSize);
+  $('predictionDataDetails').open = true;
+  renderPredictionTable(ordered);
+  const selectedRow = $('predictionTableBody').querySelector('[data-selected-point="true"]');
+  selectedRow?.focus({ preventScroll: true });
+  selectedRow?.scrollIntoView({ block: 'nearest' });
+}
+
+function enableScatterInspection() {
+  const canvas = $('predictionChart');
+  canvas.addEventListener('pointermove', inspectScatterPoint);
+  canvas.addEventListener('pointerleave', hidePointTooltip);
+  canvas.addEventListener('click', selectScatterPoint);
+}
+
+function renderPredictionTable(points) {
+  const pageSize = 40;
+  const pages = Math.max(1, Math.ceil(points.length / pageSize));
+  state.predictionPage = Math.min(state.predictionPage || 0, pages - 1);
+  const start = state.predictionPage * pageSize;
+  const rows = points.slice(start, start + pageSize);
+  const body = $('predictionTableBody');
+  body.replaceChildren();
+  for (const point of rows) {
+    const row = document.createElement('tr');
+    if (point === state.selectedPoint) {
+      row.tabIndex = -1;
+      row.dataset.selectedPoint = 'true';
+      row.classList.add('selected-point-row');
+    }
+    row.append(cell('td', raceName(point.race_id)), cell('td', point.driver),
+      cell('td', integer(point.lap)), cell('td', integer(Number(point.mini_sector) + 1)),
+      cell('td', number(point.actual, 5)), cell('td', number(point.predicted, 5)),
+      cell('td', number(point.predicted - point.actual, 5)));
+    body.append(row);
+  }
+  $('predictionPageStatus').textContent = `Showing ${points.length ? start + 1 : 0}–${Math.min(start + pageSize, points.length)} of ${integer(points.length)} filtered sampled predictions · page ${state.predictionPage + 1} of ${pages}`;
+  $('predictionPagePrev').disabled = state.predictionPage === 0;
+  $('predictionPageNext').disabled = state.predictionPage >= pages - 1;
+  $('predictionTableCaption').textContent = `Deterministic sample rows matching the race and driver filters, in ${sampleOrderLabel()}; mini-sector labels are 1–20. This order applies only to sampled rows, not the full ${populationDescription()}.`;
+  $('predictionRowsSummary').textContent = `View sampled rows · ${integer(points.length)} match current filters · ${sampleOrderLabel()}`;
+  $('predictionPageStatus').textContent += ` · ${sampleOrderLabel()}`;
+  $('downloadSampleCsv').disabled = points.length === 0;
+}
+
+function readFiltersFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const raceValues = new Set(Array.from($('raceFilter').options, (option) => option.value));
+  const driverValues = new Set(Array.from($('driverFilter').options, (option) => option.value));
+  const requestedRace = params.get('race');
+  const requestedDriver = params.get('driver');
+  const requestedOrder = params.get('order');
+  state.raceId = raceValues.size === 1 ? [...raceValues][0] : raceValues.has(requestedRace) ? requestedRace : 'all';
+  state.driver = driverValues.has(requestedDriver) ? requestedDriver : 'all';
+  state.sampleOrder = ['source', 'largest-error', 'smallest-error'].includes(requestedOrder) ? requestedOrder : 'source';
+  $('raceFilter').value = state.raceId;
+  $('driverFilter').value = state.driver;
+  $('sampleOrderFilter').value = state.sampleOrder;
+}
+
+function writeFiltersToUrl(mode = 'push') {
+  const url = new URL(window.location.href);
+  if (state.raceId === 'all') url.searchParams.delete('race');
+  else url.searchParams.set('race', state.raceId);
+  if (state.driver === 'all') url.searchParams.delete('driver');
+  else url.searchParams.set('driver', state.driver);
+  if (state.sampleOrder === 'source') url.searchParams.delete('order');
+  else url.searchParams.set('order', state.sampleOrder);
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next === current) return;
+  if (mode === 'replace') window.history.replaceState(null, '', next);
+  else window.history.pushState(null, '', next);
+}
+
+function downloadFilteredSample() {
+  const points = orderedSamplePoints();
+  if (!points.length) return;
+  const header = ['model_run_id', 'race_id', 'driver_number', 'lap', 'mini_sector_index_zero_based',
+    'actual_residual_seconds', 'predicted_residual_seconds', 'prediction_error_seconds'];
+  const quote = (value) => {
+    let text = String(value ?? '');
+    if (!(typeof value === 'number' && Number.isFinite(value))
+      && /^[\t\r\n ]*[=+\-@]/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
   };
+  const rows = points.map((point) => [state.run.run_id, point.race_id, point.driver, point.lap, point.mini_sector,
+    point.actual, point.predicted, point.predicted - point.actual]);
+  const csv = [header, ...rows].map((row) => row.map(quote).join(',')).join('\r\n');
+  const blob = new Blob([`\uFEFF${csv}\r\n`], { type: 'text/csv;charset=utf-8' });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  const runPart = state.run.run_id.slice(0, 12).replace(/[^a-zA-Z0-9-]/g, '-');
+  const racePart = state.raceId === 'all' ? 'all-races' : state.raceId.replace(/[^a-zA-Z0-9-]/g, '-');
+  const driverPart = state.driver === 'all' ? 'all-drivers' : `driver-${state.driver.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+  link.href = objectUrl;
+  link.download = `hammertime-${runPart}-${racePart}-${driverPart}-sampled-predictions.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    $('downloadStatus').textContent = `CSV prepared: ${integer(points.length)} filtered rows from the deterministic ${integer(state.run.prediction_sample.points.length)}-point chart sample, in ${sampleOrderLabel()}; the full ${populationDescription()} contains ${integer(state.run.metrics.sample_count)} targets.`;
+}
 
-  const [telemetry, rawDrivers, metrics, timeline, sectors] = await Promise.all([
-    fetchJson('data/telemetry.json', []),
-    fetchJson('data/drivers.json', MONZA_GRID),
-    fetchJson('data/metrics.json', null),
-    fetchJson('data/race_timeline.json', {}),
-    fetchJson('data/sectors.json', {})
-  ]);
-
-  const drivers = MONZA_GRID.map(gridDriver => {
-    const loaded = Array.isArray(rawDrivers) ? rawDrivers.find(d => (d.driver || d.code) === gridDriver.code) : null;
-    if (!loaded) return gridDriver;
-    const compound = (loaded.compound && loaded.compound !== 'UNKNOWN') ? loaded.compound : gridDriver.compound;
-    const tyreAge = loaded.tyre_age ? Math.round(loaded.tyre_age) : gridDriver.tyreAge;
-    const gapToAhead = (loaded.avg_gap_sec !== null && loaded.avg_gap_sec !== undefined) ? loaded.avg_gap_sec : (gridDriver.pos > 1 ? 0.75 : 0.0);
-    return {
-      ...gridDriver,
-      compound,
-      tyreAge,
-      gapToAhead,
-      gapSec: gridDriver.gapSec,
-      gap: gridDriver.gap
+function downloadViewProvenance() {
+  if (!state.run) return;
+  try {
+    const run = state.run;
+    const matchedPoints = matchingPoints();
+    const manifest = {
+      artifact_type: 'Archived sampled-view provenance (metadata only)',
+      schema_version: 1,
+      inference_status: 'saved evaluation output; no live inference was run',
+      predictions_included: false,
+      run_id: run.run_id,
+      source: run.source,
+      model: run.model,
+      target: run.target,
+      view: {
+        race_id: state.raceId,
+        driver_number: state.driver === 'all' ? null : Number(state.driver),
+        sample_order: state.sampleOrder,
+        ordering_scope: 'filtered deterministic sample only',
+      },
+      counts: {
+        full_inference_node_targets: Number(run.metrics.sample_count),
+        prediction_sample_source_rows: Number(run.prediction_sample.source_rows),
+        deterministic_sample_points: run.prediction_sample.points.length,
+        filtered_sample_points: matchedPoints.length,
+        train_graph_windows: Number(run.split.train_window_count),
+        validation_graph_windows: Number(run.split.validation_window_count),
+        test_graph_windows: Number(run.split.test_window_count),
+      },
+      sampling_rule: run.prediction_sample.method,
+      split: { method: run.split.method, test_races: [...run.split.test_races] },
+      inference_scope: run.inference_scope ? { ...run.inference_scope } : null,
+      checkpoint: {
+        artifact: run.checkpoint.artifact,
+        selected_epoch: Number(run.checkpoint.selected_epoch),
+        sha256: run.checkpoint.sha256,
+      },
+      provenance: {
+        fingerprint: run.provenance.fingerprint,
+        config_sha256: run.provenance.config_sha256,
+        prepared_artifact_sha256: run.provenance.prepared_artifact_sha256,
+        implementation_sha256: { ...run.provenance.implementation_sha256 },
+        source_artifact_sha256: { ...run.provenance.source_artifact_sha256 },
+      },
     };
+    const blob = new Blob([`${JSON.stringify(manifest, null, 2)}\n`], { type: 'application/json;charset=utf-8' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const runPart = run.run_id.slice(0, 12).replace(/[^a-zA-Z0-9-]/g, '-');
+    const racePart = state.raceId === 'all' ? 'all-races' : state.raceId.replace(/[^a-zA-Z0-9-]/g, '-');
+    const driverPart = state.driver === 'all' ? 'all-drivers' : `driver-${state.driver.replace(/[^a-zA-Z0-9-]/g, '-')}`;
+    link.href = objectUrl;
+    link.download = `hammertime-${runPart}-${racePart}-${driverPart}-${state.sampleOrder}-view-provenance.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    $('downloadStatus').textContent = `View provenance JSON prepared for run ${runPart}: ${integer(matchedPoints.length)} matching rows in the deterministic sample; inference targets and original held-out split counts are recorded separately.`;
+  } catch (error) {
+    $('downloadStatus').textContent = `Could not prepare view provenance JSON: ${error.message}`;
+  }
+}
+
+function renderExplorer() {
+  renderRaceMetrics();
+  drawScatter();
+}
+
+function renderBreakdown() {
+  const isDriver = state.breakdown === 'driver';
+  const rows = isDriver ? state.run.driver_metrics : state.run.mini_sector_metrics;
+  const key = isDriver ? 'driver' : 'mini_sector';
+  const title = isDriver ? 'By driver number' : 'By mini-sector';
+  $('breakdownTitle').textContent = title;
+  $('breakdownDescription').textContent = isDriver
+    ? `Full ${populationDescription()} by driver number. Bars show exact MAE; target counts are shown per row.`
+    : `Full ${populationDescription()} by mini-sector index. Bars show exact MAE; target counts are shown per row.`;
+  const root = $('breakdownList');
+  root.replaceChildren();
+  const sorted = [...rows].sort((a, b) => Number(b.mae_sec) - Number(a.mae_sec));
+  const max = Math.max(...sorted.map((row) => Number(row.mae_sec)), 0.001);
+  for (const row of sorted) {
+    const item = cell('div', undefined, 'breakdown-row');
+    const label = isDriver ? `Driver #${row[key]}` : `Mini-sector ${Number(row[key]) + 1}`;
+    const top = cell('div', undefined, 'breakdown-top');
+    top.append(cell('span', label), cell('span', `${number(row.mae_sec)} s · n ${integer(row.sample_count)}`));
+    const track = cell('div', undefined, 'bar-track');
+    const bar = cell('span', undefined, 'bar-fill');
+    bar.style.width = `${Math.max(2, (Number(row.mae_sec) / max) * 100)}%`;
+    track.append(bar); item.append(top, track); root.append(item);
+  }
+}
+
+function renderMethod() {
+  const run = state.run;
+  $('checkpointEpoch').textContent = run.checkpoint.selected_epoch;
+  $('validationMae').textContent = `${number(run.checkpoint.best_validation_mae_sec)} s`;
+  $('checkpointHash').textContent = run.checkpoint.sha256;
+  $('checkpointHash').title = run.checkpoint.sha256;
+  $('predictionRows').textContent = integer(run.prediction_sample.source_rows);
+  $('samplingMethod').textContent = run.prediction_sample.method;
+  $('testRaceList').replaceChildren();
+  const provenanceRaces = run.inference_scope?.held_out_test === false
+    ? [run.inference_scope.race_id] : run.split.test_races;
+  for (const race of provenanceRaces) $('testRaceList').append(cell('span', raceName(race), 'race-chip'));
+  $('targetDefinition').textContent = `Signed residual: actual mini-sector duration minus a clean-air reference fitted from the same full session; the target is clipped under the saved run's rules. Because the reference uses the full session, this result is retrospective, not a prospective live estimate or a causal measurement of traffic's effect.`;
+  const hashes = $('hashList'); hashes.replaceChildren();
+  const entries = [
+    ['Run fingerprint', run.provenance.fingerprint],
+    ['Config SHA-256', run.provenance.config_sha256],
+    ['Prepared data SHA-256', run.provenance.prepared_artifact_sha256],
+    ...Object.entries(run.provenance.source_artifact_sha256).map(([name, hash]) => [`${name} SHA-256`, hash]),
+  ];
+  for (const [label, value] of entries) {
+    hashes.append(cell('dt', label));
+    const dd = cell('dd', value); dd.title = value; hashes.append(dd);
+  }
+}
+
+function updateExplorer() {
+  state.raceId = $('raceFilter').value;
+  state.driver = $('driverFilter').value;
+  state.sampleOrder = $('sampleOrderFilter').value;
+  state.predictionPage = 0;
+  state.selectedPoint = null;
+  writeFiltersToUrl('push');
+  $('downloadStatus').textContent = '';
+  renderExplorer();
+}
+
+function updateSampleOrder() {
+  state.sampleOrder = $('sampleOrderFilter').value;
+  state.predictionPage = 0;
+  state.selectedPoint = null;
+  writeFiltersToUrl('push');
+  $('downloadStatus').textContent = '';
+  renderPredictionTable(orderedSamplePoints());
+}
+
+function enableTableKeyboardScroll() {
+  for (const region of document.querySelectorAll('.table-scroll[tabindex="0"]')) {
+    region.addEventListener('keydown', (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      if (region.scrollWidth <= region.clientWidth) return;
+      event.preventDefault();
+      const step = Math.max(40, Math.round(region.clientWidth * 0.8));
+      region.scrollLeft += event.key === 'ArrowRight' ? step : -step;
+    });
+  }
+}
+
+function validMarinaBayReplay(data) {
+  const numeric = (value) => typeof value === 'number' && Number.isFinite(value);
+  const event = data?.event;
+  const drivers = data?.drivers;
+  const outline = data?.track_outline;
+  const bounds = outline?.bounds_m;
+  const replay = data?.replay;
+  const sourceHashes = data?.provenance?.source_sha256;
+  const startTime = data?.time_axis?.race_start_session_sec;
+  if (data?.schema_version !== 1 || event?.race_id !== '2023-Singapore-R'
+    || event?.circuit_id !== 'singapore' || event?.venue !== 'Marina Bay Street Circuit'
+    || !numeric(event?.lap_length_m) || !Number.isInteger(event?.lap_count)
+    || !Number.isInteger(event?.turn_count) || data?.evaluation_context?.held_out_test !== false
+    || data?.evaluation_context?.split_role !== 'training race' || !numeric(startTime)
+    || !Array.isArray(drivers) || drivers.length < 10
+    || !drivers.every((driver) => driver && typeof driver.number === 'string'
+      && typeof driver.acronym === 'string' && typeof driver.team === 'string')
+    || new Set(drivers.map((driver) => driver.number)).size !== drivers.length
+    || !outline || !Array.isArray(outline.points) || outline.points.length < 100
+    || !outline.points.every((point) => numeric(point.x_m) && numeric(point.y_m) && numeric(point.session_time_sec))
+    || !bounds || !numeric(bounds.min_x) || !numeric(bounds.max_x) || bounds.max_x <= bounds.min_x
+    || !numeric(bounds.min_y) || !numeric(bounds.max_y) || bounds.max_y <= bounds.min_y
+    || !drivers.some((driver) => driver.number === String(outline.driver_number))
+    || !sourceHashes || typeof sourceHashes !== 'object'
+    || !Object.values(sourceHashes).every((hash) => typeof hash === 'string' && /^[a-f0-9]{64}$/i.test(hash))
+    || !replay || !Array.isArray(replay.frames) || replay.frames.length !== replay.frame_count
+    || !Number.isInteger(replay.frame_stride) || replay.frame_stride < 1
+    || replay.output_sample_hz <= 0 || !numeric(replay.output_sample_hz)
+    || !Array.isArray(replay.frames) || replay.frames.length < 1000) return false;
+  let previousTime = -Infinity;
+  let observedPositions = 0;
+  for (const frame of replay.frames) {
+    if (!numeric(frame.session_time_sec) || !numeric(frame.race_elapsed_sec)
+      || frame.session_time_sec <= previousTime
+      || (previousTime !== -Infinity
+        && Math.abs(frame.session_time_sec - previousTime - (1 / replay.output_sample_hz)) > 1e-6)
+      || Math.abs(frame.race_elapsed_sec - (frame.session_time_sec - startTime)) > 1e-6
+      || !Array.isArray(frame.positions) || frame.positions.length !== drivers.length) return false;
+    previousTime = frame.session_time_sec;
+    for (const position of frame.positions) {
+      if (position === null) continue;
+      if (!position || !numeric(position.x_m) || !numeric(position.y_m)
+        || !(position.lap_number === null || (Number.isInteger(position.lap_number) && position.lap_number >= 1))
+        || !(position.speed_kph === null || (numeric(position.speed_kph) && position.speed_kph >= 0))
+        || typeof position.is_pit_lap !== 'boolean') return false;
+      observedPositions += 1;
+    }
+  }
+  return observedPositions === replay.sampled_position_count;
+}
+
+function formatReplayTime(seconds) {
+  const whole = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const remainder = whole % 60;
+  return [hours, minutes, remainder].map((part) => String(part).padStart(2, '0')).join(':');
+}
+
+function replayReferenceDriver() {
+  if (replayState.focusDriver !== 'all') return replayState.focusDriver;
+  return String(replayState.data?.track_outline?.driver_number || replayState.data?.drivers?.[0]?.number || '');
+}
+
+function replayDriverAtFrame(frameIndex, driverNumber = replayReferenceDriver()) {
+  const driverIndex = replayState.data.drivers.findIndex((driver) => driver.number === String(driverNumber));
+  if (driverIndex < 0) return null;
+  return replayState.data.replay.frames[frameIndex]?.positions[driverIndex] || null;
+}
+
+function populateReplayDriverSelector() {
+  const select = $('replayDriverFilter');
+  select.replaceChildren(new Option('All recorded cars', 'all'));
+  for (const driver of replayState.data.drivers) {
+    select.append(new Option(`${driver.acronym} · #${driver.number}`, driver.number));
+  }
+  select.disabled = false;
+  $('replayLapFilter').disabled = false;
+  $('replayPlayPause').disabled = false;
+  $('replayReset').disabled = false;
+  $('replayScrubber').disabled = false;
+  document.querySelectorAll('[data-replay-speed]').forEach((button) => { button.disabled = false; });
+}
+
+function availableReplayLaps(driverNumber = replayReferenceDriver()) {
+  const driverIndex = replayState.data.drivers.findIndex((driver) => driver.number === String(driverNumber));
+  if (driverIndex < 0) return [];
+  const lapIndices = new Map();
+  replayState.data.replay.frames.forEach((frame, index) => {
+    const lap = frame.positions[driverIndex]?.lap_number;
+    if (Number.isInteger(lap) && !lapIndices.has(lap)) lapIndices.set(lap, index);
+  });
+  return [...lapIndices.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+function populateReplayLapSelector() {
+  const select = $('replayLapFilter');
+  select.replaceChildren(new Option('Jump to a lap…', ''));
+  const reference = replayReferenceDriver();
+  const descriptor = replayState.data.drivers.find((driver) => driver.number === reference);
+  for (const [lap, frameIndex] of availableReplayLaps(reference)) {
+    select.append(new Option(`Lap ${lap}`, String(frameIndex)));
+  }
+  select.title = replayState.focusDriver === 'all'
+    ? `Lap jumps follow ${descriptor?.acronym || ''} #${reference} as the reference car`
+    : `Lap jumps follow ${descriptor?.acronym || ''} #${reference}`;
+  $('replayLapReference').textContent = replayState.focusDriver === 'all'
+    ? `With all cars shown, lap jumps follow ${descriptor?.acronym || ''} #${reference}.`
+    : `Lap jumps follow ${descriptor?.acronym || ''} #${reference}.`;
+  select.value = '';
+  const currentPosition = replayDriverAtFrame(replayState.frameIndex, reference);
+  if (currentPosition?.lap_number != null) {
+    const match = [...select.options].find((option) => Number(option.value) >= 0
+      && replayState.data.replay.frames[Number(option.value)]?.positions[
+        replayState.data.drivers.findIndex((driver) => driver.number === reference)
+      ]?.lap_number === currentPosition.lap_number);
+    if (match) select.value = match.value;
+  }
+}
+
+function drawMarinaBayTrack(updateSampleDetails = true) {
+  const data = replayState.data;
+  const canvas = $('marinaBayCanvas');
+  const context = canvas?.getContext('2d');
+  if (!data || !canvas || !context) return;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  const pixelWidth = Math.round(rect.width * ratio);
+  const pixelHeight = Math.round(rect.height * ratio);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const width = rect.width;
+  const height = rect.height;
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = '#0a1013';
+  context.fillRect(0, 0, width, height);
+
+  const bounds = data.track_outline.bounds_m;
+  const padding = Math.max(32, Math.min(56, width * 0.06));
+  const spanX = bounds.max_x - bounds.min_x;
+  const spanY = bounds.max_y - bounds.min_y;
+  const scale = Math.min((width - padding * 2) / spanX, (height - padding * 2) / spanY);
+  const mapWidth = spanX * scale;
+  const mapHeight = spanY * scale;
+  const offsetX = (width - mapWidth) / 2;
+  const offsetY = (height - mapHeight) / 2;
+  const mapPoint = (x, y) => ({
+    x: offsetX + (x - bounds.min_x) * scale,
+    y: height - offsetY - (y - bounds.min_y) * scale,
   });
 
-  return { telemetry, drivers, metrics, timeline, sectors };
-}
-
-// ==========================================================================
-// 3. CANVAS HiDPI SCALING HELPER
-// ==========================================================================
-
-function setupCanvasDpi(canvas, baseWidth, baseHeight) {
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(baseWidth * dpr);
-  canvas.height = Math.round(baseHeight * dpr);
-  const ctx = canvas.getContext('2d');
-  if (ctx.resetTransform) {
-    ctx.resetTransform();
+  const outline = data.track_outline.points;
+  context.beginPath();
+  outline.forEach((point, index) => {
+    const mapped = mapPoint(point.x_m, point.y_m);
+    if (index === 0) context.moveTo(mapped.x, mapped.y);
+    else context.lineTo(mapped.x, mapped.y);
+  });
+  context.closePath();
+  context.strokeStyle = '#19242a';
+  context.lineWidth = 20;
+  context.lineJoin = 'round';
+  context.lineCap = 'round';
+  context.stroke();
+  context.strokeStyle = '#4ad3c0';
+  context.lineWidth = 2;
+  context.stroke();
+  const start = mapPoint(outline[0].x_m, outline[0].y_m);
+  context.beginPath();
+  context.arc(start.x, start.y, 5, 0, Math.PI * 2);
+  context.fillStyle = '#f1f3ee';
+  context.fill();
+  context.fillStyle = '#aab4b8';
+  context.font = '10px ui-monospace, monospace';
+  const startLabel = 'LAP TRACE START';
+  const labelRight = start.x + 8 + context.measureText(startLabel).width;
+  const labelLeft = start.x - 8 - context.measureText(startLabel).width;
+  let labelX;
+  if (labelRight <= width - 6) {
+    context.textAlign = 'left';
+    labelX = start.x + 8;
+  } else if (labelLeft >= 6) {
+    context.textAlign = 'right';
+    labelX = start.x - 8;
+  } else {
+    context.textAlign = 'left';
+    labelX = Math.max(6, Math.min(width - 6 - context.measureText(startLabel).width, start.x + 8));
   }
-  ctx.scale(dpr, dpr);
-  return { ctx, dpr };
-}
+  context.textBaseline = 'bottom';
+  const labelY = Math.max(14, Math.min(height - 8, start.y - 6));
+  context.fillText(startLabel, labelX, labelY);
 
-// ==========================================================================
-// 4. MONZA CIRCUIT INTERACTIVE TRACK MAP ENGINE
-// ==========================================================================
-
-class TrackMap {
-  constructor(canvasId, driversData) {
-    this.canvas = document.getElementById(canvasId);
-    this.baseWidth = 940;
-    this.baseHeight = 520;
-    const dpi = setupCanvasDpi(this.canvas, this.baseWidth, this.baseHeight);
-    this.ctx = dpi.ctx;
-
-    this.drivers = driversData;
-    this.isPlaying = true;
-    this.speedMultiplier = 1.0;
-    this.focusedDriver = 'ALL';
-    this.currentLap = 34;
-
-    this.cars = [];
-    this.particles = [];
-    this.trackPoints = [];
-    this.drsArcs = [];
-
-    this.initMonzaGeometry();
-    this.initCars();
-    this.setupListeners();
-    this.animate = this.animate.bind(this);
-    requestAnimationFrame(this.animate);
-  }
-
-  initMonzaGeometry() {
-    const pts = [
-      { x: 680, y: 415, desc: 'Start/Finish Line' },
-      { x: 540, y: 415 },
-      { x: 450, y: 415, desc: 'Speed Trap' },
-      { x: 385, y: 415, desc: 'Prima Variante Braking' },
-      { x: 365, y: 440 }, // T1 Rettifilo
-      { x: 345, y: 395 }, // T2 Rettifilo
-      { x: 320, y: 415 },
-      { x: 260, y: 435 }, // T3 Curva Grande / Biassono
-      { x: 200, y: 425 },
-      { x: 165, y: 380 },
-      { x: 148, y: 320 },
-      { x: 140, y: 250 },
-      { x: 135, y: 205 },
-      { x: 110, y: 190 }, // T4 Roggia
-      { x: 130, y: 160 }, // T5 Roggia
-      { x: 115, y: 115 },
-      { x: 92,  y: 75 },  // T6 Lesmo 1
-      { x: 135, y: 52 },  // DRS Detection 1
-      { x: 185, y: 50 },
-      { x: 235, y: 75 },  // T7 Lesmo 2
-      { x: 285, y: 130 }, // Curva del Serraglio (DRS Zone 1)
-      { x: 355, y: 190 },
-      { x: 425, y: 245 },
-      { x: 455, y: 270, desc: 'Ascari Braking' },
-      { x: 472, y: 290 }, // T8 Ascari
-      { x: 500, y: 255 }, // T9 Ascari
-      { x: 535, y: 275 }, // T10 Ascari
-      { x: 590, y: 275 },
-      { x: 670, y: 275 },
-      { x: 740, y: 275, desc: 'DRS Detection Zone 2' },
-      { x: 795, y: 275, desc: 'Parabolica Braking' },
-      { x: 845, y: 295 },
-      { x: 880, y: 340 }, // T11 Curva Parabolica
-      { x: 875, y: 385 },
-      { x: 845, y: 415 },
-      { x: 790, y: 415 },
-      { x: 730, y: 415 }
-    ];
-
-    this.trackPoints = this.interpolateSpline(pts, 2000);
-
-    this.drsArcs = [
-      { start: 0.52, end: 0.63, name: 'DRS ZONE 1 (SERRAGLIO)' },
-      { start: 0.94, end: 0.08, name: 'DRS ZONE 2 (PIT STRAIGHT)' }
-    ];
-  }
-
-  interpolateSpline(controlPoints, totalSteps) {
-    const interpolated = [];
-    const n = controlPoints.length;
-    for (let i = 0; i < n; i++) {
-      const p0 = controlPoints[(i - 1 + n) % n];
-      const p1 = controlPoints[i];
-      const p2 = controlPoints[(i + 1) % n];
-      const p3 = controlPoints[(i + 2) % n];
-
-      const steps = Math.floor(totalSteps / n);
-      for (let s = 0; s < steps; s++) {
-        const t = s / steps;
-        const t2 = t * t;
-        const t3 = t2 * t;
-
-        const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-        const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-        interpolated.push({ x, y });
-      }
-    }
-    return interpolated;
-  }
-
-  isCarInDrsZone(t) {
-    const normT = ((t % 1.0) + 1.0) % 1.0;
-    return this.drsArcs.some(z => {
-      return (z.start <= z.end)
-        ? (normT >= z.start && normT <= z.end)
-        : (normT >= z.start || normT <= z.end);
-    });
-  }
-
-  getTrackSpeedFactor(t) {
-    const normT = ((t % 1.0) + 1.0) % 1.0;
-    if (normT >= 0.94 || normT <= 0.08) return 1.35;
-    if (normT > 0.08 && normT <= 0.15) {
-      return 0.40 + 0.95 * (Math.abs(normT - 0.115) / 0.035);
-    }
-    if (normT > 0.15 && normT <= 0.33) return 1.25;
-    if (normT > 0.33 && normT <= 0.40) {
-      return 0.48 + 0.77 * (Math.abs(normT - 0.365) / 0.035);
-    }
-    if (normT > 0.40 && normT <= 0.52) return 0.75;
-    if (normT > 0.52 && normT <= 0.63) return 1.35;
-    if (normT > 0.63 && normT <= 0.71) {
-      return 0.60 + 0.75 * (Math.abs(normT - 0.670) / 0.040);
-    }
-    if (normT > 0.71 && normT <= 0.81) return 1.35;
-    if (normT > 0.81 && normT <= 0.94) return 0.85;
-    return 1.10;
-  }
-
-  initCars() {
-    const pts = this.trackPoints;
-    const totalPts = pts.length;
-    let cumulativeTrackOffset = 0.0;
-
-    this.cars = this.drivers.map((d, index) => {
-      let gapFromAhead = 0.0;
-      if (index > 0) {
-        const secGap = (d.gapSec !== undefined && d.gapSec > 0) ? d.gapSec : (index * 1.25);
-        const prevSecGap = (index > 1 && this.drivers[index - 1].gapSec !== undefined) ? this.drivers[index - 1].gapSec : ((index - 1) * 1.25);
-        const deltaSec = Math.max(0.35, Math.min(3.5, secGap - prevSecGap));
-        gapFromAhead = deltaSec / 82.0;
-      }
-      cumulativeTrackOffset += gapFromAhead;
-
-      const t = (0.02 - cumulativeTrackOffset + 10.0) % 1.0;
-      const idx = Math.floor(t * totalPts);
-      const nextIdx = (idx + 12) % totalPts;
-      const pt = pts[idx];
-      const nextPt = pts[nextIdx];
-
-      return {
-        ...d,
-        t: t,
-        cumulativeOffset: cumulativeTrackOffset,
-        gapFromAhead: gapFromAhead,
-        speed: 0.00042,
-        baseSpeed: 0.00042,
-        x: pt.x,
-        y: pt.y,
-        heading: Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x),
-        isDrsActive: this.isCarInDrsZone(t),
-        currentGap: d.gap || (index === 0 ? 'LEADER' : `+${(index * 1.25).toFixed(3)}s`)
+  const frame = data.replay.frames[replayState.frameIndex];
+  const nextFrame = data.replay.frames[replayState.frameIndex + 1] || null;
+  const outputHz = Number(data.replay.output_sample_hz);
+  const interval = nextFrame ? nextFrame.race_elapsed_sec - frame.race_elapsed_sec : 0;
+  const intervalIsRecorded = nextFrame && Number.isFinite(outputHz) && outputHz > 0
+    && Math.abs(interval - 1 / outputHz) <= 1e-6;
+  const alpha = intervalIsRecorded
+    ? Math.max(0, Math.min(1, (replayState.elapsedSeconds - frame.race_elapsed_sec) / interval)) : 0;
+  const focusIndex = data.drivers.findIndex((driver) => driver.number === replayState.focusDriver);
+  let positionCount = 0;
+  frame.positions.forEach((position, index) => {
+    const following = nextFrame?.positions[index] || null;
+    let visualPosition = position;
+    const sameLap = position && following && position.lap_number === following.lap_number;
+    const pitDiscontinuity = position?.is_pit_lap === true || following?.is_pit_lap === true;
+    const coordinateDelta = position && following
+      ? Math.hypot(following.x_m - position.x_m, following.y_m - position.y_m) : Infinity;
+    const maxRecordedSpeed = position && following
+      && Number.isFinite(position.speed_kph) && Number.isFinite(following.speed_kph)
+      ? Math.max(position.speed_kph, following.speed_kph) / 3.6 : 0;
+    const plausibleMotion = position && following && maxRecordedSpeed > 0
+      && coordinateDelta <= maxRecordedSpeed * interval + 0.1;
+    const lapIncrement = position && following && Number.isInteger(position.lap_number)
+      && Number.isInteger(following.lap_number) && following.lap_number === position.lap_number + 1;
+    const lapContinuous = sameLap || (lapIncrement && plausibleMotion);
+    const canInterpolate = alpha > 0 && intervalIsRecorded && position && following
+      && lapContinuous && !pitDiscontinuity && plausibleMotion;
+    if (canInterpolate) {
+      visualPosition = {
+        ...position,
+        x_m: position.x_m + (following.x_m - position.x_m) * alpha,
+        y_m: position.y_m + (following.y_m - position.y_m) * alpha,
       };
+    }
+    if (!visualPosition) return;
+    positionCount += 1;
+    const driver = data.drivers[index];
+    const mapped = mapPoint(visualPosition.x_m, visualPosition.y_m);
+    const focused = index === focusIndex;
+    const teamColor = window.HammerTimeDriverAssets?.officialTeamColorFor(driver, marinaBayDriverAssetMap)
+      || MARINA_BAY_TEAM_COLORS_2023[driver.team] || '#aab4b8';
+    context.beginPath();
+    context.arc(mapped.x, mapped.y, focused ? 7 : 4.1, 0, Math.PI * 2);
+    context.fillStyle = teamColor;
+    context.fill();
+    context.lineWidth = focused ? 2.5 : 0.8;
+    context.strokeStyle = focused ? '#f5f5ef' : '#0c1115';
+    context.stroke();
+    if (focused || width > 620) {
+      context.font = focused ? '700 10px ui-monospace, monospace' : '9px ui-monospace, monospace';
+      context.textAlign = 'left';
+      context.textBaseline = 'middle';
+      context.lineWidth = 3;
+      context.strokeStyle = '#0a1013';
+      context.strokeText(driver.number, mapped.x + 6, mapped.y);
+      context.fillStyle = focused ? '#fff' : '#d9e3e3';
+      context.fillText(driver.number, mapped.x + 6, mapped.y);
+    }
+  });
+
+  $('trackPositionCoverage').textContent = `Markers ${positionCount}/${data.drivers.length}`;
+  const reference = replayReferenceDriver();
+  const refDriver = data.drivers.find((driver) => driver.number === reference);
+  const referencePosition = replayDriverAtFrame(replayState.frameIndex, reference);
+  $('trackCurrentLap').textContent = Number.isInteger(referencePosition?.lap_number)
+    ? `Lap ${referencePosition.lap_number} · ${replayState.focusDriver === 'all' ? `${refDriver?.acronym} #${reference} reference` : `#${reference}`}`
+    : `Lap — · ${refDriver?.acronym || ''} #${reference} reference`;
+  const current = replayState.elapsedSeconds;
+  $('trackReplayClock').textContent = `Race elapsed ${formatReplayTime(current)}`;
+  $('replayScrubber').value = String(current);
+  $('replayScrubberRange').textContent = `${formatReplayTime(0)} – ${formatReplayTime(data.replay.frames.at(-1).race_elapsed_sec)}`;
+  if (replayState.focusDriver === 'all') {
+    const focusTarget = $('replayFocusDriver');
+    const focusLabel = `All recorded cars · lap reference ${refDriver?.acronym || ''} #${reference}`;
+    if (window.HammerTimeDriverAssets) window.HammerTimeDriverAssets.renderSummary(focusTarget, null, focusLabel, marinaBayDriverAssetMap);
+    else focusTarget.textContent = focusLabel;
+    $('replayFocusSpeed').textContent = '—';
+    $('replayFocusStatus').textContent = `${positionCount} recorded positions at this sample`;
+  } else {
+    const descriptor = data.drivers[focusIndex];
+    const position = frame.positions[focusIndex];
+    const focusTarget = $('replayFocusDriver');
+    const focusLabel = `${descriptor.acronym} · #${descriptor.number}`;
+    if (window.HammerTimeDriverAssets) window.HammerTimeDriverAssets.renderSummary(focusTarget, descriptor, focusLabel, marinaBayDriverAssetMap);
+    else focusTarget.textContent = focusLabel;
+    $('replayFocusSpeed').textContent = position?.speed_kph == null ? '—' : `${number(position.speed_kph, 1)} km/h`;
+    $('replayFocusStatus').textContent = position
+      ? `Recorded position · lap ${position.lap_number ?? '—'}` : 'No recorded coordinates at this sample';
+  }
+  const when = `${formatReplayTime(current)} replay elapsed`;
+  if (updateSampleDetails) {
+    const sampleWhen = `${formatReplayTime(frame.race_elapsed_sec)} replay elapsed; source session timestamp ${number(frame.session_time_sec, 3)} seconds`;
+    $('trackFrameCaption').textContent = `Recorded FastF1 data for the preceding 2 Hz sample at ${sampleWhen}; canvas markers interpolate only between adjacent samples that pass continuity checks.`;
+    $('trackFrameRows').replaceChildren();
+    data.drivers.forEach((driver, index) => {
+      const position = frame.positions[index];
+      const row = document.createElement('tr');
+      const driverCell = cell('th', `${driver.acronym} · #${driver.number}`);
+      driverCell.scope = 'row';
+      row.append(driverCell,
+        cell('td', position?.lap_number ?? '—'),
+        cell('td', position ? number(position.x_m, 3) : '—'),
+        cell('td', position ? number(position.y_m, 3) : '—'),
+        cell('td', position?.speed_kph == null ? '—' : number(position.speed_kph, 1)),
+        cell('td', position ? 'Coordinates recorded' : 'No coordinates at sample'));
+      $('trackFrameRows').append(row);
     });
+    canvas.setAttribute('aria-label', `Archived 2023 Singapore Grand Prix replay at ${formatReplayTime(current)}. ${positionCount} markers are visible. Canvas interpolation is visual only; unsafe intervals use the current source point until the next sample, and missing current positions are omitted.`);
   }
-
-  updateLapAndGaps() {
-    const lapEl = document.getElementById('currentLapDisplay');
-    if (lapEl) lapEl.textContent = `Lap ${this.currentLap} / 53`;
-
-    this.cars.forEach((car, index) => {
-      const baseGap = car.gapSec !== undefined ? car.gapSec : (index * 1.25);
-      if (index === 0) {
-        car.currentGap = 'LEADER';
-      } else {
-        const dynamicFluctuation = Math.sin(this.currentLap * 0.65 + index * 0.8) * 0.35;
-        const currentSec = Math.max(0.18, baseGap + dynamicFluctuation);
-        car.currentGap = `+${currentSec.toFixed(3)}s`;
-      }
-
-      const pitLap = 18 + (index % 6);
-      if (this.currentLap < pitLap) {
-        car.compound = index % 3 === 0 ? 'SOFT' : 'MEDIUM';
-        car.tyreAge = this.currentLap;
-      } else {
-        car.compound = 'HARD';
-        car.tyreAge = this.currentLap - pitLap + 1;
-      }
-    });
-
-    if (this.telemetryPanel) {
-      this.telemetryPanel.updateDynamicTower(this.currentLap, this.cars);
-    }
-  }
-
-  setupListeners() {
-    const playBtn = document.getElementById('btnPlayPause');
-    const playText = document.getElementById('playText');
-    const playIcon = document.getElementById('playIcon');
-
-    if (playBtn) {
-      playBtn.addEventListener('click', () => {
-        this.isPlaying = !this.isPlaying;
-        if (playText) playText.textContent = this.isPlaying ? 'PAUSE' : 'PLAY';
-        if (playIcon) playIcon.textContent = this.isPlaying ? '⏸' : '▶';
-        playBtn.setAttribute('aria-label', this.isPlaying ? 'Pause race simulation' : 'Play race simulation');
-      });
-    }
-
-    const resetBtn = document.getElementById('btnResetTrack');
-    if (resetBtn) {
-      resetBtn.addEventListener('click', () => {
-        this.initCars();
-        this.currentLap = 1;
-        this.updateLapAndGaps();
-        const scrubber = document.getElementById('timeScrubber');
-        if (scrubber) scrubber.value = 0;
-      });
-    }
-
-    const speedBtns = document.querySelectorAll('.speed-btn');
-    speedBtns.forEach(btn => {
-      btn.addEventListener('click', () => {
-        speedBtns.forEach(b => {
-          b.classList.remove('active');
-          b.setAttribute('aria-pressed', 'false');
-        });
-        btn.classList.add('active');
-        btn.setAttribute('aria-pressed', 'true');
-        this.speedMultiplier = parseFloat(btn.dataset.speed);
-      });
-    });
-
-    const scrubber = document.getElementById('timeScrubber');
-    this.isScrubbing = false;
-    if (scrubber) {
-      const startScrub = () => { this.isScrubbing = true; };
-      const stopScrub = () => { this.isScrubbing = false; };
-      scrubber.addEventListener('mousedown', startScrub);
-      scrubber.addEventListener('touchstart', startScrub, { passive: true });
-      window.addEventListener('mouseup', stopScrub);
-      window.addEventListener('touchend', stopScrub);
-
-      scrubber.addEventListener('input', (e) => {
-        const pct = parseFloat(e.target.value);
-        this.currentLap = Math.max(1, Math.min(53, Math.round(1 + (pct / 100) * 52)));
-        const lapFrac = (pct % (100 / 53)) / (100 / 53);
-        const leadT = lapFrac % 1.0;
-        if (this.cars.length > 0) {
-          this.cars[0].t = leadT;
-          for (let i = 1; i < this.cars.length; i++) {
-            const offset = this.cars[i].cumulativeOffset || (i * 0.015);
-            this.cars[i].t = (leadT - offset + 100.0) % 1.0;
-          }
-        }
-        this.updateLapAndGaps();
-      });
-    }
-
-    const focusSelect = document.getElementById('driverFocusSelect');
-    if (focusSelect) {
-      this.drivers.forEach(d => {
-        const opt = document.createElement('option');
-        opt.value = d.code;
-        opt.textContent = `${d.code} · ${d.name} (${d.team})`;
-        focusSelect.appendChild(opt);
-      });
-
-      focusSelect.addEventListener('change', (e) => {
-        const code = e.target.value;
-        this.focusedDriver = code;
-        if (window.htController) {
-          window.htController.selectDriver(code);
-        }
-      });
-    }
-
-    this.canvas.addEventListener('click', (e) => {
-      const rect = this.canvas.getBoundingClientRect();
-      const scaleX = this.baseWidth / rect.width;
-      const scaleY = this.baseHeight / rect.height;
-      const clickX = (e.clientX - rect.left) * scaleX;
-      const clickY = (e.clientY - rect.top) * scaleY;
-
-      let nearest = null;
-      let minDist = 32;
-      this.cars.forEach(car => {
-        const d = Math.hypot(car.x - clickX, car.y - clickY);
-        if (d < minDist) {
-          minDist = d;
-          nearest = car;
-        }
-      });
-
-      if (nearest && window.htController) {
-        window.htController.selectDriver(nearest.code);
-      }
-    });
-
-    window.addEventListener('resize', () => {
-      setupCanvasDpi(this.canvas, this.baseWidth, this.baseHeight);
-    });
-  }
-
-  animate() {
-    this.ctx.clearRect(0, 0, this.baseWidth, this.baseHeight);
-
-    this.drawCircuitBackground();
-    this.drawTrackGeometry();
-    this.drawDrsZones();
-    this.updateAndDrawParticles();
-    this.updateAndDrawCars();
-    this.drawAerodynamicEdges();
-
-    requestAnimationFrame(this.animate);
-  }
-
-  drawCircuitBackground() {
-    this.ctx.save();
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.025)';
-    this.ctx.lineWidth = 1;
-    for (let x = 40; x < this.baseWidth; x += 60) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(x, 0);
-      this.ctx.lineTo(x, this.baseHeight);
-      this.ctx.stroke();
-    }
-    for (let y = 40; y < this.baseHeight; y += 60) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(0, y);
-      this.ctx.lineTo(this.baseWidth, y);
-      this.ctx.stroke();
-    }
-
-    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.035)';
-    this.ctx.font = '900 64px "Titillium Web", sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.fillText('MONZA', this.baseWidth / 2, this.baseHeight / 2 + 20);
-    this.ctx.font = '700 16px "Titillium Web", sans-serif';
-    this.ctx.fillText('5.793 KM · TEMPLE OF SPEED', this.baseWidth / 2, this.baseHeight / 2 + 55);
-    this.ctx.restore();
-  }
-
-  drawTrackGeometry() {
-    const pts = this.trackPoints;
-    if (pts.length < 2) return;
-
-    this.ctx.save();
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) {
-      this.ctx.lineTo(pts[i].x, pts[i].y);
-    }
-    this.ctx.closePath();
-    this.ctx.lineWidth = 26;
-    this.ctx.lineCap = 'round';
-    this.ctx.lineJoin = 'round';
-    this.ctx.strokeStyle = '#151520';
-    this.ctx.stroke();
-
-    this.ctx.lineWidth = 20;
-    this.ctx.strokeStyle = '#222232';
-    this.ctx.stroke();
-
-    const s1End = Math.floor(0.275 * pts.length);
-    const s2End = Math.floor(0.610 * pts.length);
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i <= s1End; i++) {
-      this.ctx.lineTo(pts[i].x, pts[i].y);
-    }
-    this.ctx.lineWidth = 3.5;
-    this.ctx.strokeStyle = '#E10600';
-    this.ctx.stroke();
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(pts[s1End].x, pts[s1End].y);
-    for (let i = s1End; i <= s2End; i++) {
-      this.ctx.lineTo(pts[i].x, pts[i].y);
-    }
-    this.ctx.lineWidth = 3.5;
-    this.ctx.strokeStyle = '#00A3E0';
-    this.ctx.stroke();
-
-    this.ctx.beginPath();
-    this.ctx.moveTo(pts[s2End].x, pts[s2End].y);
-    for (let i = s2End; i < pts.length; i++) {
-      this.ctx.lineTo(pts[i].x, pts[i].y);
-    }
-    this.ctx.lineTo(pts[0].x, pts[0].y);
-    this.ctx.lineWidth = 3.5;
-    this.ctx.strokeStyle = '#FFD700';
-    this.ctx.stroke();
-
-    const sf = pts[0];
-    this.ctx.save();
-    this.ctx.translate(sf.x, sf.y);
-    this.ctx.fillStyle = '#FFFFFF';
-    this.ctx.fillRect(-2, -12, 4, 24);
-    this.ctx.fillStyle = '#151520';
-    for (let cy = -12; cy < 12; cy += 6) {
-      this.ctx.fillRect(-2, cy, 2, 3);
-      this.ctx.fillRect(0, cy + 3, 2, 3);
-    }
-    this.ctx.restore();
-
-    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.45)';
-    this.ctx.font = '800 13px "Titillium Web", sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.textBaseline = 'middle';
-    this.ctx.fillText('«««', 610, 415);
-    this.ctx.font = '16px sans-serif';
-    this.ctx.fillText('🏁', 655, 395);
-
-    this.ctx.font = '900 10px "Titillium Web", sans-serif';
-    this.ctx.fillStyle = 'rgba(225, 6, 0, 0.9)';
-    this.ctx.fillText('SECTOR 1', 190, 400);
-    this.ctx.fillStyle = 'rgba(0, 163, 224, 0.9)';
-    this.ctx.fillText('SECTOR 2', 120, 120);
-    this.ctx.fillStyle = 'rgba(255, 215, 0, 0.9)';
-    this.ctx.fillText('SECTOR 3', 650, 325);
-
-    this.drawCallout(450, 475, 450, 415, 'SPEED TRAP', '#FF007F');
-    this.drawCallout(240, 25, 135, 52, 'DRS DETECTION ZONE 1', '#00D2BE');
-    this.drawCallout(740, 475, 740, 415, 'DRS DETECTION ZONE 2', '#00D2BE');
-
-    const corners = [
-      { num: '01', x: 365, y: 462 },
-      { num: '02', x: 345, y: 375 },
-      { num: '03', x: 215, y: 450 },
-      { num: '04', x: 92,  y: 195 },
-      { num: '05', x: 155, y: 155 },
-      { num: '06', x: 70,  y: 75 },
-      { num: '07', x: 215, y: 35 },
-      { num: '08', x: 450, y: 310 },
-      { num: '09', x: 500, y: 235 },
-      { num: '10', x: 550, y: 295 },
-      { num: '11', x: 905, y: 345 }
-    ];
-
-    corners.forEach(c => {
-      this.ctx.beginPath();
-      this.ctx.arc(c.x, c.y, 11, 0, Math.PI * 2);
-      this.ctx.fillStyle = '#101018';
-      this.ctx.fill();
-      this.ctx.lineWidth = 1.6;
-      this.ctx.strokeStyle = '#FFFFFF';
-      this.ctx.stroke();
-
-      this.ctx.fillStyle = '#FFFFFF';
-      this.ctx.font = '800 10px "Titillium Web", sans-serif';
-      this.ctx.textAlign = 'center';
-      this.ctx.textBaseline = 'middle';
-      this.ctx.fillText(c.num, c.x, c.y + 0.5);
-    });
-
-    this.ctx.restore();
-  }
-
-  drawCallout(bx, by, tx, ty, text, color) {
-    this.ctx.save();
-    this.ctx.beginPath();
-    this.ctx.moveTo(bx, by);
-    this.ctx.lineTo(tx, ty);
-    this.ctx.lineWidth = 1.2;
-    this.ctx.strokeStyle = color;
-    this.ctx.stroke();
-
-    this.ctx.beginPath();
-    this.ctx.arc(tx, ty, 3.5, 0, Math.PI * 2);
-    this.ctx.fillStyle = color;
-    this.ctx.fill();
-
-    this.ctx.font = '800 9px "Titillium Web", sans-serif';
-    const textWidth = this.ctx.measureText(text).width;
-    const boxW = textWidth + 14;
-    const boxH = 18;
-
-    this.ctx.fillStyle = color;
-    this.ctx.beginPath();
-    this.ctx.roundRect(bx - boxW / 2, by - boxH / 2, boxW, boxH, 3);
-    this.ctx.fill();
-
-    this.ctx.fillStyle = '#0F0F17';
-    this.ctx.textAlign = 'center';
-    this.ctx.textBaseline = 'middle';
-    this.ctx.fillText(text, bx, by);
-    this.ctx.restore();
-  }
-
-  drawDrsZones() {
-    const pts = this.trackPoints;
-    this.ctx.save();
-
-    this.drsArcs.forEach(zone => {
-      const startIdx = Math.floor(zone.start * pts.length);
-      const endIdx = Math.floor(zone.end * pts.length);
-
-      this.ctx.beginPath();
-      if (startIdx <= endIdx) {
-        this.ctx.moveTo(pts[startIdx].x, pts[startIdx].y);
-        for (let i = startIdx; i <= endIdx; i++) {
-          this.ctx.lineTo(pts[i].x, pts[i].y);
-        }
-      } else {
-        this.ctx.moveTo(pts[startIdx].x, pts[startIdx].y);
-        for (let i = startIdx; i < pts.length; i++) {
-          this.ctx.lineTo(pts[i].x, pts[i].y);
-        }
-        for (let i = 0; i <= endIdx; i++) {
-          this.ctx.lineTo(pts[i].x, pts[i].y);
-        }
-      }
-
-      this.ctx.lineWidth = 6;
-      this.ctx.strokeStyle = 'rgba(0, 210, 190, 0.45)';
-      this.ctx.lineCap = 'round';
-      this.ctx.stroke();
-
-      this.ctx.lineWidth = 2.2;
-      this.ctx.strokeStyle = '#00D2BE';
-      this.ctx.shadowColor = '#00D2BE';
-      this.ctx.shadowBlur = 8;
-      this.ctx.stroke();
-    });
-
-    this.ctx.restore();
-  }
-
-  updateAndDrawParticles() {
-    if (this.isPlaying) {
-      this.cars.slice(0, 8).forEach(car => {
-        if (Math.random() < 0.3) {
-          this.particles.push({
-            x: car.x - Math.cos(car.heading) * 10,
-            y: car.y - Math.sin(car.heading) * 10,
-            vx: -Math.cos(car.heading) * (0.8 + Math.random() * 0.8),
-            vy: -Math.sin(car.heading) * (0.8 + Math.random() * 0.8),
-            alpha: 0.6,
-            color: car.color,
-            size: 2.2
-          });
-        }
-      });
-    }
-
-    this.ctx.save();
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.x += p.vx;
-      p.y += p.vy;
-      p.alpha -= 0.02;
-
-      if (p.alpha <= 0) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-
-      this.ctx.fillStyle = p.color;
-      this.ctx.globalAlpha = p.alpha;
-      this.ctx.beginPath();
-      this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-    this.ctx.restore();
-  }
-
-  drawAerodynamicEdges() {
-    let drsTrainCount = 0;
-    let edgeCount = 0;
-
-    this.ctx.save();
-    const timeVal = Date.now() * 0.005;
-
-    for (let i = 0; i < this.cars.length; i++) {
-      const carFollower = this.cars[i];
-      let closestLeader = null;
-      let minGap = 999.0;
-
-      for (let j = 0; j < this.cars.length; j++) {
-        if (i === j) continue;
-        const carLeader = this.cars[j];
-
-        let delta = carLeader.t - carFollower.t;
-        if (delta < 0) delta += 1.0;
-
-        if (delta > 0.0005 && delta < minGap) {
-          minGap = delta;
-          closestLeader = carLeader;
-        }
-      }
-
-      const gapSec = minGap * 82.0;
-
-      if (closestLeader && gapSec <= 2.0) {
-        edgeCount++;
-        const isSevereWake = gapSec < 0.8;
-        if (isSevereWake) drsTrainCount++;
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(closestLeader.x, closestLeader.y);
-        this.ctx.lineTo(carFollower.x, carFollower.y);
-
-        const pulse = 0.5 + 0.5 * Math.sin(timeVal + i * 1.5);
-
-        if (isSevereWake) {
-          this.ctx.strokeStyle = `rgba(225, 6, 0, ${0.55 + 0.45 * pulse})`;
-          this.ctx.lineWidth = 3.2;
-          this.ctx.shadowColor = '#E10600';
-          this.ctx.shadowBlur = 10;
-        } else {
-          this.ctx.strokeStyle = `rgba(255, 153, 0, ${0.4 + 0.4 * pulse})`;
-          this.ctx.lineWidth = 1.8;
-          this.ctx.shadowColor = '#FF9900';
-          this.ctx.shadowBlur = 5;
-        }
-        this.ctx.stroke();
-      }
-    }
-    this.ctx.restore();
-
-    const drsDom = document.getElementById('activeDrsCount');
-    if (drsDom) drsDom.textContent = `${drsTrainCount} Active`;
-    const edgeDom = document.getElementById('activeEdgesCount');
-    if (edgeDom) edgeDom.textContent = `${edgeCount} Edges`;
-  }
-
-  updateAndDrawCars() {
-    const pts = this.trackPoints;
-    const totalPts = pts.length;
-    if (this.cars.length === 0) return;
-
-    const leadCar = this.cars[0];
-
-    if (this.isPlaying) {
-      const leadTrackSpeed = this.getTrackSpeedFactor(leadCar.t);
-      const leadPace = 1.0 + Math.sin(this.currentLap * 0.28) * 0.02;
-      const leadStep = leadCar.baseSpeed * leadTrackSpeed * leadPace * this.speedMultiplier;
-      const oldT = leadCar.t;
-      leadCar.t = (leadCar.t + leadStep) % 1.0;
-
-      if (leadCar.t < oldT) {
-        this.currentLap = (this.currentLap % 53) + 1;
-        this.updateLapAndGaps();
-      }
-
-      const accordion = 0.65 + 0.35 * Math.min(1.0, Math.max(0.0, (leadTrackSpeed - 0.40) / (1.35 - 0.40)));
-
-      for (let i = 1; i < this.cars.length; i++) {
-        const car = this.cars[i];
-        const inDrs = this.isCarInDrsZone(car.t);
-        const drsTow = (inDrs && car.gapSec < 1.0) ? 0.92 : 1.0;
-        const effectiveOffset = (car.cumulativeOffset || (i * 0.015)) * accordion * drsTow;
-        car.t = (leadCar.t - effectiveOffset + 100.0) % 1.0;
-        car.isDrsActive = inDrs;
-      }
-    }
-
-    const scrubber = document.getElementById('timeScrubber');
-    if (scrubber && !this.isScrubbing) {
-      const scrubVal = ((this.currentLap - 1) / 52) * 100 + (leadCar.t * (100 / 53));
-      scrubber.value = Math.min(100, Math.max(0, scrubVal));
-      scrubber.setAttribute('aria-valuenow', Math.round(scrubVal));
-    }
-
-    this.cars.forEach(car => {
-      car.isDrsActive = this.isCarInDrsZone(car.t);
-
-      const idx = Math.floor(car.t * totalPts);
-      const nextIdx = (idx + 12) % totalPts;
-      const pt = pts[idx];
-      const nextPt = pts[nextIdx];
-
-      car.x = pt.x;
-      car.y = pt.y;
-      car.heading = Math.atan2(nextPt.y - pt.y, nextPt.x - pt.x);
-
-      const isHero = this.focusedDriver === car.code;
-
-      if (isHero) {
-        const hudEl = document.getElementById('focusedDriverHud');
-        if (hudEl) {
-          const trackSpeed = this.getTrackSpeedFactor(car.t);
-          const liveKmh = Math.round((trackSpeed / 1.35) * (car.topSpeed || 348));
-          hudEl.innerHTML = `
-            <span class="hud-driver" style="color:${car.color}">${car.code} #${car.num}</span>
-            <span class="hud-speed text-teal">${liveKmh} km/h</span>
-            <span class="hud-gap ${car.currentGap === 'LEADER' ? 'text-green' : 'text-orange'}">${car.currentGap}</span>
-          `;
-        }
-      }
-
-      this.ctx.save();
-      this.ctx.translate(car.x, car.y);
-      this.ctx.rotate(car.heading);
-
-      if (isHero) {
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, 16, 0, Math.PI * 2);
-        this.ctx.fillStyle = 'rgba(225, 6, 0, 0.3)';
-        this.ctx.fill();
-        this.ctx.lineWidth = 2;
-        this.ctx.strokeStyle = '#E10600';
-        this.ctx.stroke();
-      }
-
-      this.ctx.beginPath();
-      this.ctx.moveTo(10, 0);
-      this.ctx.lineTo(-8, -6);
-      this.ctx.lineTo(-5, 0);
-      this.ctx.lineTo(-8, 6);
-      this.ctx.closePath();
-
-      this.ctx.fillStyle = car.color;
-      this.ctx.shadowColor = car.color;
-      this.ctx.shadowBlur = isHero ? 16 : 6;
-      this.ctx.fill();
-
-      this.ctx.fillStyle = '#FFFFFF';
-      this.ctx.beginPath();
-      this.ctx.arc(8, 0, 2, 0, Math.PI * 2);
-      this.ctx.fill();
-
-      this.ctx.restore();
-
-      this.ctx.save();
-      this.ctx.fillStyle = isHero ? '#FFFFFF' : 'rgba(255, 255, 255, 0.85)';
-      this.ctx.font = isHero ? '900 12px "Titillium Web", sans-serif' : '700 10px "Titillium Web", sans-serif';
-      this.ctx.textAlign = 'center';
-      this.ctx.shadowColor = '#000000';
-      this.ctx.shadowBlur = 4;
-      this.ctx.fillText(car.code, car.x, car.y - 12);
-      this.ctx.restore();
-    });
+  if ($('replayLapFilter').options.length > 1) {
+    const selectedLap = referencePosition?.lap_number;
+    const matchingOption = [...$('replayLapFilter').options].find((option) => option.value
+      && data.replay.frames[Number(option.value)]?.positions[
+        data.drivers.findIndex((driver) => driver.number === reference)
+      ]?.lap_number === selectedLap);
+    $('replayLapFilter').value = matchingOption?.value || '';
   }
 }
 
-// ==========================================================================
-// 5. TELEMETRY & DIAGNOSTICS CHARTS ENGINE (AUTHENTIC WIRING)
-// ==========================================================================
+function populateReplayMetadata() {
+  const { event, track_outline: outline, replay } = replayState.data;
+  $('trackCircuitFacts').textContent = `${event.venue} · ${(event.lap_length_m / 1000).toFixed(2)} km · ${event.turn_count} turns · ${event.lap_count} laps`;
+  const outlineDriver = outline.driver_acronym
+    || replayState.data.drivers.find((driver) => driver.number === String(outline.driver_number))?.acronym
+    || `#${outline.driver_number}`;
+  $('trackOutlineSource').textContent = `Track trace: FastF1 ${outlineDriver} #${outline.driver_number}, lap ${outline.lap_number}; ${outline.source_sample_count} raw Source=pos samples sorted within one recorded ${number(outline.lap_duration_sec, 3)} s lap. Coordinate trace spans ${number(outline.distance_delta_m, 1)} m; it is a trace, not a surveyed boundary.`;
+  $('trackReplayStatus').textContent = `Archived replay ready · ${event.date} · ${replay.output_sample_hz} recorded samples/s`;
+  $('replayScrubber').max = String(replay.frames.at(-1).race_elapsed_sec);
+  $('replayScrubber').step = String(1 / replay.output_sample_hz);
+}
 
-class TelemetryPanel {
-  constructor(driversData, sectorsData, timelineData, telemetryData) {
-    this.drivers = driversData;
-    this.sectors = sectorsData || {};
-    this.timeline = timelineData || {};
-    this.telemetry = telemetryData || [];
+function setReplayFrame(index) {
+  const maxIndex = replayState.data.replay.frames.length - 1;
+  replayState.frameIndex = Math.max(0, Math.min(maxIndex, Math.floor(index)));
+  replayState.elapsedSeconds = replayState.data.replay.frames[replayState.frameIndex].race_elapsed_sec;
+  drawMarinaBayTrack();
+}
 
-    this.activeDriver = this.drivers[0];
-    this.rows = new Map();
+function setReplayElapsed(seconds) {
+  const frames = replayState.data.replay.frames;
+  replayState.elapsedSeconds = Math.max(0, Math.min(frames.at(-1).race_elapsed_sec, seconds));
+  let low = 0;
+  let high = frames.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (frames[middle].race_elapsed_sec <= replayState.elapsedSeconds) low = middle;
+    else high = middle - 1;
+  }
+  const sampleChanged = low !== replayState.frameIndex;
+  replayState.frameIndex = low;
+  drawMarinaBayTrack(sampleChanged);
+}
 
-    this.speedCanvas = document.getElementById('speedTraceCanvas');
-    this.gapCanvas = document.getElementById('gapHistoryCanvas');
+function pauseMarinaBayReplay() {
+  replayState.playing = false;
+  replayState.lastAnimationTime = null;
+  if (replayState.animationId !== null) cancelAnimationFrame(replayState.animationId);
+  replayState.animationId = null;
+  $('replayPlayPause').textContent = 'Play';
+  $('replayPlayPause').setAttribute('aria-label', 'Play archived race replay');
+  $('trackReplayStatus').textContent = 'Archived replay paused';
+}
 
-    this.initTimingTower();
-    this.renderDriverCharts(this.activeDriver);
-    this.renderMiniSectorHeatmap(this.activeDriver);
-    this.updateTacticalBanner(this.activeDriver, 34);
+function advanceMarinaBayReplay(timestamp) {
+  if (!replayState.playing) return;
+  if (replayState.lastAnimationTime === null) replayState.lastAnimationTime = timestamp;
+  const deltaSeconds = Math.min(0.25, Math.max(0, timestamp - replayState.lastAnimationTime) / 1000);
+  replayState.lastAnimationTime = timestamp;
+  const frames = replayState.data.replay.frames;
+  const nextTime = replayState.elapsedSeconds + deltaSeconds * replayState.speed;
+  if (nextTime >= frames.at(-1).race_elapsed_sec) {
+    setReplayFrame(frames.length - 1);
+    pauseMarinaBayReplay();
+    return;
+  }
+  setReplayElapsed(nextTime);
+  replayState.animationId = requestAnimationFrame(advanceMarinaBayReplay);
+}
 
-    window.addEventListener('resize', () => {
-      if (this.speedCanvas && this.gapCanvas) {
-        this.renderDriverCharts(this.activeDriver);
+function playMarinaBayReplay() {
+  if (!replayState.data) return;
+  if (replayState.frameIndex >= replayState.data.replay.frames.length - 1) setReplayFrame(0);
+  replayState.playing = true;
+  replayState.lastAnimationTime = null;
+  $('replayPlayPause').textContent = 'Pause';
+  $('replayPlayPause').setAttribute('aria-label', 'Pause archived race replay');
+  $('trackReplayStatus').textContent = `Archived replay playing · ${replayState.speed}× · visual interpolation between valid samples`;
+  replayState.animationId = requestAnimationFrame(advanceMarinaBayReplay);
+}
+
+function bindMarinaBayControls() {
+  $('replayDriverFilter').addEventListener('change', () => {
+    replayState.focusDriver = $('replayDriverFilter').value;
+    populateReplayLapSelector();
+    drawMarinaBayTrack();
+  });
+  $('replayLapFilter').addEventListener('change', () => {
+    if ($('replayLapFilter').value) setReplayFrame(Number($('replayLapFilter').value));
+  });
+  $('replayPlayPause').addEventListener('click', () => {
+    if (replayState.playing) pauseMarinaBayReplay();
+    else playMarinaBayReplay();
+  });
+  $('replayReset').addEventListener('click', () => {
+    pauseMarinaBayReplay();
+    setReplayFrame(0);
+  });
+  document.querySelectorAll('[data-replay-speed]').forEach((button) => {
+    button.addEventListener('click', () => {
+      replayState.speed = Number(button.dataset.replaySpeed);
+      document.querySelectorAll('[data-replay-speed]').forEach((item) =>
+        item.setAttribute('aria-pressed', String(item === button)));
+      if (replayState.playing) {
+        $('trackReplayStatus').textContent = `Archived replay playing · ${replayState.speed}× · sampled positions only`;
       }
     });
-  }
-
-  initTimingTower() {
-    const list = document.getElementById('timingTowerList');
-    if (!list) return;
-    list.innerHTML = '';
-    this.rows.clear();
-
-    this.drivers.forEach((driver, idx) => {
-      const row = document.createElement('div');
-      row.className = `tower-driver-row ${idx === 0 ? 'selected' : ''}`;
-      row.dataset.code = driver.code;
-
-      const tyreClass = driver.compound === 'SOFT' ? 'tyre-soft' :
-                        driver.compound === 'MEDIUM' ? 'tyre-medium' :
-                        driver.compound === 'HARD' ? 'tyre-hard' : 'tyre-inter';
-
-      const logoUrl = DRIVER_LOGOS[driver.code] || 'assets/teams/rb.jpg';
-      row.innerHTML = `
-        <span class="td-pos">P${driver.pos || idx + 1}</span>
-        <img class="td-team-logo" src="${logoUrl}" alt="${driver.team}" title="${driver.team}">
-        <span class="td-color-bar" style="background:${driver.color}"></span>
-        <span class="td-code">${driver.code}</span>
-        <span class="td-name">${driver.name}</span>
-        <span class="td-tyre ${tyreClass}">${driver.compound[0]}</span>
-        <span class="td-gap">${driver.gap || '+0.000s'}</span>
-      `;
-
-      row.addEventListener('click', () => {
-        if (window.htController) {
-          window.htController.selectDriver(driver.code);
-        } else {
-          this.selectDriver(driver.code);
-        }
-      });
-
-      this.rows.set(driver.code, row);
-      list.appendChild(row);
-    });
-  }
-
-  updateDynamicTower(currentLap, cars) {
-    cars.forEach(car => {
-      const row = this.rows.get(car.code);
-      if (row) {
-        const gapEl = row.querySelector('.td-gap');
-        if (gapEl) gapEl.textContent = car.currentGap;
-        const tyreEl = row.querySelector('.td-tyre');
-        if (tyreEl) {
-          const tyreClass = car.compound === 'SOFT' ? 'tyre-soft' :
-                            car.compound === 'MEDIUM' ? 'tyre-medium' :
-                            car.compound === 'HARD' ? 'tyre-hard' : 'tyre-inter';
-          tyreEl.className = `td-tyre ${tyreClass}`;
-          tyreEl.textContent = car.compound[0];
-        }
-      }
-    });
-
-    if (this.activeDriver) {
-      const car = cars.find(c => c.code === this.activeDriver.code);
-      if (car) {
-        const pill = document.getElementById('telemetryTyrePill');
-        if (pill) {
-          const icon = car.compound === 'SOFT' ? '🔴' : car.compound === 'MEDIUM' ? '🟡' : '⚪';
-          pill.textContent = `${icon} ${car.compound} (${car.tyreAge} Laps)`;
-        }
-        const avgGap = document.getElementById('telemetryAvgGap');
-        if (avgGap) avgGap.textContent = `AVG GAP: ${car.currentGap}`;
-        this.updateTacticalBanner(this.activeDriver, currentLap);
-      }
-    }
-  }
-
-  selectDriver(code) {
-    const found = this.drivers.find(d => d.code === code);
-    if (!found) return;
-    this.activeDriver = found;
-
-    this.rows.forEach((row, rowCode) => {
-      const isSelected = rowCode === code;
-      row.classList.toggle('selected', isSelected);
-      if (isSelected) {
-        row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
-    });
-
-    const logoUrl = DRIVER_LOGOS[found.code] || 'assets/teams/rb.jpg';
-    const pillLogo = document.getElementById('pillTeamLogo');
-    if (pillLogo) {
-      pillLogo.src = logoUrl;
-      pillLogo.alt = `${found.team} Logo`;
-    }
-
-    const pillColor = document.getElementById('pillTeamColor');
-    if (pillColor) pillColor.style.background = found.color;
-
-    const pillCode = document.getElementById('pillDriverCode');
-    if (pillCode) pillCode.textContent = found.code;
-
-    const pillName = document.getElementById('pillDriverName');
-    if (pillName) pillName.textContent = found.name;
-
-    const pillTeam = document.getElementById('pillTeamName');
-    if (pillTeam) pillTeam.textContent = found.team;
-
-    this.updateDriverMetrics(found);
-    this.renderDriverCharts(found);
-    this.renderMiniSectorHeatmap(found);
-    this.updateTacticalBanner(found, 34);
-  }
-
-  updateDriverMetrics(driver) {
-    const maxSpeedEl = document.getElementById('telemetryMaxSpeed');
-    if (maxSpeedEl) maxSpeedEl.textContent = `MAX: ${driver.topSpeed || 348} km/h`;
-
-    const avgSpeedEl = document.getElementById('telemetryAvgSpeed');
-    if (avgSpeedEl) {
-      const avgKmh = Math.round((driver.topSpeed || 348) * 0.718);
-      avgSpeedEl.textContent = `${avgKmh} km/h`;
-    }
-
-    const throttleEl = document.getElementById('telemetryThrottlePct');
-    if (throttleEl) {
-      const throttleVal = (82.4 + ((driver.topSpeed || 348) - 340) * 0.25).toFixed(1);
-      throttleEl.textContent = `${throttleVal}%`;
-    }
-
-    const avgGapEl = document.getElementById('telemetryAvgGap');
-    if (avgGapEl) avgGapEl.textContent = `AVG GAP: ${driver.gap || '+0.000s'}`;
-
-    const drsTimeEl = document.getElementById('telemetryDrsTime');
-    const totalLossEl = document.getElementById('telemetryTotalLoss');
-
-    const tl = this.timeline[driver.code];
-    if (tl && Array.isArray(tl.gaps) && tl.gaps.length > 0) {
-      const validGaps = tl.gaps.filter(g => g !== null && g < 30.0);
-      if (validGaps.length > 0) {
-        const inDrsGaps = validGaps.filter(g => g < 1.0).length;
-        const drsPct = Math.round((inDrsGaps / validGaps.length) * 100);
-        if (drsTimeEl) drsTimeEl.textContent = `${drsPct}%`;
-
-        if (driver.pos === 1 || driver.code === 'VER') {
-          if (totalLossEl) totalLossEl.textContent = '0.00s/lap (Lead)';
-        } else {
-          const avgG = validGaps.reduce((a, b) => a + b, 0) / validGaps.length;
-          const lossVal = (0.10 + Math.exp(- (avgG * avgG) / 2.0) * 0.45).toFixed(2);
-          if (totalLossEl) totalLossEl.textContent = `+${lossVal}s/lap`;
-        }
-      }
-    } else {
-      if (drsTimeEl) drsTimeEl.textContent = driver.pos === 1 ? '0.0%' : '38.4%';
-      if (totalLossEl) totalLossEl.textContent = driver.pos === 1 ? '0.00s/lap' : '+0.42s/lap';
-    }
-
-    const tyrePill = document.getElementById('telemetryTyrePill');
-    if (tyrePill) {
-      const icon = driver.compound === 'SOFT' ? '🔴' : driver.compound === 'MEDIUM' ? '🟡' : '⚪';
-      tyrePill.textContent = `${icon} ${driver.compound} (${driver.tyreAge || 20} Laps)`;
-    }
-  }
-
-  updateTacticalBanner(driver, currentLap = 34) {
-    const banner = document.getElementById('driverTacticalBanner');
-    if (!banner) return;
-
-    const driverIdx = this.drivers.findIndex(d => d.code === driver.code);
-    const isLeader = driverIdx === 0 || driver.pos === 1 || driver.code === 'VER';
-
-    const badgeEl = document.getElementById('tacticalBadge');
-    const mainStatEl = document.getElementById('tacticalMainStat');
-    const subEl = document.getElementById('tacticalSub');
-    const dirtyAirLossEl = document.getElementById('tacticalDirtyAirLoss');
-    const barAeroEl = document.getElementById('tacticalBarAero');
-    const barTyreEl = document.getElementById('tacticalBarTyre');
-    const aeroPctEl = document.getElementById('tacticalAeroPct');
-    const tyrePctEl = document.getElementById('tacticalTyrePct');
-    const carAheadEl = document.getElementById('tacticalCarAhead');
-    const gapSecEl = document.getElementById('tacticalGapSec');
-    const wakeWeightEl = document.getElementById('tacticalWakeWeight');
-    const drsStatusEl = document.getElementById('tacticalDrsStatus');
-
-    if (isLeader) {
-      banner.className = 'driver-tactical-banner clean-mode';
-      badgeEl.className = 'tactical-badge badge-silver';
-      badgeEl.textContent = '⚪ RACE LEADER · CLEAN AIR';
-
-      mainStatEl.className = 'tactical-main-stat text-teal';
-      mainStatEl.textContent = 'OPTIMUM DOWNFORCE';
-      subEl.textContent = 'Zero wake interference · Full aerodynamic front-wing grip · Clean air baseline pace';
-
-      dirtyAirLossEl.className = 'bd-val text-teal';
-      dirtyAirLossEl.textContent = '0.00s / lap';
-
-      barAeroEl.style.width = '0%';
-      barTyreEl.style.width = '100%';
-      aeroPctEl.textContent = '0%';
-      tyrePctEl.textContent = '100% (Pure Pace)';
-
-      carAheadEl.textContent = 'None · Running in Clean Air (P1 Leader)';
-      gapSecEl.textContent = 'N/A';
-      gapSecEl.className = 'bm-val text-teal';
-      wakeWeightEl.textContent = '0.00 (Zero Wake)';
-      wakeWeightEl.className = 'bm-val text-teal';
-      drsStatusEl.textContent = 'N/A (Leading Pack)';
-      drsStatusEl.className = 'bm-val text-silver';
-      return;
-    }
-
-    const carAhead = this.drivers[driverIdx - 1];
-    const prevGap = carAhead ? (carAhead.gapSec !== undefined ? carAhead.gapSec : (driverIdx - 1) * 1.25) : 0.0;
-    const myGap = driver.gapSec !== undefined ? driver.gapSec : (driverIdx * 1.25);
-    const baseDelta = Math.max(0.35, myGap - prevGap);
-    
-    const lapVariation = Math.sin((currentLap || 34) * 0.45 + driverIdx * 0.9) * 0.15;
-    const currentDelta = Math.max(0.24, baseDelta + lapVariation);
-    const rbfWeight = Math.exp(- (currentDelta * currentDelta) / 2.0);
-
-    if (currentDelta < 1.0) {
-      banner.className = 'driver-tactical-banner gaining-mode';
-      badgeEl.className = 'tactical-badge badge-green';
-      badgeEl.textContent = '🟢 IN DRS RANGE · GAINING TIME';
-
-      const netGain = (0.24 + (1.0 - currentDelta) * 0.18).toFixed(2);
-      mainStatEl.className = 'tactical-main-stat text-green';
-      mainStatEl.textContent = `NET GAIN: +${netGain}s / lap`;
-      subEl.textContent = `DRS rear wing flap open (~348 km/h) · Straightaway slipstream gain exceeds chicane aerodynamic loss`;
-
-      const cornerLoss = (0.28 + rbfWeight * 0.16).toFixed(2);
-      dirtyAirLossEl.className = 'bd-val text-orange';
-      dirtyAirLossEl.textContent = `-${cornerLoss}s in chicanes`;
-
-      const aeroPct = Math.round(62 + rbfWeight * 22);
-      barAeroEl.style.width = `${aeroPct}%`;
-      barTyreEl.style.width = `${100 - aeroPct}%`;
-      aeroPctEl.textContent = `${aeroPct}% (Corner Wash)`;
-      tyrePctEl.textContent = `${100 - aeroPct}% (Tyre Wear)`;
-
-      carAheadEl.textContent = `${carAhead.code} #${carAhead.num} (${carAhead.team})`;
-      gapSecEl.textContent = `+${currentDelta.toFixed(3)}s`;
-      gapSecEl.className = 'bm-val text-teal';
-
-      wakeWeightEl.textContent = `${rbfWeight.toFixed(2)} (High Wake)`;
-      wakeWeightEl.className = 'bm-val text-orange';
-
-      drsStatusEl.textContent = 'ACTIVE (WING OPEN)';
-      drsStatusEl.className = 'bm-val text-green';
-    } else if (currentDelta <= 2.2) {
-      banner.className = 'driver-tactical-banner';
-      badgeEl.className = 'tactical-badge badge-red';
-      badgeEl.textContent = '🔴 DIRTY AIR DEFICIT · LOSING TIME';
-
-      const netLoss = (0.38 + rbfWeight * 0.32).toFixed(2);
-      mainStatEl.className = 'tactical-main-stat text-red';
-      mainStatEl.textContent = `LOSING: -${netLoss}s / lap`;
-      subEl.textContent = `Severe aerodynamic turbulence in braking zones · Outside DRS threshold (>1.0s) · Front wing sliding`;
-
-      const dirtyAirSeconds = (netLoss * 0.74).toFixed(2);
-      dirtyAirLossEl.className = 'bd-val text-red';
-      dirtyAirLossEl.textContent = `-${dirtyAirSeconds}s lost to dirty air`;
-
-      const aeroPct = 74;
-      barAeroEl.style.width = `${aeroPct}%`;
-      barTyreEl.style.width = `${100 - aeroPct}%`;
-      aeroPctEl.textContent = `74% (Dirty Air Deficit)`;
-      tyrePctEl.textContent = `26% (Tyre Wear)`;
-
-      carAheadEl.textContent = `${carAhead.code} #${carAhead.num} (${carAhead.team})`;
-      gapSecEl.textContent = `+${currentDelta.toFixed(3)}s`;
-      gapSecEl.className = 'bm-val text-orange';
-
-      wakeWeightEl.textContent = `${rbfWeight.toFixed(2)} (Turbulent)`;
-      wakeWeightEl.className = 'bm-val text-orange';
-
-      drsStatusEl.textContent = 'NO DRS (>1.0s)';
-      drsStatusEl.className = 'bm-val text-silver';
-    } else {
-      banner.className = 'driver-tactical-banner clean-mode';
-      badgeEl.className = 'tactical-badge badge-silver';
-      badgeEl.textContent = '⚪ CLEAN AIR BUFFER · FREE PACE';
-
-      mainStatEl.className = 'tactical-main-stat text-teal';
-      mainStatEl.textContent = 'CLEAN AIR PACE';
-      subEl.textContent = 'Clear aerodynamic buffer (>2.2s) · Wake disturbance below threshold · Pure car & tyre stint pace';
-
-      dirtyAirLossEl.className = 'bd-val text-silver';
-      dirtyAirLossEl.textContent = `-0.02s / lap (Negligible)`;
-
-      barAeroEl.style.width = '6%';
-      barTyreEl.style.width = '94%';
-      aeroPctEl.textContent = '6% (Minimal)';
-      tyrePctEl.textContent = '94% (Tyre Age)';
-
-      carAheadEl.textContent = `${carAhead.code} (${currentDelta.toFixed(1)}s ahead)`;
-      gapSecEl.textContent = `+${currentDelta.toFixed(2)}s`;
-      gapSecEl.className = 'bm-val text-teal';
-
-      wakeWeightEl.textContent = '0.04 (Clear Air)';
-      wakeWeightEl.className = 'bm-val text-teal';
-
-      drsStatusEl.textContent = 'OUT OF RANGE';
-      drsStatusEl.className = 'bm-val text-silver';
-    }
-  }
-
-  renderDriverCharts(driver) {
-    this.drawSpeedTrace(driver);
-    this.drawGapHistory(driver);
-  }
-
-  drawSpeedTrace(driver) {
-    if (!this.speedCanvas) return;
-    const baseW = 600;
-    const baseH = 230;
-    const { ctx } = setupCanvasDpi(this.speedCanvas, baseW, baseH);
-
-    ctx.clearRect(0, 0, baseW, baseH);
-
-    ctx.strokeStyle = '#222233';
-    ctx.lineWidth = 1;
-    for (let speed = 100; speed <= 350; speed += 50) {
-      const y = baseH - ((speed - 50) / 320) * (baseH - 40) - 20;
-      ctx.beginPath();
-      ctx.moveTo(40, y);
-      ctx.lineTo(baseW - 20, y);
-      ctx.stroke();
-
-      ctx.fillStyle = '#727284';
-      ctx.font = '600 10px "JetBrains Mono", monospace';
-      ctx.fillText(`${speed}`, 8, y + 3);
-    }
-
-    const landmarks = [
-      { xPct: 0.18, name: 'T1 Rettifilo (74 km/h)' },
-      { xPct: 0.38, name: 'Curva Grande (298 km/h)' },
-      { xPct: 0.52, name: 'Roggia (120 km/h)' },
-      { xPct: 0.68, name: 'Lesmo 2 (185 km/h)' },
-      { xPct: 0.85, name: 'Ascari (215 km/h)' }
-    ];
-
-    landmarks.forEach(lm => {
-      const x = 40 + lm.xPct * (baseW - 60);
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-      ctx.beginPath();
-      ctx.moveTo(x, 20);
-      ctx.lineTo(x, baseH - 20);
-      ctx.stroke();
-
-      ctx.fillStyle = '#8A8A9E';
-      ctx.font = '600 9px "Titillium Web", sans-serif';
-      ctx.fillText(lm.name, x - 20, 15);
-    });
-
-    const profilePoints = [
-      { dist: 0.0, speed: 335 },
-      { dist: 0.16, speed: 352 },
-      { dist: 0.20, speed: 76 },
-      { dist: 0.24, speed: 180 },
-      { dist: 0.38, speed: 310 },
-      { dist: 0.48, speed: 330 },
-      { dist: 0.52, speed: 118 },
-      { dist: 0.58, speed: 240 },
-      { dist: 0.64, speed: 175 },
-      { dist: 0.70, speed: 184 },
-      { dist: 0.80, speed: 328 },
-      { dist: 0.84, speed: 210 },
-      { dist: 0.90, speed: 255 },
-      { dist: 0.94, speed: 338 },
-      { dist: 0.97, speed: 215 },
-      { dist: 1.0,  speed: 315 }
-    ];
-
-    const speedFactor = (driver.topSpeed || 348) / 350;
-
-    ctx.save();
-    ctx.beginPath();
-    profilePoints.forEach((pt, i) => {
-      const x = 40 + pt.dist * (baseW - 60);
-      const adjSpeed = pt.speed * speedFactor;
-      const y = baseH - ((adjSpeed - 50) / 320) * (baseH - 40) - 20;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-
-    const strokeColor = driver.color || '#3671C6';
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = strokeColor;
-    ctx.shadowColor = strokeColor;
-    ctx.shadowBlur = 10;
-    ctx.stroke();
-
-    ctx.lineTo(baseW - 20, baseH - 20);
-    ctx.lineTo(40, baseH - 20);
-    ctx.closePath();
-    const grad = ctx.createLinearGradient(0, 0, 0, baseH);
-    grad.addColorStop(0, strokeColor + '44');
-    grad.addColorStop(1, 'transparent');
-    ctx.fillStyle = grad;
-    ctx.shadowBlur = 0;
-    ctx.fill();
-    ctx.restore();
-  }
-
-  drawGapHistory(driver) {
-    if (!this.gapCanvas) return;
-    const baseW = 600;
-    const baseH = 230;
-    const { ctx } = setupCanvasDpi(this.gapCanvas, baseW, baseH);
-
-    ctx.clearRect(0, 0, baseW, baseH);
-
-    const y0 = 20;
-    const y08 = 20 + (0.8 / 4.0) * (baseH - 40);
-    const y20 = 20 + (2.0 / 4.0) * (baseH - 40);
-    const y40 = baseH - 20;
-
-    ctx.fillStyle = 'rgba(225, 6, 0, 0.12)';
-    ctx.fillRect(40, y0, baseW - 60, y08 - y0);
-    ctx.fillStyle = '#E10600';
-    ctx.font = '700 9px "Titillium Web", sans-serif';
-    ctx.fillText('CRITICAL WAKE (<0.8s)', 46, y0 + 12);
-
-    ctx.fillStyle = 'rgba(255, 153, 0, 0.08)';
-    ctx.fillRect(40, y08, baseW - 60, y20 - y08);
-    ctx.fillStyle = '#FF9900';
-    ctx.fillText('TURBULENT AIR (0.8s - 2.0s)', 46, y08 + 12);
-
-    ctx.fillStyle = 'rgba(0, 210, 190, 0.05)';
-    ctx.fillRect(40, y20, baseW - 60, y40 - y20);
-    ctx.fillStyle = '#00D2BE';
-    ctx.fillText('CLEAN AIR BUFFER (>2.0s)', 46, y20 + 12);
-
-    ctx.fillStyle = '#727284';
-    ctx.font = '600 10px "JetBrains Mono", monospace';
-    ctx.fillText('0.0s', 8, y0 + 4);
-    ctx.fillText('0.8s', 8, y08 + 4);
-    ctx.fillText('2.0s', 8, y20 + 4);
-    ctx.fillText('4.0s', 8, y40 + 4);
-
-    const tl = this.timeline[driver.code];
-    const hasTimeline = tl && Array.isArray(tl.laps) && tl.laps.length > 0;
-
-    ctx.save();
-    ctx.beginPath();
-
-    if (driver.code === 'VER' || driver.pos === 1) {
-      ctx.strokeStyle = '#00D2BE';
-      ctx.lineWidth = 2.5;
-      ctx.shadowColor = '#00D2BE';
-      ctx.shadowBlur = 6;
-      ctx.moveTo(40, y40);
-      ctx.lineTo(baseW - 20, y40);
-      ctx.stroke();
-
-      ctx.fillStyle = '#00D2BE';
-      ctx.font = '800 12px "Titillium Web", sans-serif';
-      ctx.fillText('P1 LEADER · RUNNING IN CLEAN AIR ALL RACE', 60, y40 - 10);
-    } else if (hasTimeline) {
-      let started = false;
-      tl.laps.forEach((lap, i) => {
-        const rawGap = tl.gaps[i];
-        if (rawGap === null || rawGap === undefined) return;
-        const gapVal = Math.max(0.12, Math.min(3.9, rawGap));
-        const x = 40 + ((lap - 1) / 52) * (baseW - 60);
-        const y = 20 + (gapVal / 4.0) * (baseH - 40);
-
-        if (!started) {
-          ctx.moveTo(x, y);
-          started = true;
-        } else {
-          ctx.lineTo(x, y);
-        }
-      });
-
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = driver.color || '#FFFFFF';
-      ctx.shadowColor = driver.color || '#FFFFFF';
-      ctx.shadowBlur = 6;
-      ctx.stroke();
-    } else {
-      const baseGap = driver.gapSec || 1.2;
-      for (let lap = 1; lap <= 53; lap++) {
-        const x = 40 + ((lap - 1) / 52) * (baseW - 60);
-        const fluctuation = Math.sin(lap * 0.45) * 0.4 + Math.cos(lap * 0.2) * 0.3;
-        const gapVal = Math.max(0.15, Math.min(3.8, baseGap + fluctuation));
-        const y = 20 + (gapVal / 4.0) * (baseH - 40);
-
-        if (lap === 1) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = '#FFFFFF';
-      ctx.shadowColor = '#FFFFFF';
-      ctx.shadowBlur = 6;
-      ctx.stroke();
-    }
-
-    ctx.restore();
-  }
-
-  renderMiniSectorHeatmap(driver) {
-    const grid = document.getElementById('miniSectorGrid');
-    if (!grid) return;
-    grid.innerHTML = '';
-
-    const driverSectors = this.sectors[driver.code];
-    const delays = (driverSectors && Array.isArray(driverSectors.delays)) ? driverSectors.delays : null;
-
-    for (let s = 1; s <= 20; s++) {
-      const cell = document.createElement('div');
-      cell.className = 'ms-cell';
-
-      let delayMs = 0;
-      if (delays && delays[s - 1] !== undefined) {
-        delayMs = Math.round(delays[s - 1] * 1000);
-      } else {
-        const isChicane = [1, 2, 7, 8, 14, 15].includes(s);
-        delayMs = isChicane ? (65 + (s * 3) % 40) : (12 + (s * 4) % 25);
-      }
-
-      let color = '#00D2BE';
-      let bg = 'rgba(0, 210, 190, 0.12)';
-      let border = 'rgba(0, 210, 190, 0.5)';
-
-      if (delayMs < 0) {
-        color = '#00D2BE';
-        bg = 'rgba(0, 210, 190, 0.18)';
-        border = '#00D2BE';
-      } else if (delayMs <= 25) {
-        color = '#00E676';
-        bg = 'rgba(0, 230, 118, 0.12)';
-        border = 'rgba(0, 230, 118, 0.5)';
-      } else if (delayMs <= 70) {
-        color = '#FF9900';
-        bg = 'rgba(255, 153, 0, 0.12)';
-        border = 'rgba(255, 153, 0, 0.5)';
-      } else {
-        color = '#E10600';
-        bg = 'rgba(225, 6, 0, 0.15)';
-        border = '#E10600';
-      }
-
-      cell.style.borderColor = border;
-      cell.style.background = bg;
-
-      const sign = delayMs > 0 ? '+' : '';
-      cell.innerHTML = `
-        <div class="ms-number">SECTOR ${s}</div>
-        <div class="ms-delay" style="color:${color}">${sign}${delayMs}ms</div>
-      `;
-
-      grid.appendChild(cell);
-    }
+  });
+  $('replayScrubber').addEventListener('input', () => {
+    pauseMarinaBayReplay();
+    setReplayElapsed(Number($('replayScrubber').value));
+  });
+  window.addEventListener('resize', drawMarinaBayTrack, { passive: true });
+  if ('ResizeObserver' in window) {
+    replayState.resizeObserver = new ResizeObserver(drawMarinaBayTrack);
+    replayState.resizeObserver.observe($('marinaBayCanvas'));
   }
 }
 
-// ==========================================================================
-// 6. METRICS & ACCURACY PANEL (AUTHENTIC PIPELINE METRICS)
-// ==========================================================================
-
-class MetricsPanel {
-  constructor(metrics) {
-    this.metrics = metrics || {};
-    this.populate();
-  }
-
-  populate() {
-    const mae = (this.metrics.mae_sec !== undefined && this.metrics.mae_sec !== null)
-      ? this.metrics.mae_sec
-      : 0.0162;
-
-    const r2 = (this.metrics.r2_score !== undefined && this.metrics.r2_score !== null)
-      ? this.metrics.r2_score
-      : -0.0945;
-
-    const maeEl = document.getElementById('stat-mae');
-    if (maeEl) maeEl.innerHTML = `${mae.toFixed(3)}<span class="stat-unit">s</span>`;
-
-    const r2El = document.getElementById('stat-r2');
-    if (r2El) r2El.textContent = r2.toFixed(3);
-
-    const mMae = document.getElementById('modelMaeVal');
-    if (mMae) mMae.innerHTML = `${mae.toFixed(3)}<small>s</small>`;
-
-    const mR2 = document.getElementById('modelR2Val');
-    if (mR2) mR2.textContent = r2.toFixed(3);
-
-    const baselinesContainer = document.getElementById('baselinesChart');
-    if (baselinesContainer && this.metrics.baselines) {
-      const htMae = mae;
-      const lstmMae = this.metrics.baselines.lstm ? this.metrics.baselines.lstm.mae_sec : 0.0162;
-      const xgbMae = this.metrics.baselines.xgboost ? this.metrics.baselines.xgboost.mae_sec : 0.0172;
-
-      const maxVal = Math.max(htMae, lstmMae, xgbMae, 0.020);
-
-      baselinesContainer.innerHTML = `
-        <div class="bar-group">
-          <div class="bar-header">
-            <span class="bar-model-name text-teal">🏎️ HammerTime ST-GNN</span>
-            <span class="bar-score text-teal">${htMae.toFixed(3)}s MAE (Leader)</span>
-          </div>
-          <div class="bar-track">
-            <div class="bar-fill bar-hammertime" style="width: ${Math.round((htMae / maxVal) * 100)}%;"></div>
-          </div>
-        </div>
-        <div class="bar-group">
-          <div class="bar-header">
-            <span class="bar-model-name">⏱️ Temporal LSTM (2-Layer)</span>
-            <span class="bar-score">${lstmMae.toFixed(3)}s MAE</span>
-          </div>
-          <div class="bar-track">
-            <div class="bar-fill bar-lstm" style="width: ${Math.round((lstmMae / maxVal) * 100)}%;"></div>
-          </div>
-        </div>
-        <div class="bar-group">
-          <div class="bar-header">
-            <span class="bar-model-name">🌲 XGBoost Regressor</span>
-            <span class="bar-score">${xgbMae.toFixed(3)}s MAE</span>
-          </div>
-          <div class="bar-track">
-            <div class="bar-fill bar-xgboost" style="width: ${Math.round((xgbMae / maxVal) * 100)}%;"></div>
-          </div>
-        </div>
-      `;
-    }
+async function startMarinaBayReplay() {
+  const started = performance.now();
+  try {
+    const response = await fetch(MARINA_BAY_REPLAY_URL, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Archived Singapore replay request failed (HTTP ${response.status})`);
+    const data = await response.json();
+    if (!validMarinaBayReplay(data)) throw new Error('The archived Singapore replay failed its required data checks.');
+    replayState.data = data;
+    populateReplayMetadata();
+    populateReplayDriverSelector();
+    populateReplayLapSelector();
+    bindMarinaBayControls();
+    setReplayFrame(0);
+    window.HammerTimeDriverAssets?.load().then((map) => {
+      marinaBayDriverAssetMap = map;
+      drawMarinaBayTrack();
+    }).catch((error) => console.info('Singapore team logos unavailable', error));
+    console.info(`Marina Bay replay first frame rendered in ${(performance.now() - started).toFixed(0)} ms`);
+  } catch (error) {
+    $('trackReplayStatus').textContent = 'Archived replay unavailable';
+    $('trackReplayError').hidden = false;
+    $('trackReplayError').textContent = `${error.message} No synthetic position fallback is being shown.`;
+    $('marinaBayCanvas').setAttribute('aria-label', 'Marina Bay archived replay unavailable because verified Singapore position data could not be loaded');
+    $('trackFrameRows').replaceChildren();
+    const row = document.createElement('tr');
+    row.append(cell('td', 'Verified Singapore replay unavailable.', undefined));
+    row.cells[0].colSpan = 6;
+    $('trackFrameRows').append(row);
   }
 }
 
-// ==========================================================================
-// 7. UNIFIED ACCESSIBLE LIGHTBOX CONTROLLER
-// ==========================================================================
-
-class LightboxController {
-  constructor() {
-    this.modal = document.getElementById('lightboxModal');
-    this.overlay = document.getElementById('lightboxOverlay');
-    this.closeBtn = document.getElementById('lightboxClose');
-    this.prevBtn = document.getElementById('lightboxPrevBtn');
-    this.nextBtn = document.getElementById('lightboxNextBtn');
-    this.rawBtn = document.getElementById('lightboxRawBtn');
-    this.img = document.getElementById('lightboxImg');
-    this.title = document.getElementById('lightboxTitle');
-    this.tag = document.getElementById('lightboxTag');
-    this.caption = document.getElementById('lightboxCaption');
-
-    this.items = [];
-    this.currentIndex = 0;
-
-    this.setupListeners();
-  }
-
-  setupListeners() {
-    if (!this.modal) return;
-
-    const close = () => this.close();
-    if (this.closeBtn) this.closeBtn.addEventListener('click', close);
-    if (this.overlay) this.overlay.addEventListener('click', close);
-
-    if (this.prevBtn) {
-      this.prevBtn.addEventListener('click', () => this.prev());
+async function startMarinaBayInference() {
+  try {
+    const response = await fetch(MARINA_BAY_INFERENCE_URL, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Singapore checkpoint inference request failed (HTTP ${response.status})`);
+    const data = await response.json();
+    if (data.schema_version !== 1 || data.run_id !== '769a76aab164b514cc0a'
+      || data.scope?.race_id !== '2023-Singapore-R' || data.scope?.held_out_test !== false
+      || data.scope?.in_sample !== true || !Array.isArray(data.records)
+      || data.records.length !== data.count?.target_labels_in_lap
+      || !data.records.every((row) => row?.race_id === '2023-Singapore-R' && row.driver === '55'
+        && row.lap_number === 1 && Number.isInteger(row.mini_sector_index_zero_based)
+        && Number.isFinite(row.actual_residual_sec)
+        && (row.predicted_residual_sec === null || Number.isFinite(row.predicted_residual_sec)))) {
+      throw new Error('Singapore inference export failed required provenance and row checks.');
     }
-    if (this.nextBtn) {
-      this.nextBtn.addEventListener('click', () => this.next());
+    const predictions = data.records.filter((row) => row.predicted_residual_sec !== null);
+    $('marinaInferenceCount').textContent = String(predictions.length);
+    $('marinaInferenceMae').textContent = number(data.aggregate.mae_sec, 5);
+    $('marinaInferenceRmse').textContent = number(data.aggregate.rmse_sec, 5);
+    $('marinaInferenceStatus').textContent = data.count.unavailable === 0
+      ? `Checkpoint outputs loaded · all ${predictions.length} mini-sectors predicted (0 unavailable)`
+      : `Checkpoint outputs loaded · ${data.count.unavailable} unavailable`;
+    $('marinaInferenceRows').replaceChildren();
+    for (const record of data.records) {
+      const row = document.createElement('tr');
+      row.append(cell('th', String(record.mini_sector_display)),
+        cell('td', record.predicted_residual_sec === null ? 'Unavailable' : number(record.predicted_residual_sec, 5)),
+        cell('td', number(record.actual_residual_sec, 5)),
+        cell('td', record.absolute_error_sec === null ? '—' : number(record.absolute_error_sec, 5)),
+        cell('td', number(record.target_entry_time_sec, 3)));
+      $('marinaInferenceRows').append(row);
     }
-
-    window.addEventListener('keydown', (e) => {
-      if (!this.modal.classList.contains('active')) return;
-      if (e.key === 'Escape') this.close();
-      if (e.key === 'ArrowLeft') this.prev();
-      if (e.key === 'ArrowRight') this.next();
-    });
-  }
-
-  open(items, startIndex = 0) {
-    this.items = items;
-    this.currentIndex = startIndex;
-    this.renderCurrent();
-    this.modal.classList.add('active');
-    this.modal.setAttribute('aria-hidden', 'false');
-  }
-
-  close() {
-    this.modal.classList.remove('active');
-    this.modal.setAttribute('aria-hidden', 'true');
-  }
-
-  prev() {
-    if (this.items.length <= 1) return;
-    this.currentIndex = (this.currentIndex - 1 + this.items.length) % this.items.length;
-    this.renderCurrent();
-  }
-
-  next() {
-    if (this.items.length <= 1) return;
-    this.currentIndex = (this.currentIndex + 1) % this.items.length;
-    this.renderCurrent();
-  }
-
-  renderCurrent() {
-    const item = this.items[this.currentIndex];
-    if (!item) return;
-
-    if (this.tag) this.tag.textContent = item.tag || 'DIAGNOSTIC ARTIFACT';
-    if (this.title) this.title.textContent = item.title || 'Visual Graphic';
-    if (this.caption) this.caption.textContent = item.desc || item.scenario || '';
-
-    const imgSrc = item.file ? (item.file.startsWith('visuals/') || item.file.startsWith('broadcast/') ? item.file : `visuals/${item.file}`) : '';
-    if (this.img) {
-      this.img.src = imgSrc;
-      this.img.alt = item.title || 'F1 Diagnostic Chart';
-    }
-
-    if (this.rawBtn) {
-      this.rawBtn.href = imgSrc;
-    }
+  } catch (error) {
+    $('marinaInferenceStatus').textContent = 'Checkpoint inference unavailable';
+    $('marinaInferenceError').hidden = false;
+    $('marinaInferenceError').textContent = `${error.message} No fallback predictions are shown.`;
+    const row = document.createElement('tr');
+    const message = cell('td', 'Verified checkpoint outputs unavailable.');
+    message.colSpan = 5;
+    row.append(message);
+    $('marinaInferenceRows').replaceChildren(row);
   }
 }
 
-// ==========================================================================
-// 8. PIPELINE VISUAL GALLERY
-// ==========================================================================
-
-class Gallery {
-  constructor(lightbox) {
-    this.container = document.getElementById('galleryGrid');
-    this.lightbox = lightbox;
-    this.render();
-  }
-
-  render() {
-    if (!this.container) return;
-    this.container.innerHTML = '';
-
-    PIPELINE_VISUALS_DATA.forEach((item, idx) => {
-      const card = document.createElement('div');
-      card.className = 'gallery-card';
-      const imgPath = `visuals/${item.file}`;
-
-      card.innerHTML = `
-        <div class="gallery-thumb-wrap">
-          <img src="${imgPath}" alt="${item.title}" class="gallery-thumb" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-          <div class="shimmer-placeholder" style="display:none;">
-            <div class="placeholder-icon">📊</div>
-            <div class="placeholder-text">${item.tag}</div>
-            <div class="placeholder-badge">OFFLINE ARTIFACT</div>
-          </div>
-        </div>
-        <div class="gallery-info">
-          <span class="gallery-tag">${item.tag}</span>
-          <h4 class="gallery-card-title">${item.title}</h4>
-          <p class="gallery-card-desc">${item.desc}</p>
-          <button class="btn-view-artifact" aria-label="Inspect ${item.title}">🔍 Inspect Artifact →</button>
-        </div>
-      `;
-
-      card.addEventListener('click', () => {
-        this.lightbox.open(PIPELINE_VISUALS_DATA, idx);
-      });
-
-      this.container.appendChild(card);
+async function start() {
+  enableTableKeyboardScroll();
+  enableScatterInspection();
+  try {
+    const response = await fetch(DATA_URL, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`Model result request failed (HTTP ${response.status})`);
+    const run = await response.json();
+    if (!validRun(run)) throw new Error('The season model export is missing required metrics or breakdown data. Regenerate it from the saved run.');
+    state.run = run;
+    renderMetricSummary(); fillRaceSelector(); renderRaceTable(); renderBaseline(); renderErrorDistribution(); renderPhysics(); renderMethod(); renderBreakdown();
+    $('raceFilter').addEventListener('change', updateExplorer);
+    $('driverFilter').addEventListener('change', updateExplorer);
+    $('sampleOrderFilter').addEventListener('change', updateSampleOrder);
+    $('breakdownFilter').addEventListener('change', () => { state.breakdown = $('breakdownFilter').value; renderBreakdown(); });
+    $('predictionPagePrev').addEventListener('click', () => { state.predictionPage = Math.max(0, (state.predictionPage || 0) - 1); renderPredictionTable(orderedSamplePoints()); });
+    $('predictionPageNext').addEventListener('click', () => { state.predictionPage = (state.predictionPage || 0) + 1; renderPredictionTable(orderedSamplePoints()); });
+    $('downloadSampleCsv').addEventListener('click', downloadFilteredSample);
+    $('downloadViewProvenance').addEventListener('click', downloadViewProvenance);
+    window.addEventListener('resize', drawScatter, { passive: true });
+    window.addEventListener('popstate', () => {
+      state.selectedPoint = null;
+      readFiltersFromUrl();
+      state.predictionPage = 0;
+      $('downloadStatus').textContent = '';
+      renderExplorer();
+      writeFiltersToUrl('replace');
     });
+    readFiltersFromUrl();
+    writeFiltersToUrl('replace');
+    if (state.sampleOrder !== 'source') $('predictionDataDetails').open = true;
+    renderExplorer();
+  } catch (error) {
+    $('loadStatus').textContent = 'Evaluation unavailable';
+    $('metricGrid').setAttribute('aria-busy', 'false');
+    $('dataError').hidden = false;
+    $('dataError').textContent = `${error.message} No fallback or synthetic metrics are being shown.`;
+    $('raceTableBody').replaceChildren();
+    const row = document.createElement('tr');
+    const messageCell = cell('td', 'Run data unavailable.');
+    messageCell.colSpan = 6; row.append(messageCell); $('raceTableBody').replaceChildren(row);
+    $('predictionChart').setAttribute('aria-label', 'Prediction chart unavailable because archived model results could not be loaded');
+    $('predictionChart').getContext('2d')?.clearRect(0, 0, $('predictionChart').width, $('predictionChart').height);
   }
 }
 
-// ==========================================================================
-// 9. BROADCAST CARDS CAROUSEL (10 OFFICIAL PNG CARDS)
-// ==========================================================================
-
-class BroadcastCarousel {
-  constructor(lightbox) {
-    this.track = document.getElementById('carouselTrack');
-    this.dots = document.getElementById('carouselDots');
-    this.prevBtn = document.getElementById('carouselPrevBtn');
-    this.nextBtn = document.getElementById('carouselNextBtn');
-    this.lightbox = lightbox;
-
-    this.currentIndex = 0;
-    this.cards = OFFICIAL_BROADCAST_CARDS;
-    this.autoTimer = null;
-
-    this.init();
-  }
-
-  init() {
-    if (!this.track) return;
-    this.track.innerHTML = '';
-    if (this.dots) this.dots.innerHTML = '';
-
-    this.cards.forEach((card, idx) => {
-      const cardEl = document.createElement('div');
-      cardEl.className = 'broadcast-card-item';
-      const imgSrc = card.file;
-
-      cardEl.innerHTML = `
-        <div class="bc-top-stripe"></div>
-        <div class="bc-img-wrap">
-          <img src="${imgSrc}" alt="${card.title}" class="bc-img" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
-          <div class="bc-fallback-inner" style="display:none;">
-            <div class="bc-header">
-              <span class="bc-tag">${card.tag}</span>
-              <span class="bc-brand">HAMMERTIME</span>
-            </div>
-            <div class="bc-duel-title">${card.lead} vs ${card.chase}</div>
-            <div class="bc-gap-stat">GAP: ${card.gap}</div>
-            <div class="bc-penalty">Aero Deficit: <strong>${card.penalty}</strong></div>
-          </div>
-        </div>
-        <div class="bc-caption-wrap">
-          <div class="bc-caption-row">
-            <span class="bc-caption-tag">${card.tag}</span>
-            <span class="bc-scenario-text">${card.scenario}</span>
-          </div>
-          <button class="bc-inspect-btn" aria-label="Inspect broadcast graphic ${card.id}">🔍 Inspect Graphic</button>
-        </div>
-      `;
-
-      cardEl.addEventListener('click', () => {
-        this.lightbox.open(this.cards, idx);
-      });
-
-      this.track.appendChild(cardEl);
-
-      if (this.dots) {
-        const dot = document.createElement('div');
-        dot.className = `c-dot ${idx === 0 ? 'active' : ''}`;
-        dot.setAttribute('aria-label', `Go to slide ${idx + 1}`);
-        dot.addEventListener('click', () => this.goTo(idx));
-        this.dots.appendChild(dot);
-      }
-    });
-
-    if (this.prevBtn) this.prevBtn.addEventListener('click', () => this.prev());
-    if (this.nextBtn) this.nextBtn.addEventListener('click', () => this.next());
-
-    this.startAuto();
-    const parent = this.track.parentElement;
-    if (parent) {
-      parent.addEventListener('mouseenter', () => this.stopAuto());
-      parent.addEventListener('mouseleave', () => this.startAuto());
-    }
-  }
-
-  startAuto() {
-    this.stopAuto();
-    this.autoTimer = setInterval(() => this.next(), 6000);
-  }
-
-  stopAuto() {
-    if (this.autoTimer) clearInterval(this.autoTimer);
-  }
-
-  goTo(idx) {
-    this.currentIndex = idx;
-    const cardEl = this.track.querySelector('.broadcast-card-item');
-    const cardWidth = cardEl ? cardEl.offsetWidth + 24 : 484;
-    this.track.style.transform = `translateX(-${this.currentIndex * cardWidth}px)`;
-
-    if (this.dots) {
-      const dotEls = this.dots.querySelectorAll('.c-dot');
-      dotEls.forEach((d, i) => d.classList.toggle('active', i === this.currentIndex));
-    }
-  }
-
-  next() {
-    const nextIdx = (this.currentIndex + 1) % this.cards.length;
-    this.goTo(nextIdx);
-  }
-
-  prev() {
-    const prevIdx = (this.currentIndex - 1 + this.cards.length) % this.cards.length;
-    this.goTo(prevIdx);
-  }
-}
-
-// ==========================================================================
-// 10. STAT COUNTERS ANIMATION UTILITY
-// ==========================================================================
-
-function animateCounter(elemId, target, duration = 1400, decimals = 0) {
-  const elem = document.getElementById(elemId);
-  if (!elem) return;
-
-  const start = 0;
-  const startTime = performance.now();
-
-  function update(time) {
-    const elapsed = time - startTime;
-    const progress = Math.min(1.0, elapsed / duration);
-    const ease = 1 - Math.pow(1 - progress, 3);
-    const current = start + (target - start) * ease;
-
-    elem.textContent = decimals > 0 ? current.toFixed(decimals) : Math.round(current);
-
-    if (progress < 1.0) {
-      requestAnimationFrame(update);
-    }
-  }
-
-  requestAnimationFrame(update);
-}
-
-// ==========================================================================
-// 11. DOM BOOTSTRAPPER & EVENT CONTROLLER
-// ==========================================================================
-
-document.addEventListener('DOMContentLoaded', async () => {
-  // 1. Mobile Navigation Hamburger Setup
-  const navToggle = document.getElementById('navToggle');
-  const navLinks = document.getElementById('navLinks');
-  if (navToggle && navLinks) {
-    navToggle.addEventListener('click', () => {
-      const isOpen = navLinks.classList.toggle('open');
-      navToggle.setAttribute('aria-expanded', isOpen);
-    });
-
-    navLinks.querySelectorAll('a').forEach(link => {
-      link.addEventListener('click', () => {
-        navLinks.classList.remove('open');
-        navToggle.setAttribute('aria-expanded', 'false');
-      });
-    });
-  }
-
-  // 2. ScrollSpy for Navigation Bar
-  const sections = document.querySelectorAll('section.dashboard-section, section.hero-section');
-  const navAnchors = document.querySelectorAll('.nav-links a');
-
-  window.addEventListener('scroll', () => {
-    let current = '';
-    const scrollPos = window.scrollY + 120;
-    sections.forEach(sec => {
-      if (sec.offsetTop <= scrollPos) {
-        current = sec.getAttribute('id');
-      }
-    });
-
-    navAnchors.forEach(a => {
-      a.classList.toggle('active', a.getAttribute('href') === `#${current}`);
-    });
-  }, { passive: true });
-
-  // 3. Load authentic dataset
-  const data = await loadAllData();
-
-  // 4. Initialize Unified Lightbox
-  const lightbox = new LightboxController();
-
-  // 5. Initialize Interactive Monza Track Map
-  const trackMap = new TrackMap('monzaCanvas', data.drivers);
-
-  // 6. Initialize Telemetry Panel
-  const telemetryPanel = new TelemetryPanel(data.drivers, data.sectors, data.timeline, data.telemetry);
-  trackMap.telemetryPanel = telemetryPanel;
-  trackMap.updateLapAndGaps();
-
-  // 7. Global Controller for Two-Way Driver Selection Synchronization
-  window.htController = {
-    trackMap,
-    telemetryPanel,
-    selectDriver: (code) => {
-      trackMap.focusedDriver = code;
-      const select = document.getElementById('driverFocusSelect');
-      if (select && select.value !== code) {
-        select.value = code;
-      }
-      telemetryPanel.selectDriver(code);
-    }
-  };
-
-  // 8. Initialize Model Intelligence & Accuracy Panel
-  new MetricsPanel(data.metrics);
-
-  // 9. Initialize Pipeline Visual Gallery
-  new Gallery(lightbox);
-
-  // 10. Initialize Broadcast Cards Carousel
-  new BroadcastCarousel(lightbox);
-
-  // 11. Animate Hero Counters
-  animateCounter('stat-drivers', 20, 1200);
-  animateCounter('stat-features', 9, 1000);
+document.addEventListener('DOMContentLoaded', () => {
+  start();
+  startMarinaBayReplay();
+  startMarinaBayInference();
 });
