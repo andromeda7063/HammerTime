@@ -12,6 +12,7 @@ from torch import nn
 from torch.utils.data import SequentialSampler
 
 from model import create_model
+from physical_graph import TYPED_EDGE_SCHEMAS
 
 logger = logging.getLogger("hammertime.evaluate")
 
@@ -78,10 +79,13 @@ def validate_checkpoint_edge_scaler(checkpoint: dict, model: nn.Module, loader) 
     if active_scaler is None or not hasattr(active_scaler, "metadata"):
         raise ValueError("Typed-edge evaluation requires the train-fitted physical edge scaler.")
     active = active_scaler.metadata()
-    if (not isinstance(saved, dict) or saved.get("schema") != "physical_v2"
-            or saved != active or active.get("schema") != "physical_v2"):
+    expected_schema = getattr(model, "edge_feature_schema", "physical_v2")
+    if expected_schema not in TYPED_EDGE_SCHEMAS:
+        expected_schema = "physical_v2"
+    if (not isinstance(saved, dict) or saved.get("schema") != expected_schema
+            or saved != active or active.get("schema") != expected_schema):
         raise ValueError(
-            "Typed-edge checkpoint is missing compatible physical_v2 edge-scaler metadata; "
+            f"Typed-edge checkpoint is missing compatible {expected_schema} edge-scaler metadata; "
             "rebuild the prepared cohort and checkpoint with matching train-only scaling."
         )
 
@@ -132,6 +136,61 @@ def validate_drs_train_physics(records: list, mini_sectors_per_lap: int = 20,
             "passed": bool(score is not None and min_lap_loss <= score <= max_lap_loss),
             "notes": "Measured on complete held-out driver laps." if full_lap else
                      "No complete held-out DRS-train laps; test is not measurable."}
+
+
+def supplementary_metrics(y_true: np.ndarray, y_pred: np.ndarray, train_mean: float | None = None,
+                          train_median: float | None = None) -> dict:
+    """Diagnostics reported next to (never instead of) the unchanged gate metrics.
+
+    ``trimmed_r2_p01_p99`` scores rows whose observed target lies inside the
+    1st-99th percentile of the scored partition, to show how much of the R² gap
+    comes from a few multi-second labels. Residual deciles group rows by
+    observed target. Train-only constants are fitted on training labels.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    result = {"rmse_sec": float(np.sqrt(np.mean(np.square(y_true - y_pred))))}
+    low, high = np.quantile(y_true, [0.01, 0.99])
+    inside = (y_true >= low) & (y_true <= high)
+    result["trimmed_r2_p01_p99"] = (float(r2_score(y_true[inside], y_pred[inside]))
+                                    if inside.sum() >= 2 else None)
+    result["trimmed_bounds_sec"] = [float(low), float(high)]
+    edges = np.quantile(y_true, np.linspace(0, 1, 11))
+    deciles = []
+    for index in range(10):
+        upper = y_true <= edges[index + 1] if index == 9 else y_true < edges[index + 1]
+        rows = (y_true >= edges[index]) & upper
+        if rows.any():
+            deciles.append({"decile": index + 1, "count": int(rows.sum()),
+                            "mean_true": float(y_true[rows].mean()), "mean_pred": float(y_pred[rows].mean()),
+                            "mae": float(np.mean(np.abs(y_true[rows] - y_pred[rows])))})
+    result["residual_by_true_decile"] = deciles
+    for name, constant in (("train_mean_constant", train_mean), ("train_median_constant", train_median)):
+        if constant is not None and np.isfinite(constant):
+            baseline = np.full_like(y_true, float(constant))
+            result[name] = {"value": float(constant),
+                            "mae_sec": float(np.mean(np.abs(y_true - baseline))),
+                            "r2_score": float(r2_score(y_true, baseline)) if len(y_true) >= 2 else None}
+    return result
+
+
+def drs_train_per_sector_estimate(records: list, mini_sectors_per_lap: int = 20,
+                                  drs_max_gap_sec: float = 0.8) -> dict:
+    """Supplementary DRS-wake estimate: mean predicted delay per close sector x sectors per lap.
+
+    The unchanged gate needs complete laps, which the stride-2 evaluation grid
+    almost never supplies. This estimate uses every held-out sector label with
+    0 < gap < drs_max_gap_sec. It is reported separately and does not change
+    the gate's pass/fail result.
+    """
+    rows = [r for r in records if r.get("gap_sec") is not None and 0.0 < r["gap_sec"] < drs_max_gap_sec]
+    if not rows:
+        return {"sector_labels": 0, "estimated_lap_delay": None, "observed_lap_delay": None}
+    predicted = float(np.mean([r["y_pred"] for r in rows]))
+    observed = float(np.mean([r["y_true"] for r in rows]))
+    return {"sector_labels": len(rows), "estimated_lap_delay": predicted * mini_sectors_per_lap,
+            "observed_lap_delay": observed * mini_sectors_per_lap,
+            "note": "Supplementary; the configured DRS gate is evaluated unchanged elsewhere."}
 
 
 def run_full_evaluation(model_weights_path: str, test_loader, config: dict, baseline_scores: dict = None) -> dict:
