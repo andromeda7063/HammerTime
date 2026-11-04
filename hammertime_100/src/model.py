@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch, Data
 from torch_geometric.nn import GATConv, GATv2Conv
 import yaml
-from physical_graph import EDGE_FEATURES_BY_SCHEMA
+from physical_graph import (EDGE_FEATURES_BY_SCHEMA, TYPED_EDGE_SCHEMAS, WAKE_WEIGHT_COLUMN)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hammertime.model")
@@ -39,6 +39,78 @@ class CausalGatedResidualBlock(nn.Module):
         content, gate = filtered.chunk(2, dim=1)
         gated = torch.tanh(content) * torch.sigmoid(gate)
         return sequence + self.dropout(self.projection(gated))
+
+
+def _inverse_softplus(value: float) -> float:
+    return float(torch.log(torch.expm1(torch.tensor(float(value)))))
+
+
+class AeroWakeHead(nn.Module):
+    """Interpretable additive aerodynamic wake term (opt-in ``model.aero_head``).
+
+    For a follower with an incoming physical edge at frame t::
+
+        w_t      = wake_weight_t ** k                 # = exp(-k * gap_sec / tau0)
+        v2_t     = (speed_kmh_t / 100) ** 2
+        corner_t = 1 - exp(-abs_curvature_t / kappa0)
+        term_t   = w_t * v2_t * (a * corner_t - b * (1 - corner_t) * (1 + d * drs_t))
+
+    ``a`` (dirty-air loss in corners), ``b`` (slipstream gain on straights), ``d``
+    (extra DRS gain) and ``k`` (decay) are non-negative through softplus. The
+    head returns the mean of term_t over frames where the car is active. A car
+    with no incoming edge has w_t = 0 and therefore exactly zero aero term,
+    which keeps clean-air predictions unchanged by construction.
+    """
+
+    def __init__(self, curvature_scale_per_m: float = 0.01):
+        super().__init__()
+        self.curvature_scale_per_m = float(curvature_scale_per_m)
+        self.raw_corner_loss = nn.Parameter(torch.tensor(_inverse_softplus(0.05)))
+        self.raw_straight_gain = nn.Parameter(torch.tensor(_inverse_softplus(0.02)))
+        self.raw_drs_gain = nn.Parameter(torch.tensor(_inverse_softplus(0.5)))
+        self.raw_decay = nn.Parameter(torch.tensor(_inverse_softplus(1.0)))
+
+    def coefficients(self) -> dict:
+        with torch.no_grad():
+            return {
+                "corner_loss_a": float(F.softplus(self.raw_corner_loss)),
+                "straight_gain_b": float(F.softplus(self.raw_straight_gain)),
+                "drs_gain_d": float(F.softplus(self.raw_drs_gain)),
+                "decay_k": float(F.softplus(self.raw_decay)),
+                "curvature_scale_per_m": self.curvature_scale_per_m,
+                "formula": "mean_t[w^k * (v/100)^2 * (a*corner - b*(1-corner)*(1+d*drs))]",
+            }
+
+    def forward(self, wake: torch.Tensor, aero_raw: torch.Tensor, active: torch.Tensor) -> torch.Tensor:
+        """wake/active: [..., W, N]; aero_raw: [..., W, N, 3] = (speed_kmh, abs_curvature, drs)."""
+        a = F.softplus(self.raw_corner_loss)
+        b = F.softplus(self.raw_straight_gain)
+        d = F.softplus(self.raw_drs_gain)
+        k = F.softplus(self.raw_decay)
+        speed = torch.nan_to_num(aero_raw[..., 0], nan=0.0).clamp(min=0.0) / 100.0
+        curvature = torch.nan_to_num(aero_raw[..., 1], nan=0.0).abs()
+        drs = torch.nan_to_num(aero_raw[..., 2], nan=0.0).clamp(0.0, 1.0)
+        corner = 1.0 - torch.exp(-curvature / self.curvature_scale_per_m)
+        weight = torch.where(wake > 0, wake.clamp(min=1e-12).pow(k), torch.zeros_like(wake))
+        term = weight * speed.square() * (a * corner - b * (1.0 - corner) * (1.0 + d * drs))
+        active_f = active.to(term.dtype)
+        count = active_f.sum(dim=-2).clamp_min(1.0)
+        return (term * active_f).sum(dim=-2) / count
+
+
+def _incoming_wake(edge_index: torch.Tensor, edge_attr: torch.Tensor, num_nodes: int,
+                   active: torch.Tensor) -> torch.Tensor:
+    """Strongest incoming physical_v3 wake weight per node (0 without an edge)."""
+    wake = torch.zeros(num_nodes, dtype=edge_attr.dtype if edge_attr is not None else torch.float32,
+                       device=active.device)
+    if edge_index is None or edge_attr is None or edge_index.numel() == 0:
+        return wake
+    src, dst = edge_index[0].to(active.device), edge_index[1].to(active.device)
+    keep = active[src] & active[dst] & (src != dst)
+    if not bool(keep.any()):
+        return wake
+    values = edge_attr[keep, WAKE_WEIGHT_COLUMN].to(device=active.device, dtype=wake.dtype).clamp(0.0, 1.0)
+    return wake.scatter_reduce(0, dst[keep], values, reduce="amax", include_self=True)
 
 
 def load_config(config_path: str = "configs/default.yaml") -> dict:
@@ -78,6 +150,7 @@ class HammerTimeSTGNN(nn.Module):
         spatial_encoder: str = "gat",
         own_car_branch: bool = False,
         own_car_hidden_dim: int = 32,
+        aero_head: bool = False,
     ):
         super().__init__()
         if hidden_dim <= 0 or gat_heads <= 0 or hidden_dim % gat_heads != 0:
@@ -126,14 +199,19 @@ class HammerTimeSTGNN(nn.Module):
         if isinstance(future_speed_horizon_steps, bool) or int(future_speed_horizon_steps) <= 0:
             raise ValueError("future_speed_horizon_steps must be a positive integer.")
         self.future_speed_horizon_steps = int(future_speed_horizon_steps)
-        if self.typed_edge_values and edge_feature_schema != "physical_v2":
-            raise ValueError("typed_edge_values requires graph.edge_feature_schema=physical_v2.")
+        if self.typed_edge_values and edge_feature_schema not in TYPED_EDGE_SCHEMAS:
+            raise ValueError("typed_edge_values requires graph.edge_feature_schema=physical_v2 or physical_v3.")
         if self.typed_edge_values and not self.mask_inactive_nodes:
             raise ValueError("typed_edge_values requires mask_inactive_nodes=True.")
         if self.spatial_encoder == "edge_temporal" and (
-                not self.typed_edge_values or edge_feature_schema != "physical_v2"
+                not self.typed_edge_values or edge_feature_schema not in TYPED_EDGE_SCHEMAS
                 or not self.mask_inactive_nodes):
-            raise ValueError("edge_temporal requires typed_edge_values, physical_v2 edges, and inactive-node masking.")
+            raise ValueError("edge_temporal requires typed_edge_values, physical_v2/v3 edges, and inactive-node masking.")
+        if not isinstance(aero_head, bool):
+            raise ValueError("aero_head must be a boolean.")
+        if aero_head and edge_feature_schema != "physical_v3":
+            raise ValueError("aero_head requires graph.edge_feature_schema=physical_v3.")
+        self.aero_head = AeroWakeHead() if aero_head else None
         head_dim = hidden_dim // gat_heads
 
         # Stage 1: Linear Input Projection
@@ -244,6 +322,17 @@ class HammerTimeSTGNN(nn.Module):
         correction = self.own_car_head(last_x).squeeze(-1)
         return correction * last_mask.to(dtype=correction.dtype)
 
+    def aero_coefficients(self) -> dict | None:
+        return self.aero_head.coefficients() if self.aero_head is not None else None
+
+    @staticmethod
+    def _aero_raw(snapshot, device, dtype):
+        raw = getattr(snapshot, "aero_raw", None)
+        if raw is None:
+            raise ValueError("model.aero_head requires snapshots with aero_raw [N, 3] "
+                             "(speed_kmh, abs_curvature, drs); build a circuit_context_v3 / cohort_v4 dataset.")
+        return raw.to(device=device, dtype=dtype)
+
     def _typed_messages(self, h, edge_index, edge_attr, active, normalize_empty: bool = False):
         """Aggregate typed, edge-conditioned values over physical pairs."""
         if not self.typed_edge_values:
@@ -317,16 +406,15 @@ class HammerTimeSTGNN(nn.Module):
             loop_attr = torch.zeros((num_nodes, 4), dtype=torch.float, device=device)
             loop_attr[:, 0] = 1.0
             loop_attr[:, 3] = coverage[0]
-        else:  # physical_v2
+        else:  # physical_v2 / physical_v3 (wake channels are 0 on self loops)
             coverage = torch.as_tensor(position_coverage, dtype=torch.float, device=device).reshape(-1)
             if coverage.numel() == 0:
                 coverage = torch.zeros(1, dtype=torch.float, device=device)
             if coverage.numel() != 1:
                 raise ValueError("position_coverage must be a scalar per snapshot.")
-            loop_attr = torch.zeros((num_nodes, 5), dtype=torch.float, device=device)
+            loop_attr = torch.zeros((num_nodes, self.edge_dim), dtype=torch.float, device=device)
             loop_attr[:, 0] = 1.0
             loop_attr[:, 3] = coverage[0]
-            loop_attr[:, 4] = 0.0
 
         if edge_index is None or edge_index.size(1) == 0:
             return loop_index, loop_attr
@@ -339,10 +427,9 @@ class HammerTimeSTGNN(nn.Module):
                 edge_attr[:, 0] = 1.0
                 edge_attr[:, 3] = coverage[0]
             else:
-                edge_attr = torch.zeros((edge_index.size(1), 5), dtype=torch.float, device=device)
+                edge_attr = torch.zeros((edge_index.size(1), self.edge_dim), dtype=torch.float, device=device)
                 edge_attr[:, 0] = 1.0
                 edge_attr[:, 3] = coverage[0]
-                edge_attr[:, 4] = 0.0
         else:
             edge_attr = edge_attr.to(device)
         if edge_attr.ndim != 2 or edge_attr.size(1) != self.edge_dim:
@@ -359,6 +446,7 @@ class HammerTimeSTGNN(nn.Module):
         Returns: [N] predicted delay per car
         """
         outs = []
+        aero_wake, aero_inputs, aero_active = [], [], []
         for g in snapshots:
             device = self.proj.weight.device
             x = g.x.to(device=device, dtype=self.proj.weight.dtype)
@@ -379,6 +467,11 @@ class HammerTimeSTGNN(nn.Module):
                 if raw_edge_attr is not None:
                     raw_edge_attr = raw_edge_attr[edge_mask]
             typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
+            if self.aero_head is not None:
+                node_active = self._actual_node_mask(g, device)
+                aero_wake.append(_incoming_wake(raw_edge_index, raw_edge_attr, N, node_active))
+                aero_inputs.append(self._aero_raw(g, device, self.proj.weight.dtype))
+                aero_active.append(node_active)
 
             if self.spatial_encoder == "edge_temporal":
                 if typed_edge_index is None:
@@ -441,6 +534,11 @@ class HammerTimeSTGNN(nn.Module):
             last_x = snapshots[-1].x.to(device=device, dtype=self.proj.weight.dtype)
             last_mask = self._actual_node_mask(snapshots[-1], device)
             out = out + self._own_car_correction(last_x, last_mask)
+        if self.aero_head is not None:
+            last_mask = self._actual_node_mask(snapshots[-1], self.proj.weight.device)
+            aero = self.aero_head(torch.stack(aero_wake), torch.stack(aero_inputs),
+                                  torch.stack(aero_active))
+            out = out + aero * last_mask.to(aero.dtype)
         if return_aux:
             aux = {}
             if self.future_speed_head is not None:
@@ -468,6 +566,7 @@ class HammerTimeSTGNN(nn.Module):
         last_mask_rows = []
         typed_edges = []
         typed_attrs = []
+        aero_wake_rows, aero_input_rows, aero_active_rows = [], [], []
         node_offset = 0
         for window in batch_windows:
             for time_index, snapshot in enumerate(window):
@@ -485,6 +584,11 @@ class HammerTimeSTGNN(nn.Module):
                     if raw_edge_attr is not None:
                         raw_edge_attr = raw_edge_attr[edge_mask]
                 typed_edge_index, typed_edge_attr = raw_edge_index, raw_edge_attr
+                if self.aero_head is not None:
+                    node_active = self._actual_node_mask(snapshot, device)
+                    aero_wake_rows.append(_incoming_wake(raw_edge_index, raw_edge_attr, num_nodes, node_active))
+                    aero_input_rows.append(self._aero_raw(snapshot, device, dtype))
+                    aero_active_rows.append(node_active)
                 if self.spatial_encoder == "edge_temporal":
                     edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
                     edge_attr = torch.empty((0, self.edge_dim), dtype=dtype, device=device)
@@ -545,6 +649,12 @@ class HammerTimeSTGNN(nn.Module):
             last_x = torch.stack(last_x_rows, dim=0)
             last_mask = torch.stack(last_mask_rows, dim=0)
             prediction = prediction + self._own_car_correction(last_x, last_mask)
+        if self.aero_head is not None:
+            wake = torch.stack(aero_wake_rows).reshape(batch_size, window_size, num_nodes)
+            inputs = torch.stack(aero_input_rows).reshape(batch_size, window_size, num_nodes, 3)
+            aero_active = torch.stack(aero_active_rows).reshape(batch_size, window_size, num_nodes)
+            aero = self.aero_head(wake.to(dtype), inputs, aero_active)
+            prediction = prediction + aero * aero_active[:, -1].to(aero.dtype)
         if return_aux:
             aux = {}
             if self.future_speed_head is not None:
@@ -594,6 +704,7 @@ def create_model(config: dict) -> HammerTimeSTGNN:
         spatial_encoder=m_cfg.get("spatial_encoder", "gat"),
         own_car_branch=bool(m_cfg.get("own_car_branch", False)),
         own_car_hidden_dim=m_cfg.get("own_car_hidden_dim", 32),
+        aero_head=bool(m_cfg.get("aero_head", False)),
     )
 
 

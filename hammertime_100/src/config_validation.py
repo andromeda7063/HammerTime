@@ -59,8 +59,19 @@ def validate_config(config: dict) -> None:
     if config.get("train", {}).get("loss", "mae") not in ("mae", "mse", "smooth_l1", "huber"):
         raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
     lr_scheduler = config.get("train", {}).get("lr_scheduler", "none")
-    if lr_scheduler not in ("none", "plateau"):
-        raise ValueError("train.lr_scheduler must be 'none' or 'plateau'.")
+    if lr_scheduler not in ("none", "plateau", "cosine"):
+        raise ValueError("train.lr_scheduler must be 'none', 'plateau', or 'cosine'.")
+    train_cfg = config.get("train", {})
+    if "smooth_l1_beta" in train_cfg:
+        number("train.smooth_l1_beta", strict=True)
+    if "grad_accum_steps" in train_cfg:
+        number("train.grad_accum_steps", minimum=1, integer=True)
+    if "warmup_epochs" in train_cfg:
+        number("train.warmup_epochs", integer=True)
+    if "lr_scheduler_min_lr" in train_cfg:
+        number("train.lr_scheduler_min_lr")
+    if "train_window_stride" in config.get("data", {}):
+        number("data.train_window_stride", minimum=1, integer=True)
     number("session.year", minimum=1, integer=True)
     validate_session_source(config["session"], config.get("openf1"))
     for path in ("track.mini_sectors", "graph.num_nodes", "data.window_size", "train.batch_size",
@@ -122,8 +133,8 @@ def validate_config(config: dict) -> None:
             config["model"]["typed_edge_values"], bool):
         raise ValueError("model.typed_edge_values must be a boolean.")
     typed_edge_schema = config.get("graph", {}).get("edge_feature_schema", "scalar_rbf")
-    if config.get("model", {}).get("typed_edge_values", False) and typed_edge_schema != "physical_v2":
-        raise ValueError("model.typed_edge_values requires graph.edge_feature_schema='physical_v2'.")
+    if config.get("model", {}).get("typed_edge_values", False) and typed_edge_schema not in ("physical_v2", "physical_v3"):
+        raise ValueError("model.typed_edge_values requires graph.edge_feature_schema='physical_v2' or 'physical_v3'.")
     if "mask_inactive_nodes" in config.get("model", {}) and not isinstance(
             config["model"]["mask_inactive_nodes"], bool):
         raise ValueError("model.mask_inactive_nodes must be a boolean.")
@@ -132,9 +143,16 @@ def validate_config(config: dict) -> None:
         raise ValueError("model.typed_edge_values requires model.mask_inactive_nodes=true.")
     if spatial_encoder == "edge_temporal" and (
             not config.get("model", {}).get("typed_edge_values", False)
-            or typed_edge_schema != "physical_v2"
+            or typed_edge_schema not in ("physical_v2", "physical_v3")
             or not config.get("model", {}).get("mask_inactive_nodes", False)):
-        raise ValueError("edge_temporal requires typed_edge_values, physical_v2 edges, and inactive-node masking.")
+        raise ValueError("edge_temporal requires typed_edge_values, physical_v2/v3 edges, and inactive-node masking.")
+    if "aero_head" in config.get("model", {}):
+        if not isinstance(config["model"]["aero_head"], bool):
+            raise ValueError("model.aero_head must be a boolean.")
+        if config["model"]["aero_head"] and (
+                typed_edge_schema != "physical_v3"
+                or config.get("graph", {}).get("node_feature_schema") != "circuit_context_v3"):
+            raise ValueError("model.aero_head requires physical_v3 edges and circuit_context_v3 nodes.")
     if "predict_future_speed" in config.get("model", {}) and not isinstance(
             config["model"]["predict_future_speed"], bool):
         raise ValueError("model.predict_future_speed must be a boolean.")
@@ -162,17 +180,18 @@ def validate_config(config: dict) -> None:
             raise ValueError("model.temporal_dilations must provide a receptive field covering data.window_size.")
     graph_cfg = value("graph")
     node_schema = graph_cfg.get("node_feature_schema", "legacy_v1")
-    if node_schema not in ("legacy_v1", "circuit_context_v1", "circuit_context_v2"):
-        raise ValueError("graph.node_feature_schema must be 'legacy_v1', 'circuit_context_v1', or 'circuit_context_v2'.")
+    if node_schema not in ("legacy_v1", "circuit_context_v1", "circuit_context_v2", "circuit_context_v3"):
+        raise ValueError("graph.node_feature_schema must be 'legacy_v1', 'circuit_context_v1', "
+                         "'circuit_context_v2', or 'circuit_context_v3'.")
     edge_schema = graph_cfg.get("edge_feature_schema", "scalar_rbf")
-    if edge_schema not in ("scalar_rbf", "physical_v1", "physical_v2"):
-        raise ValueError("graph.edge_feature_schema must be 'scalar_rbf', 'physical_v1', or 'physical_v2'.")
+    if edge_schema not in ("scalar_rbf", "physical_v1", "physical_v2", "physical_v3"):
+        raise ValueError("graph.edge_feature_schema must be 'scalar_rbf', 'physical_v1', 'physical_v2', or 'physical_v3'.")
     neighbor_mode = graph_cfg.get("neighbor_mode", "race_progress")
     if neighbor_mode not in ("race_progress", "physical_circuit"):
         raise ValueError("graph.neighbor_mode must be 'race_progress' or 'physical_circuit'.")
-    if edge_schema in ("physical_v1", "physical_v2") and neighbor_mode != "physical_circuit":
-        raise ValueError("graph.edge_feature_schema='physical_v1' or 'physical_v2' requires neighbor_mode='physical_circuit'.")
-    expected_edge_dim = 1 if edge_schema == "scalar_rbf" else (4 if edge_schema == "physical_v1" else 5)
+    if edge_schema in ("physical_v1", "physical_v2", "physical_v3") and neighbor_mode != "physical_circuit":
+        raise ValueError("graph.edge_feature_schema='physical_v1', 'physical_v2', or 'physical_v3' requires neighbor_mode='physical_circuit'.")
+    expected_edge_dim = {"scalar_rbf": 1, "physical_v1": 4, "physical_v2": 5, "physical_v3": 6}[edge_schema]
     if value("model.edge_dim") != expected_edge_dim:
         raise ValueError(f"model.edge_dim must be {expected_edge_dim} for graph.edge_feature_schema={edge_schema!r}.")
     categories = value("graph.compound_categories")
@@ -180,7 +199,9 @@ def validate_config(config: dict) -> None:
             or any(not isinstance(item, str) or not item.strip() for item in categories)
             or len({item.upper() for item in categories}) != len(categories)):
         raise ValueError("graph.compound_categories must contain distinct, non-empty strings.")
-    context_extra = 10 if node_schema == "circuit_context_v1" else (11 if node_schema == "circuit_context_v2" else 0)
+    from context_features import CONTEXT_V3_FEATURES
+    context_extra = {"circuit_context_v1": 10, "circuit_context_v2": 11,
+                     "circuit_context_v3": len(CONTEXT_V3_FEATURES)}.get(node_schema, 0)
     expected_node_dim = (4 + len(categories)) + context_extra
     if value("model.in_dim") != expected_node_dim:
         raise ValueError(

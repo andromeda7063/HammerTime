@@ -30,8 +30,25 @@ EDGE_FEATURES_BY_SCHEMA = {
         "position_coverage",
         "in_wake_corridor",
     ),
+    # physical_v3 appends an unscaled continuous wake weight exp(-gap_sec / tau0).
+    # The binary corridor in v2 (gap <= 35 m and <= 0.6 s) is almost never on at
+    # racing speed; the continuous channel decays smoothly over the edge horizon
+    # and lets gap_sec be recovered exactly (gap_sec = -tau0 * ln(weight)).
+    "physical_v3": (
+        "rbf_gap",
+        "gap_m",
+        "leader_minus_follower_speed_mps",
+        "position_coverage",
+        "in_wake_corridor",
+        "wake_weight",
+    ),
 }
 PHYSICAL_EDGE_CONTINUOUS_COLUMNS = (1, 2)
+# Edge schemas carrying physical leader->follower values usable by typed messages.
+TYPED_EDGE_SCHEMAS = ("physical_v2", "physical_v3")
+# Reference decay (seconds) of the physical_v3 continuous wake channel.
+WAKE_WEIGHT_TAU_SEC = 0.5
+WAKE_WEIGHT_COLUMN = 5
 
 
 @dataclass(frozen=True)
@@ -145,8 +162,10 @@ def build_physical_circuit_edges(
                 leader_speed - follower_speed,
                 coverage,
             ]
-            if edge_schema == "physical_v2":
+            if edge_schema in TYPED_EDGE_SCHEMAS:
                 attr.append(1.0 if (gap_m <= 35.0 and gap_sec <= 0.6) else 0.0)
+            if edge_schema == "physical_v3":
+                attr.append(math.exp(-gap_sec / WAKE_WEIGHT_TAU_SEC))
             attrs.append(attr)
 
     edge_dim = len(EDGE_FEATURES_BY_SCHEMA.get(edge_schema, EDGE_FEATURES_BY_SCHEMA["physical_v1"]))
@@ -180,10 +199,12 @@ class PhysicalEdgeFeatureScaler:
             attrs = getattr(snapshots[index], "edge_attr_physical_circuit", None)
             if attrs is None or attrs.numel() == 0:
                 continue
-            if attrs.ndim != 2 or attrs.shape[1] not in (4, 5):
-                raise ValueError("physical_circuit edge attrs must have shape [E, 4] or [E, 5].")
+            if attrs.ndim != 2 or attrs.shape[1] not in (4, 5, 6):
+                raise ValueError("physical_circuit edge attrs must have shape [E, 4], [E, 5], or [E, 6].")
             if attrs.shape[1] == 5:
                 schema_seen = "physical_v2"
+            elif attrs.shape[1] == 6:
+                schema_seen = "physical_v3"
             values = attrs[:, list(PHYSICAL_EDGE_CONTINUOUS_COLUMNS)].detach().cpu().numpy()
             valid = np.isfinite(values).all(axis=1)
             if valid.any():
@@ -209,8 +230,8 @@ class PhysicalEdgeFeatureScaler:
     def transform(self, edge_attr: torch.Tensor) -> torch.Tensor:
         if not self.fitted_:
             raise ValueError("Physical edge scaler must be fitted on training edges first.")
-        if edge_attr.ndim != 2 or edge_attr.shape[1] not in (4, 5):
-            raise ValueError("physical edge attrs must have shape [E, 4] or [E, 5].")
+        if edge_attr.ndim != 2 or edge_attr.shape[1] not in (4, 5, 6):
+            raise ValueError("physical edge attrs must have shape [E, 4], [E, 5], or [E, 6].")
         transformed = edge_attr.clone()
         if transformed.numel():
             mean = torch.as_tensor(self.mean_, dtype=transformed.dtype, device=transformed.device)
@@ -236,7 +257,7 @@ class PhysicalEdgeFeatureScaler:
 
     @classmethod
     def from_metadata(cls, metadata: Mapping) -> "PhysicalEdgeFeatureScaler":
-        if metadata.get("schema") not in ("physical_v1", "physical_v2"):
+        if metadata.get("schema") not in ("physical_v1", "physical_v2", "physical_v3"):
             raise ValueError("Unsupported physical edge scaler metadata schema.")
         if metadata.get("continuous_features") != [
                 EDGE_FEATURES_BY_SCHEMA["physical_v1"][i]

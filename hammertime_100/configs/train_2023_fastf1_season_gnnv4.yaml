@@ -1,0 +1,161 @@
+# ═══════════════════════════════════════════════════════════════
+# HAMMERTIME GNNv4: 2023 FASTF1 SEASON CONFIGURATION (candidate, not a result)
+#
+# Same sessions, target builder, split, metrics, acceptance gates and physics
+# thresholds as GNNv2/GNNv3. Changes are limited to:
+#   - circuit_context_v3 node inputs (causal in-race speed references,
+#     RaceProgress, StintLap; geometry columns actually computed)
+#   - physical_v3 edges (adds a continuous wake weight channel)
+#   - an opt-in interpretable aero wake head
+#   - training hyperparameters (see docs/research/gnnv4_r2_root_cause.md)
+#   - a memory-safe compact cohort format (cohort_v4) with lazy windows
+# Review-gated target/coverage changes live under `review_flags` and are OFF.
+# Run with hammertime_100/tools/train_gnnv4.sh or train_gnnv4.ps1.
+# ═══════════════════════════════════════════════════════════════
+
+session:
+  year: 2023
+  gp: "Monza"
+  session_type: "R"
+  cache_dir: "data/cache/fastf1_2023_season"
+  processed_dir: "data/processed/fastf1_2023_season_gnnv4"
+
+sessions: []
+
+track:
+  mini_sectors: 20
+  lap_length_m: 5793.0
+
+preprocess:
+  sample_hz: 4.0
+  max_interpolate_sec: 1.0
+  flag_safety_car: true
+  flag_pit_laps: true
+
+graph:
+  num_nodes: 20
+  edge_threshold_sec: 2.0
+  rbf_sigma: 1.0
+  node_feature_schema: "circuit_context_v3"
+  edge_feature_schema: "physical_v3"
+  neighbor_mode: "physical_circuit"
+  compound_categories:
+    - "SOFT"
+    - "MEDIUM"
+    - "HARD"
+    - "INTERMEDIATE"
+    - "WET"
+
+target:
+  clean_air_gap_sec: 3.0
+  min_clean_samples: 3
+  clip_delta_sec: [-2.0, 10.0]
+
+data:
+  window_size: 10
+  horizon: 5
+  # Validation/test windows keep the GNNv2/v3 stride (2) so held-out coverage
+  # is unchanged. Training uses every labelled frame (stride 1).
+  window_stride: 2
+  train_window_stride: 1
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  split_method: "race"
+  timestamp_tolerance_sec: 0.1275
+  continuity_tolerance_sec: 0.05
+  min_valid_targets_per_sample: 1
+  random_seed: 42
+
+model:
+  name: "HammerTime_STGNN_v4"
+  in_dim: 24
+  hidden_dim: 64
+  gat_heads: 4
+  spatial_encoder: "edge_temporal"
+  spatial_layers: 0
+  edge_dim: 6
+  conv1d_kernel: 3
+  temporal_mode: "gated_dilated"
+  temporal_dilations: [1, 2, 4]
+  gat_type: "gatv2"
+  use_graph_norm: true
+  drop_edge_rate: 0.0
+  residual: true
+  dropout: 0.05
+  mask_inactive_nodes: true
+  typed_edge_values: true
+  own_car_branch: true
+  own_car_hidden_dim: 32
+  aero_head: true
+  predict_future_speed: true
+  future_speed_horizon_steps: 5
+
+train:
+  batch_size: 128
+  grad_accum_steps: 2
+  lr: 0.001
+  weight_decay: 0.00001
+  max_epochs: 40
+  early_stopping_patience: 10
+  loss: "smooth_l1"
+  # Huber transition ~= 1.345 x the ~0.11 s Gaussian core of the residual.
+  smooth_l1_beta: 0.15
+  lr_scheduler: "cosine"
+  warmup_epochs: 1
+  lr_scheduler_min_lr: 0.00001
+  checkpoint_path: "data/processed/fastf1_2023_season_gnnv4/best.pt"
+  num_workers: 0
+
+auxiliary:
+  future_speed_enabled: true
+  future_speed_weight: 0.2
+  future_speed_scale_kph: 100.0
+  future_speed_smooth_l1_beta: 1.0
+
+# Review-gated changes (AGENTS.md): all OFF so the target, coverage rules and
+# gate methods match GNNv2/GNNv3 exactly. Turning one on is a reviewed change
+# that must be recorded in RESEARCH_CHANGELOG.md and ASSUMPTIONS.md.
+review_flags:
+  exclude_lap1_and_yellow_targets: false   # F3: needs --raw-sessions-dir for TrackStatus
+  rescale_lap_distance: false              # F6: scale each lap's integrated Distance to lap_length_m
+  physical_gap_for_targets: false          # F5: AvgGap from physical circular order, not race order
+  detrend_clean_air_reference: false       # F2: per-(driver, compound, sector) lap-number trend in the reference
+
+cohort:
+  format: "compact_v4"
+  # Memory preflight: require this fraction of available RAM to remain free
+  # after loading the in-memory parts of the cohort (shards are memory-mapped).
+  memory_headroom_fraction: 0.25
+
+tuning:
+  enabled: false
+
+baselines:
+  xgboost:
+    n_estimators: 100
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+  lstm:
+    hidden_dim: 64
+    num_layers: 2
+    dropout: 0.1
+    lr: 0.001
+    epochs: 40
+    batch_size: 64
+
+physics_tests:
+  clean_air_max_mae: 0.05
+  drs_train_min_lap_loss: 0.10
+  drs_train_max_lap_loss: 0.80
+  drs_max_gap_sec: 0.8
+
+presentation:
+  palette:
+    carbon_dark: "#15151E"
+    f1_red: "#E10600"
+    pure_white: "#FFFFFF"
+    accent_silver: "#A0A0A5"
+    drs_green: "#00D2BE"
+  font_family: "Titillium Web, sans-serif"

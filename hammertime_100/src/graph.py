@@ -17,7 +17,7 @@ import torch
 from torch_geometric.data import Data
 import yaml
 from context_features import build_node_feature_vector as _build_context_node_feature_vector
-from context_features import feature_names, resolve_feature_schema
+from context_features import CONTEXT_V3_SCHEMA, feature_names, resolve_feature_schema
 from physical_graph import (
     EDGE_FEATURES_BY_SCHEMA,
     PhysicalEdgeSet,
@@ -126,7 +126,9 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
         raise ValueError("graph.edge_feature_schema=physical_v1 requires physical_circuit neighbors.")
     if num_nodes <= 0:
         raise ValueError("graph.num_nodes must be positive.")
-    node_dim = len(feature_names(node_feature_schema, compound_categories))
+    node_names = feature_names(node_feature_schema, compound_categories)
+    node_dim = len(node_names)
+    aero_columns = (aero_raw_columns(node_names) if node_feature_schema == CONTEXT_V3_SCHEMA else None)
     expected_dim = config.get("model", {}).get("in_dim")
     if expected_dim is not None and expected_dim != node_dim:
         raise ValueError(
@@ -258,7 +260,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                 expected_on_track_count=expected_on_track,
                 edge_schema=edge_feature_schema,
             )
-        elif neighbor_mode == "physical_circuit" or edge_feature_schema in ("physical_v1", "physical_v2"):
+        elif neighbor_mode == "physical_circuit" or edge_feature_schema in ("physical_v1", "physical_v2", "physical_v3"):
             raise ValueError(
                 f"Physical graph mode requires a configured lap length for race {race_id!r}."
             )
@@ -268,7 +270,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             # physical topology without fabricating a lap length or edges.
             known_positions = sum(position_valid_by_driver.values())
             coverage = (known_positions / expected_on_track) if expected_on_track else 0.0
-            fallback_dim = 5 if edge_feature_schema == "physical_v2" else 4
+            fallback_dim = {"physical_v2": 5, "physical_v3": 6}.get(edge_feature_schema, 4)
             physical_edges = PhysicalEdgeSet(
                 edge_index=torch.empty((2, 0), dtype=torch.long),
                 edge_attr=torch.empty((0, fallback_dim), dtype=torch.float32),
@@ -286,7 +288,7 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
                 edge_attr_physical_circuit[:, :1]
                 if edge_feature_schema == "scalar_rbf" else edge_attr_physical_circuit
             )
-        if edge_feature_schema in ("physical_v1", "physical_v2"):
+        if edge_feature_schema in ("physical_v1", "physical_v2", "physical_v3"):
             active_edge_index = edge_index_physical_circuit
             active_edge_attr = edge_attr_physical_circuit
         is_safety_car = (
@@ -313,6 +315,10 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
             driver_names=tuple(driver_names),
             is_safety_car=bool(is_safety_car),
         )
+        if aero_columns is not None:
+            # Raw (unscaled) speed, curvature and DRS for the opt-in aero head.
+            # Feature scaling replaces ``x`` later; this tensor is never scaled.
+            data.aero_raw = torch.tensor(x_mat[:, list(aero_columns)], dtype=torch.float32)
         snapshots.append(data)
 
     logger.info(f"Successfully generated {len(snapshots)} graph snapshots.")
@@ -320,6 +326,12 @@ def build_race_graph_snapshots(aligned_df: pd.DataFrame, config: dict):
     logger.info(f"Average active edges per snapshot: {avg_edges:.2f}")
 
     return snapshots, driver_to_idx
+
+
+def aero_raw_columns(node_names) -> tuple[int, int, int]:
+    """Indices of (Speed, abs_curvature, DRSActive) in a circuit_context_v3 node vector."""
+    names = list(node_names)
+    return names.index("Speed"), names.index("abs_curvature"), names.index("DRSActive")
 
 
 def _configured_lap_lengths(config: dict) -> dict[str, float]:
