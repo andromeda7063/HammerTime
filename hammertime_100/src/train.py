@@ -41,6 +41,16 @@ def _training_data_signature(train_loader, val_loader) -> str:
     """Fingerprint train/validation samples and unique graph inputs, never test data."""
     digest = hashlib.sha256()
     unique_snapshots = {}
+    fingerprints = [getattr(getattr(loader, "dataset", None), "data_fingerprint", None)
+                    for loader in (train_loader, val_loader)]
+    if all(isinstance(item, str) and item for item in fingerprints):
+        # Lazy (cohort_v4) datasets expose a content fingerprint of their
+        # memory-mapped shards and window tables instead of materialized samples.
+        digest.update(b"lazy-fingerprint-v1")
+        for split_name, fingerprint in zip(("train", "validation"), fingerprints):
+            digest.update(split_name.encode("ascii"))
+            digest.update(fingerprint.encode("ascii"))
+        return digest.hexdigest()
     for split_name, loader in (("train", train_loader), ("validation", val_loader)):
         dataset = getattr(loader, "dataset", None)
         samples = getattr(dataset, "samples", None)
@@ -238,6 +248,52 @@ def masked_auxiliary_speed_loss(preds: torch.Tensor, targets_kph: torch.Tensor,
 
 
 @torch.no_grad()
+def evaluate_val_metrics(model: nn.Module, val_loader, device: torch.device) -> dict:
+    """Validation MAE (selection metric, unchanged) plus diagnostic R² over active targets."""
+    model.eval()
+    abs_sum = 0.0
+    sq_sum = 0.0
+    y_sum = 0.0
+    y_sq_sum = 0.0
+    count = 0
+    for batch in val_loader:
+        batch_snaps, targets, masks = batch[:3]
+        targets = targets.to(device)
+        masks = masks.to(device)
+        preds = model(batch_snaps)
+        valid = masks.bool()
+        if valid.any():
+            truth = targets[valid].double()
+            residual = preds[valid].double() - truth
+            abs_sum += float(residual.abs().sum())
+            sq_sum += float(residual.square().sum())
+            y_sum += float(truth.sum())
+            y_sq_sum += float(truth.square().sum())
+            count += int(valid.sum())
+    if count == 0:
+        raise ValueError("Validation loader has no valid target nodes.")
+    total = y_sq_sum - (y_sum * y_sum) / count
+    return {"mae": abs_sum / count,
+            "r2": (1.0 - sq_sum / total) if count >= 2 and total > 0 else None,
+            "count": count}
+
+
+def _cosine_warmup_lambda(total_steps: int, warmup_steps: int, min_ratio: float):
+    """Linear warmup to 1, then cosine decay to ``min_ratio`` of the peak LR."""
+    total_steps = max(1, int(total_steps))
+    warmup_steps = max(0, min(int(warmup_steps), total_steps - 1))
+
+    def factor(step: int) -> float:
+        if warmup_steps and step < warmup_steps:
+            return max(min_ratio, (step + 1) / warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(max(progress, 0.0), 1.0)
+        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + np.cos(np.pi * progress))
+
+    return factor
+
+
+@torch.no_grad()
 def evaluate_val_mae(model: nn.Module, val_loader, device: torch.device) -> float:
     """
     Computes validation MAE across all active driver predictions.
@@ -279,6 +335,17 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     if loss_name not in loss_functions:
         raise ValueError("train.loss must be 'mae', 'mse', or 'smooth_l1'.")
     loss_function = loss_functions[loss_name]
+    if loss_name in ("smooth_l1", "huber") and "smooth_l1_beta" in t_cfg:
+        primary_beta = float(t_cfg["smooth_l1_beta"])
+        if not np.isfinite(primary_beta) or primary_beta <= 0:
+            raise ValueError("train.smooth_l1_beta must be finite and positive.")
+
+        def loss_function(preds, targets, masks, _beta=primary_beta):
+            return masked_smooth_l1_loss(preds, targets, masks, beta=_beta)
+    log_val_r2 = bool(t_cfg.get("log_val_r2", False))
+    grad_accum_steps = int(t_cfg.get("grad_accum_steps", 1))
+    if grad_accum_steps < 1:
+        raise ValueError("train.grad_accum_steps must be a positive integer.")
     log_every_batches = t_cfg.get("log_every_batches", 10)
     if (isinstance(log_every_batches, bool) or not isinstance(log_every_batches, int)
             or log_every_batches <= 0):
@@ -315,8 +382,24 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
     lr_scheduler_type = str(t_cfg.get("lr_scheduler", "none")).casefold()
+    if lr_scheduler_type not in ("none", "plateau", "cosine"):
+        raise ValueError("train.lr_scheduler must be 'none', 'plateau', or 'cosine'.")
     scheduler = None
-    if lr_scheduler_type == "plateau":
+    step_scheduler = None
+    if lr_scheduler_type == "cosine":
+        if len(train_loader) == 0:
+            raise ValueError("Training loader is empty.")
+        steps_per_epoch = int(np.ceil(len(train_loader) / grad_accum_steps))
+        warmup_epochs = int(t_cfg.get("warmup_epochs", 0))
+        min_lr = float(t_cfg.get("lr_scheduler_min_lr", 1e-5))
+        if min_lr < 0 or min_lr > lr:
+            raise ValueError("train.lr_scheduler_min_lr must be within [0, train.lr].")
+        step_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, _cosine_warmup_lambda(steps_per_epoch * max_epochs,
+                                             steps_per_epoch * warmup_epochs,
+                                             (min_lr / lr) if lr > 0 else 0.0))
+        scheduler = step_scheduler
+    elif lr_scheduler_type == "plateau":
         scheduler_patience = int(t_cfg.get("lr_scheduler_patience", 2))
         scheduler_factor = float(t_cfg.get("lr_scheduler_factor", 0.5))
         scheduler_min_lr = float(t_cfg.get("lr_scheduler_min_lr", 1e-5))
@@ -436,7 +519,8 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             targets = targets.to(device)
             masks = masks.to(device)
 
-            optimizer.zero_grad()
+            if (batch_index - 1) % grad_accum_steps == 0:
+                optimizer.zero_grad()
             if aux_enabled:
                 output = model(batch_snaps, return_aux=True)
                 if (not isinstance(output, tuple) or len(output) != 2
@@ -476,12 +560,16 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             ).sum()
             online_count = valid_primary.sum().to(dtype=loss.dtype)
 
-            loss.backward()
-            for name, parameter in model.named_parameters():
-                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-                    raise FloatingPointError(f"Non-finite gradient for {name} at epoch {epoch}.")
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            (loss / grad_accum_steps if grad_accum_steps > 1 else loss).backward()
+            step_now = (batch_index % grad_accum_steps == 0) or (batch_index == total_batches_per_epoch)
+            if step_now:
+                for name, parameter in model.named_parameters():
+                    if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
+                        raise FloatingPointError(f"Non-finite gradient for {name} at epoch {epoch}.")
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                if step_scheduler is not None:
+                    step_scheduler.step()
 
             # Transfer only detached scalar diagnostics; never retain graph tensors.
             stats = torch.stack(scalar_stats).cpu().tolist()
@@ -535,12 +623,23 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         logger.info("Epoch %03d/%03d validation started after %.1fs of training.",
                     epoch, max_epochs, train_elapsed)
         validation_started_at = time.perf_counter()
-        val_mae = evaluate_val_mae(model, val_loader, device)
+        if log_val_r2:
+            val_metrics = evaluate_val_metrics(model, val_loader, device)
+            val_mae = float(val_metrics["mae"])
+            val_r2 = val_metrics["r2"]
+        else:
+            val_mae = evaluate_val_mae(model, val_loader, device)
+            val_r2 = None
         validation_elapsed = time.perf_counter() - validation_started_at
         if not np.isfinite(val_mae):
             raise FloatingPointError(f"Non-finite validation MAE at epoch {epoch}.")
-        logger.info("Epoch %03d/%03d validation complete: Val MAE=%.6f s in %.1fs.",
-                    epoch, max_epochs, val_mae, validation_elapsed)
+        if log_val_r2:
+            logger.info("Epoch %03d/%03d validation complete: Val MAE=%.6f s | Val R2 (diagnostic)=%s in %.1fs.",
+                        epoch, max_epochs, val_mae,
+                        "n/a" if val_r2 is None else f"{val_r2:.4f}", validation_elapsed)
+        else:
+            logger.info("Epoch %03d/%03d validation complete: Val MAE=%.6f s in %.1fs.",
+                        epoch, max_epochs, val_mae, validation_elapsed)
 
         current_lr = float(optimizer.param_groups[0]["lr"])
         history_entry = {
@@ -549,8 +648,15 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             "train_online_mae": train_online_mae,
             "val_mae": val_mae,
         }
+        if log_val_r2:
+            history_entry["val_r2"] = val_r2
         if lr_scheduler_type != "none":
             history_entry["lr"] = current_lr
+        aero_coefficients = (model.aero_coefficients()
+                             if callable(getattr(model, "aero_coefficients", None)) else None)
+        if aero_coefficients:
+            for key in ("corner_loss_a", "straight_gain_b", "drs_gain_d", "decay_k"):
+                history_entry[f"aero_{key}"] = aero_coefficients[key]
         history.append(history_entry)
 
         train_unit = ("weighted objective" if aux_enabled else
@@ -583,6 +689,10 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
                                    if scaler is not None and hasattr(scaler, "mean_") else None),
                 "edge_feature_scaler": edge_scaler.metadata() if edge_scaler is not None else None,
             }
+            if log_val_r2:
+                checkpoint["val_r2"] = val_r2
+            if aero_coefficients:
+                checkpoint["aero_coefficients"] = aero_coefficients
             if scheduler is not None:
                 checkpoint["scheduler_state_dict"] = scheduler.state_dict()
             best_checkpoint_state = copy.deepcopy(checkpoint)
@@ -592,7 +702,7 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
             checkpoint_updated = False
             patience_counter += 1
 
-        if scheduler is not None:
+        if scheduler is not None and step_scheduler is None:
             scheduler.step(val_mae)
 
         primary_epoch_loss = primary_loss_sum / max(primary_valid_count, 1)
@@ -643,8 +753,11 @@ def train_model(model: nn.Module, train_loader, val_loader, config: dict, device
         fieldnames = ["epoch", "train_loss", "train_online_mae", "val_mae"]
         if any("lr" in row for row in history):
             fieldnames.append("lr")
+        # Older resumed histories may lack the diagnostic columns.
+        extra = sorted({key for row in history for key in row} - set(fieldnames))
+        fieldnames.extend(extra)
         with history_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
             writer.writeheader()
             writer.writerows(history)
     if not np.isfinite(best_val_mae):

@@ -104,6 +104,8 @@ train:
   lr_scheduler: "cosine"
   warmup_epochs: 1
   lr_scheduler_min_lr: 0.00001
+  # Diagnostic only: selection stays validation MAE.
+  log_val_r2: true
   checkpoint_path: "data/processed/fastf1_2023_season_gnnv4/best.pt"
   num_workers: 0
 
