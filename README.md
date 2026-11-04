@@ -54,6 +54,10 @@ uv run --frozen python hammertime_100/run_2023_fastf1_season.py --config hammert
 
 The runner uses the existing season-held-out protocol and unchanged evaluation gates. Do not interpret a successful preparation or training run as a performance result; record the prepared manifest and held-out evaluation before making a research claim.
 
+### GNNv4 candidate
+
+GNNv4 adds causal in-race speed references (`circuit_context_v3`), a continuous wake edge channel (`physical_v3`), an interpretable aero wake head, a memory-mapped compact cohort, and CUDA→CPU launchers for Linux (`hammertime_100/tools/train_gnnv4.sh`) and Windows (`hammertime_100/tools/train_gnnv4.ps1`). See the [GNNv4 runbook](hammertime_100/docs/GNNV4_RUNBOOK.md) and the [R² root-cause note](hammertime_100/docs/research/gnnv4_r2_root_cause.md). No GNNv4 score has been measured.
+
 For native Windows setup on an RTX 4060, PowerShell raw-data transfer, CUDA readiness check, and season-runner instructions, see the [Windows GNNv2 GPU runbook](hammertime_100/docs/WINDOWS_GPU_RUNBOOK.md).
 
 For a run that must not authenticate to FastF1 or request race data, transfer the complete `race_cache/raw_sessions` directory from a trusted source run and use local-data-only mode. It verifies hashes and the full registered 22-race inventory before normalization; missing or invalid races stop the run without a network fallback. Hash checks detect transfer corruption, while the manifests do not cryptographically attest data origin. Dependency installation may still access package indexes, but this mode does not use FastF1 authentication, calendar discovery, or source downloads:

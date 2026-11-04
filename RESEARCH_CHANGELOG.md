@@ -1,5 +1,17 @@
 # Research and Change Record
 
+## GNNv4 R² root cause, aero head and memory-safe cohort — 2026-11-04
+
+On branch `dev/gnnv4`. Added the read-only `hammertime_100/tools/diagnose_r2.py` and ran it on the authentic 22-race normalized source. Findings:
+- The target is noise-dominated: a contemporaneous-gap explanatory ceiling reaches only test R² 0.09–0.15, and clean-air lap-to-lap repeatability has median r 0.19.
+- Integrated lap distance averages 98.8% of circuit length.
+- 8 of 11 `circuit_context_v2` inputs were constant in the season cohort.
+- The DRS-train gate is almost never measurable at stride 2.
+
+Added `circuit_context_v3` (causal in-race speed references, RaceProgress, StintLap), `physical_v3` (continuous wake weight), an opt-in interpretable aero wake head, opt-in training keys (Huber β, cosine warmup, gradient accumulation, validation R² logging), the memory-mapped `cohort_v4` with lazy windows and memory preflight, the `train_gnnv4.py` runner with CUDA→CPU fallback, and `tools/train_gnnv4.sh` / `.ps1`. Review-gated target/coverage candidates (distance rescale, physical-order gap, detrended reference, lap-1/yellow exclusion) are implemented as flags that are OFF. Targets, splits, metrics, gates and physics thresholds are unchanged; supplementary diagnostics are labelled separately.
+
+Only unit and fixture tests and a launcher preflight (hash/memory/model checks) were run; no GNNv4 cohort was built and no training or evaluation was run. The 2 test failures that existed on `dev/gnnv3` (`test_ablation_runner` gated MSE, `test_gnnv2_model` relation zero) remain. See `hammertime_100/docs/research/gnnv4_r2_root_cause.md` and `hammertime_100/docs/GNNV4_RUNBOOK.md`.
+
 ## Numba feasibility for preprocessing — 2026-11-03
 
 Profiled source-level Numba candidates and compared a temporary Numba 0.68 typed-array prototype with the full physical-circuit edge-builder wrapper on synthetic 20-car fixtures. Exact outputs matched across packed and sparse fixtures, but warm timings varied by edge density and differed by only a few microseconds per frame; first-call compilation cost about 0.55 s. No authentic Windows race data or run logs were available. Numba was not added to runtime dependencies or `uv.lock`, and production code was unchanged. The benchmark script, compatibility evidence, results, and limitations are documented in `hammertime_100/docs/research/numba_preprocessing_assessment.md` and `hammertime_100/tools/benchmarks/numba_physical_graph_microbenchmark.py`; raw output is in ignored `.local/research-history/`.
