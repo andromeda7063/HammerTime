@@ -8,7 +8,7 @@ import torch
 import yaml
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset
-from physical_graph import PhysicalEdgeFeatureScaler
+from physical_graph import EDGE_FEATURES_BY_SCHEMA, TYPED_EDGE_SCHEMAS, PhysicalEdgeFeatureScaler
 
 logger = logging.getLogger("hammertime.dataset")
 
@@ -394,11 +394,13 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
     scaler = fit_and_apply_scaler(snapshots, train_indices)
     edge_scaler = PhysicalEdgeFeatureScaler().fit(snapshots, train_indices)
     if bool(model_cfg.get("typed_edge_values", False)):
-        if config.get("graph", {}).get("edge_feature_schema") != "physical_v2":
-            raise ValueError("Typed edge-value training requires graph.edge_feature_schema='physical_v2'.")
+        typed_schema = config.get("graph", {}).get("edge_feature_schema")
+        if typed_schema not in TYPED_EDGE_SCHEMAS:
+            raise ValueError("Typed edge-value training requires graph.edge_feature_schema='physical_v2' or 'physical_v3'.")
+        typed_width = len(EDGE_FEATURES_BY_SCHEMA[typed_schema])
         # Preserve the configured schema in scaler metadata even when no
         # training snapshot happens to contain a physical edge.
-        edge_scaler.schema_ = "physical_v2"
+        edge_scaler.schema_ = typed_schema
         # The scaler is fit only on unique training-input snapshots above.
         # Always start from the preserved raw physical attrs so repeated loader
         # construction cannot transform already-scaled values a second time.
@@ -407,12 +409,12 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
             physical_index = getattr(snapshot, "edge_index_physical_circuit", None)
             active_index = getattr(snapshot, "edge_index", None)
             if (not isinstance(raw_attrs, torch.Tensor) or raw_attrs.ndim != 2
-                    or raw_attrs.size(1) != 5 or not isinstance(physical_index, torch.Tensor)
+                    or raw_attrs.size(1) != typed_width or not isinstance(physical_index, torch.Tensor)
                     or not isinstance(active_index, torch.Tensor)
                     or raw_attrs.size(0) != physical_index.size(1)
                     or not torch.equal(active_index, physical_index)):
                 raise ValueError(
-                    "Typed edge-value training requires active edge_index/edge_attr from the stored physical_v2 graph."
+                    f"Typed edge-value training requires active edge_index/edge_attr from the stored {typed_schema} graph."
                 )
             snapshot.edge_attr = edge_scaler.transform(raw_attrs)
     # Windows hold references to snapshots, so the transformation is reflected in all splits.
@@ -440,6 +442,10 @@ def create_dataloaders(snapshots: list, labels_df: pd.DataFrame, driver_to_idx: 
         return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                           collate_fn=collate_st_graph_windows, num_workers=num_workers,
                           generator=generator)
-    logger.info("Chronological split: train=%d, validation=%d, test=%d (purged %d windows per boundary)",
-                len(train_samples), len(val_samples), len(test_samples), W + K)
+    if method == "race":
+        logger.info("Race-held-out split: train=%d, validation=%d, test=%d windows (no purge; races are disjoint)",
+                    len(train_samples), len(val_samples), len(test_samples))
+    else:
+        logger.info("Chronological split: train=%d, validation=%d, test=%d (purged %d windows per boundary)",
+                    len(train_samples), len(val_samples), len(test_samples), W + K)
     return loader(train_samples, True), loader(val_samples, False), loader(test_samples, False), scaler

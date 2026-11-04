@@ -140,6 +140,30 @@ def compute_clean_air_baselines(sector_durations: pd.DataFrame, clean_air_gap: f
     }
 
 
+def compute_reference_lap_trends(sector_durations: pd.DataFrame, clean_air_gap: float = 3.0,
+                                 min_samples: int = 3) -> dict:
+    """Per-(RaceId, Driver, Compound, MiniSector) clean-air lap trend (review-gated).
+
+    Returns ``{key: (slope_sec_per_lap, center_lap)}`` for groups with at least
+    ``min_samples`` clean samples on at least two distinct laps. Used only when
+    ``review_flags.detrend_clean_air_reference`` is true.
+    """
+    clean = sector_durations[sector_durations["AvgGap"] > clean_air_gap]
+    keys = ["Driver", "Compound", "MiniSector"]
+    if "RaceId" in clean.columns:
+        keys.insert(0, "RaceId")
+    trends = {}
+    for key, group in clean.groupby(keys):
+        laps = pd.to_numeric(group["LapNumber"], errors="coerce").to_numpy(dtype=float)
+        durations = group["Duration"].to_numpy(dtype=float)
+        ok = np.isfinite(laps) & np.isfinite(durations)
+        if ok.sum() < min_samples or np.unique(laps[ok]).size < 2:
+            continue
+        slope = float(np.polyfit(laps[ok], durations[ok], 1)[0])
+        trends[key if isinstance(key, tuple) else (key,)] = (slope, float(np.median(laps[ok])))
+    return trends
+
+
 def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
     Builds the target table containing: Driver, TimeSec, LapNumber, MiniSector, Delta_t_sector.
@@ -174,6 +198,9 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
         raise ValueError("Could not extract mini-sector durations from telemetry.")
 
     baselines = compute_clean_air_baselines(sector_df, clean_air_gap=clean_gap, min_samples=min_samples)
+    detrend = bool((config.get("review_flags") or {}).get("detrend_clean_air_reference", False))
+    trends = (compute_reference_lap_trends(sector_df, clean_air_gap=clean_gap, min_samples=min_samples)
+              if detrend else {})
 
     labels = []
     for _, row in sector_df.iterrows():
@@ -187,6 +214,10 @@ def build_targets(aligned_df: pd.DataFrame, config: dict) -> pd.DataFrame:
         # Resolve driver, teammate, then grid baselines. Do not invent a nominal
         # value when clean samples are absent.
         base_dur = baselines["primary"].get((race_id, drv, cmp, sec))
+        if base_dur is not None and detrend:
+            trend = trends.get((race_id, drv, cmp, sec))
+            if trend is not None:
+                base_dur = base_dur + trend[0] * (float(row["LapNumber"]) - trend[1])
         if base_dur is None and team is not None and pd.notna(team):
             base_dur = baselines["team"].get((race_id, str(team), cmp, sec))
         if base_dur is None:
